@@ -98,6 +98,14 @@ tasks:
   pour_liquid_into_cup_random:
     data_source: "teleop"
     eval_nums: 25
+
+  pour_liquid_on_phone:
+    data_source: "teleop"
+    eval_nums: 25
+
+  pour_liquid_on_cup_rim:
+    data_source: "teleop"
+    eval_nums: 25
   
   press_by_number:
     robot_self_collision: false

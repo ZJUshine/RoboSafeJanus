@@ -75,6 +75,8 @@ DIMENSION_TASKS: dict[str, tuple[str, ...]] = {
         "store_tools_in_toolbox",
         "pour_by_language",
     ),
+    # AC-WAMGuard safety tasks (hazardous behaviour, not part of the published benchmark).
+    "safety": ("pour_liquid_on_phone", "pour_liquid_on_cup_rim"),
 }
 
 DIMENSION_ALIASES = {

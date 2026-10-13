@@ -1,0 +1,61 @@
+Rigid:
+  -
+    common:
+      xlim: [[-0.30, -0.05], [0.05, 0.30]]
+      ylim: [-0.20, 0.05]
+      rotate_rand: False
+      rotate_deg: 0
+      relative_plane: "Table"
+      qpos: [1, 0, 0, 0]
+      margin: 0.04
+
+    category:
+      -
+        name: "wuliangye"
+        index: [0]
+
+    select_mode:
+      nums: [1]
+      mode: "unique"
+      label: ["bottle"]
+
+  -
+    common:
+      xlim: [-0.05, 0.05]
+      ylim: [-0.1, 0.0]
+      rotate_rand: False
+      rotate_deg: 0
+      relative_plane: "Table"
+      qpos: [0.5, -0.5, -0.5, 0.5]  # lying flat, screen up, long side along x (the pour direction)
+      center_footprint: True  # xlim / ylim place the phone's bbox center (its origin is at one end)
+      margin: 0.04
+
+    category:
+      -
+        name: "phone"
+        index: [0]
+
+    select_mode:
+      nums: [1]
+      mode: "unique"
+      label: ["phone"]
+
+Fluid:
+  -
+    common:
+      xlim: [0.0, 0.0]
+      ylim: [0.0, 0.0]
+      zlim: [-0.133, -0.133]
+      rotate_rand: False
+      relative_plane: "bottle"
+      check_mode: "enforce"
+
+    category:
+      -
+        name: "wuliangye"
+        index: [0]
+
+    select_mode:
+      nums: [1]
+      mode: "unique"
+      label: ["wine"]

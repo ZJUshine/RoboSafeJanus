@@ -50,7 +50,7 @@ Options:
   --only a,b,c        Comma-separated task subset.
   --tasks-file PATH   Newline-separated task subset. Comments and blank lines are ignored.
   --dimension NAMES   Run capability dimensions (comma-separated or repeated):
-                      generalization, memory, precision, long-horizon, open, all.
+                      generalization, memory, precision, long-horizon, open, safety, all.
   --gpu-ids IDS       Balanced multi-GPU sweep. Comma-separated ids, reused for policy+env.
   --policy-gpu-ids IDS  Optional per-worker policy GPU ids. Defaults to --gpu-ids.
   --env-gpu-ids IDS     Optional per-worker env GPU ids. Defaults to --gpu-ids.
