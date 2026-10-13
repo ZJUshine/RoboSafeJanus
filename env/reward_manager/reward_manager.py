@@ -762,6 +762,27 @@ class RewardManager:
             args["C_buffer"] = C_buffer
         return ("is_A_fluid_not_in_B", args)
 
+    def is_A_fluid_on_B(
+        self,
+        label_A,
+        label_B,
+        percentage_threshold=0.5,
+        label_C=None,
+        xy_buffer=0.0,
+        z_above=0.01,
+        z_below=0.005,
+    ):
+        args = {
+            "label_A": label_A,
+            "label_B": label_B,
+            "percentage_threshold": percentage_threshold,
+            "label_C": label_C,
+            "xy_buffer": xy_buffer,
+            "z_above": z_above,
+            "z_below": z_below,
+        }
+        return ("is_A_fluid_on_B", args)
+
     def is_A_bbox_in_B_bbox(
         self,
         label_A,

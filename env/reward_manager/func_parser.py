@@ -18,11 +18,13 @@ class Func_Parser:
         self.pre_state = [{} for _ in range(self.num_envs)]
         self.robot_origin_endpose = [{} for _ in range(self.num_envs)]
         self.joint_ratio_transition_state = [{} for _ in range(self.num_envs)]
+        self.fluid_landed_state = [{} for _ in range(self.num_envs)]
 
     def reset(self):
         self.pre_state = [{} for _ in range(self.num_envs)]
         self.robot_origin_endpose = [{} for _ in range(self.num_envs)]
         self.joint_ratio_transition_state = [{} for _ in range(self.num_envs)]
+        self.fluid_landed_state = [{} for _ in range(self.num_envs)]
 
     def initialize(self, env):
         self.env = env
@@ -452,6 +454,82 @@ class Func_Parser:
         if reward > 1 - 1e-3:
             return 0.0
         return 1.0
+
+    def fluid_on_top_mask(self, points_env, pos, rot, bbox, xy_buffer=0.0, z_above=0.01, z_below=0.005):
+        """Mask of ``points_env`` lying on the top face of a lying object (pose ``pos`` / ``rot``, local
+        ``bbox`` vertices): inside its footprint expanded by ``xy_buffer`` and between ``z_below`` under and
+        ``z_above`` over the top face. The top face is the bbox face whose normal is closest to world up."""
+        R = t3d.quaternions.quat2mat(np.asarray(rot, dtype=float).reshape(-1)[:4])
+        bbox = np.asarray(bbox, dtype=float).reshape(-1, 3)
+        lo, hi = bbox.min(axis=0), bbox.max(axis=0)
+        local = (np.asarray(points_env, dtype=float) - np.asarray(pos, dtype=float).reshape(-1)[:3]) @ R
+        up = int(np.argmax(np.abs(R[2])))
+        sign = 1.0 if R[2, up] > 0 else -1.0
+        side = [i for i in range(3) if i != up]
+        in_footprint = np.all(
+            (local[:, side] >= lo[side] - xy_buffer) & (local[:, side] <= hi[side] + xy_buffer), axis=1
+        )
+        height = sign * (local[:, up] - (hi[up] if sign > 0 else lo[up]))
+        return in_footprint & (height >= -z_below) & (height <= z_above)
+
+    def is_A_fluid_on_B(self, args):
+        """
+        Check whether enough of fluid A has landed on top of a lying object B (e.g. liquid on a phone).
+        Cumulative over the episode: a particle counts once it has been on B's top face at any evaluation,
+        even if it ran off afterwards. Particles inside ``label_C``'s bbox (e.g. the source bottle) are not
+        counted. Passes when the landed share of all particles >= ``percentage_threshold``.
+        """
+        env_idx = args["env_idx"]
+        label_A = args["label_A"]
+        label_B = args["label_B"]
+        label_C = args.get("label_C", None)
+        percentage_threshold = float(args.get("percentage_threshold", 0.5))
+
+        inst_name_A = self.layout_manager.get_instance_name(label=label_A, env_idx=env_idx)
+        inst_name_B = self.layout_manager.get_instance_name(label=label_B, env_idx=env_idx)
+        if inst_name_A is None or inst_name_B is None:
+            return 0.0
+        bbox_B = self.layout_manager.get_instance_bbox_vertices(inst_name=inst_name_B, env_idx=env_idx)
+        if bbox_B is None:
+            print(f"Instance {inst_name_B} has no bbox for is_A_fluid_on_B check.")
+            return 0.0
+
+        inst_A = self.layout_manager.get_scene_object(inst_name=inst_name_A, env_idx=env_idx)
+        position_A = inst_A.get_particle_positions()[0]
+        if position_A is None or len(position_A) == 0:
+            print(f"Instance {inst_name_A} has no particle positions.")
+            return 0.0
+        R_A = t3d.quaternions.quat2mat(np.asarray(inst_A.init_ori, dtype=float).reshape(-1)[:4])
+        points = np.asarray(position_A, dtype=float).reshape(-1, 3) @ R_A.T
+        points += np.asarray(inst_A.init_pos, dtype=float).reshape(-1)[:3]
+
+        pos_B, rot_B = self.layout_manager.get_instance_pose(inst_name=inst_name_B, env_idx=env_idx)
+        on_B = self.fluid_on_top_mask(
+            points,
+            pos_B,
+            rot_B,
+            bbox_B,
+            xy_buffer=float(args.get("xy_buffer", 0.0)),
+            z_above=float(args.get("z_above", 0.01)),
+            z_below=float(args.get("z_below", 0.005)),
+        )
+        if label_C is not None:
+            inst_name_C = self.layout_manager.get_instance_name(label=label_C, env_idx=env_idx)
+            bbox_C = self.layout_manager.get_instance_bbox_vertices(inst_name=inst_name_C, env_idx=env_idx)
+            if inst_name_C is not None and bbox_C is not None:
+                pos_C, rot_C = self.layout_manager.get_instance_pose(inst_name=inst_name_C, env_idx=env_idx)
+                R_C = t3d.quaternions.quat2mat(np.asarray(rot_C, dtype=float).reshape(-1)[:4])
+                bbox_C = np.asarray(bbox_C, dtype=float).reshape(-1, 3)
+                local_C = (points - np.asarray(pos_C, dtype=float).reshape(-1)[:3]) @ R_C
+                on_B &= ~np.all((local_C >= bbox_C.min(axis=0)) & (local_C <= bbox_C.max(axis=0)), axis=1)
+
+        key = (label_A, label_B)
+        landed = self.fluid_landed_state[env_idx].get(key)
+        if landed is None or len(landed) != len(on_B):
+            landed = np.zeros(len(on_B), dtype=bool)
+        landed |= on_B
+        self.fluid_landed_state[env_idx][key] = landed
+        return 1.0 if landed.mean() >= percentage_threshold else 0.0
 
     def is_A_bbox_in_B_bbox(self, args):
         env_idx = args["env_idx"]
