@@ -6,14 +6,12 @@
 
 ## 0. 速览
 
-两条采集管线,输出都是 XPolicyLab xspark v1.0 HDF5(与已发布的 RoboDojo 数据同格式),默认**只保存通过任务自身 `run_reward` 判定的 episode**:
-
+两条采集管线,输出都是 XPolicyLab xspark v1.0 HDF5(与已发布的 RoboDojo 数据同格式),默认**只保存通过任务自身** `run_reward` **判定的 episode**:
 
 | 管线           | 入口脚本                                                   | Python 入口                    | 录制内容              | 是否需要重放                           | 默认起始 seed | 输出目录                                    |
 | ------------ | ------------------------------------------------------ | ---------------------------- | ----------------- | -------------------------------- | --------- | --------------------------------------- |
 | 脚本专家(cuRobo) | `scripts/collect_data.sh` / `collect_data_parallel.sh` | `src/data_collect/expert_collection.py`   | 边执行边渲染相机,直接写 HDF5 | 否                                | `100000`  | `data/RoboDojo/<task>/<config>/`        |
 | PICO 遥操作     | `scripts/teleop_collect.sh`                            | `src/data_collect/teleop_collection.py` | 只录关节指令(不渲染观测相机)   | **是**,`scripts/teleop_replay.sh` | `200000`  | `data/RoboDojo/<task>/<config>_teleop/` |
-
 
 ```
 脚本专家:   collect_data.sh ──► expert_collection.py ──► data/RoboDojo/<task>/<config>/{data,preview_video,layout}
@@ -28,7 +26,6 @@
 - 运行前先 `conda activate RoboDojo`(`collect_data.sh` / `teleop_replay.sh` 会检查 `python` 是否可用)。所有脚本都会 `cd` 到仓库根并设置 `PYTHONPATH=.:XPolicyLab`。
 
 ### 代码地图
-
 
 | 文件                                                                | 作用                                         | 什么时候要改             |
 | ----------------------------------------------------------------- | ------------------------------------------ | ------------------ |
@@ -45,7 +42,7 @@
 | `src/data_collect/merge_shards.py`                                | 合并并行 worker 的分片                            | 一般不改               |
 | `src/data_collect/teleop_collection.py` / `xr_input.py` / `teleop_replay.py` | 遥操作录制、手柄输入、重放渲染                            | 改按键映射 / IK / 输入设备  |
 | `src/data_collect/eval_layouts.py`                                | 为新任务 / 探针任务冻结评测布局                          | 需要新增评测布局时          |
-
+| `src/data_collect/upload_to_hf.py`                                | 把 `data/RoboDojo` 同步到 HF 私有 dataset 仓库         | 一般不改               |
 
 ---
 
@@ -61,7 +58,6 @@
 
 **LayoutGenerator 支持的 YAML 写法**(否则抛 `UnsupportedLayoutError`):
 
-
 | 对象类型                        | 支持                                                                                                                                                                                                                                                |
 | --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `Rigid`                     | `relative_plane: Table` + `xlim`/`ylim`(`xlim` 可以是多段,如 `[[-0.3,-0.05],[0.05,0.3]]`)、`zlim`、`qpos`、`rotate_rand`/`rotate_deg`、`margin`、`common.physics` 覆盖;或 `relative_plane: <固定件 label>/<support tag>` 放到固定件的支撑面上(如 `bread_shelf/bread_shelf/0`) |
@@ -71,10 +67,9 @@
 | `select_mode.nums`          | `int`、`[n]`、或闭区间 `[min, max]`(每个布局随机)                                                                                                                                                                                                             |
 | 其他(`Garment`、`Dynamic` 等)   | 不支持,只能 `--layout_source eval` 或扩展 `layout_generator.py`(见 7.5)                                                                                                                                                                                    |
 
-
 物体之间按「xy 平面圆盘不重叠」放置(半径 = 旋转后 bbox 在 xy 的最大半径 + `margin`)。某个 seed 放不下时,会用 `"{seed}/{attempt}"` 派生 seed 重抽整个布局(最多 20 次),仍是确定性的。
 
-> ⚠️ **任务依赖固定件(垃圾桶、传送带、面包架……)或 Fluid、且还没有自己的评测布局时,必须用 `--layout_template` 指向一个固定件相同的任务**。否则会回退到 `stack_bowls`,场景缺少固定件,专家会在 `get_obj_pose("<label>")` 处报 `No instance found with label ...`。
+> ⚠️ **任务依赖固定件(垃圾桶、传送带、面包架……)或 Fluid、且还没有自己的评测布局时,必须用** `--layout_template` **指向一个固定件相同的任务**。否则会回退到 `stack_bowls`,场景缺少固定件,专家会在 `get_obj_pose("<label>")` 处报 `No instance found with label ...`。
 >
 > ```bash
 > bash scripts/collect_data.sh <new_task> 100 0 --layout_template <有相同固定件的任务>
@@ -106,7 +101,6 @@ bash scripts/collect_data.sh pour_liquid_into_cup 100 0 --keep_failed
 
 `**expert_collection.py` 参数**:
 
-
 | 参数                                      | 默认                       | 说明                                                        |
 | --------------------------------------- | ------------------------ | --------------------------------------------------------- |
 | `--task_name`                           | 必填                       | 同时决定专家模块 `task/RoboDojo/experts/<task>.py`                |
@@ -120,16 +114,13 @@ bash scripts/collect_data.sh pour_liquid_into_cup 100 0 --keep_failed
 | `--save_fail_video`                     | 关                        | 失败尝试写 `video_fail/seed_<seed>_<camera>.mp4`               |
 | `--keep_failed`                         | 关                        | 失败尝试(布局不稳除外)写到 `<save_dir>/<task>_failed/<config>/`,见 2.4 |
 
-
 **环境变量**:
-
 
 | 变量                               | 默认                | 作用                                                         |
 | -------------------------------- | ----------------- | ---------------------------------------------------------- |
 | `ROBODOJO_COLLECT_CHUNK`         | `15`              | 每个 Python 进程最多尝试几次                                         |
 | `ROBODOJO_COLLECT_CHUNK_TIMEOUT` | `chunk×120+300` 秒 | 单个进程超时后强杀并续采                                               |
 | `ROBODOJO_COLLECT_LOG`           | `WARNING`         | `task.`* logger 的级别(专家里 `logging.getLogger(__name__)` 的输出) |
-
 
 ### 2.2 分块与续采
 
@@ -139,6 +130,7 @@ Isaac Sim 反复加载场景会泄漏渲染资源,单进程跑几十条后可能
 - `next_seed.txt`:下一个要尝试的 seed(跳过已失败的)。
 
 因此:**中断后重跑同一条命令即可续采**;调大 `episode_num` 会接着往下采;要从头来就删除整个 `data/RoboDojo/<task>/<config>/`。
+达到尝试上限仍未采满时,脚本打印 `incomplete` 并返回非零。
 
 ### 2.3 多进程并行:`scripts/collect_data_parallel.sh`
 
@@ -152,19 +144,19 @@ ROBODOJO_PER_GPU=3 bash scripts/collect_data_parallel.sh pour_liquid_into_cup 10
 - worker 数 = `GPU 数 × ROBODOJO_PER_GPU`(默认 3),不超过 `episode_num`;episode 均分。
 - worker `k` 用 seed 段 `start_seed + k × ROBODOJO_SEED_STRIDE`(默认 1000),写到 `<save_dir>/_shards/<task>/w<k>/`,日志在 `_shards/<task>/logs/w<k>.log`。每个 worker 启动间隔 5 s。
 - 每个 worker 最多尝试 `10 × 分到的条数`,必须 ≤ stride,否则脚本报错退出(调大 `ROBODOJO_SEED_STRIDE`)。
-- 全部结束后自动运行 `merge_shards.py`:按 worker 顺序把成功 episode 复制、**重新编号**到 `<save_dir>/<task>/<config>/`,失败的复制到 `<task>_failed/<config>/`,汇总 `collect_info.json`。已存在于目标 `seed.txt` / `fail_info.jsonl` 的 seed 会跳过,所以**重跑即续采 + 重新合并**,无副作用。
+- 全部结束后自动运行 `merge_shards.py`:按 worker 顺序把成功 episode 复制、**重新编号**到 `<save_dir>/<task>/<config>/`,失败的复制到 `<task>_failed/<config>/`,汇总 `collect_info.json`。已存在于目标 `seed.txt` / `fail_info.jsonl` 的 seed 会跳过。分片续采记录仍在时,重跑会续采并重新合并;默认完整清理后,再次采集新数据需用 `--start_seed` 指定新的、不重叠的 seed 段。
 - 手动合并:
   ```bash
   python src/data_collect/merge_shards.py --task_name pour_liquid_into_cup \
     --shard_root data/RoboDojo/_shards/pour_liquid_into_cup --config_name arx_x5
   ```
 - 合并是**复制后删除**:每条 episode 在目标中存在且大小一致后,才删掉分片里的 hdf5 / layout / 预览视频;分片的 `video_fail/` 也一并删除。目标中缺失或大小不一致的 episode 不删,并打印提示。加 `--keep_shards` 可以只复制不删。
-- `collect_data_parallel.sh` 在合并成功后删掉整个分片目录 `<save_dir>/_shards/<task>`(`--remove_shards`,含各 worker 的 `seed.txt` / `next_seed.txt` / `collect_info.json` / `logs/`),不留续采记录;有 episode 缺失或与目标不一致时只提示、不删。手动合并加 `--keep_shards` 则分片目录保留,worker 仍按分片里的 `seed.txt` 续采。
+- `collect_data_parallel.sh` 在所有 worker 和合并均成功后删掉整个分片目录 `<save_dir>/_shards/<task>`(`--remove_shards`,含各 worker 的 `seed.txt` / `next_seed.txt` / `collect_info.json` / `logs/`),不留续采记录;最后一个任务清理后,空的 `_shards/` 也删除。任一 worker 失败时仍合并已采集的数据,保留分片和日志供续采,并返回非零。有 episode 在目标中缺失、大小不一致,或目录内还有未记录的数据 / 其他配置时,也保留分片目录并返回非零。并行采集或手动合并加 `--keep_shards` 则保留所有分片文件;它与 `--remove_shards` 互斥。
+- 清理旧版本遗留的记录和日志,可在上面的手动合并命令后加 `--remove_shards`;脚本会先核对对应的目标 HDF5 和剩余数据,验证通过后才删除目录。
 
 ### 2.4 失败分类与 `--keep_failed`
 
 `expert_collection.py` 对每次尝试的结果分类:
-
 
 | `fail_type`    | 来源                                                                                        | 典型信息 / 处理                                                                                                                         |
 | -------------- | ----------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
@@ -172,7 +164,6 @@ ROBODOJO_PER_GPU=3 bash scripts/collect_data_parallel.sh pour_liquid_into_cup 10
 | `plan_failed`  | `PlanFailError`(cuRobo 无解、只有越界解、候选链都不可达;`grasp_actor` 没有通过过滤的 GraspGenX 候选)               | `none of N candidate chains is reachable` → 增加候选或收窄 `xlim/ylim`;`no GraspGenX grasp ... passes the filters` → 放宽 `grasp_actor` 过滤 |
 | `expert_error` | 专家抛出的其他异常(如 `GraspLostError`、`KeyError`;缺抓取缓存时的 `FileNotFoundError`) | 会打印 traceback;看异常信息;`no GraspGenX grasps for ...` → 先跑 `gen_grasps.sh`(7.10 节)                                                    |
 | `check_failed` | 专家跑完,`check_success()` 未通过                                                                | 信息里列出未通过的检查项,例如 `['is_A_fluid_in_B (on rising_edge of is_axis_up)']`;配合 `--save_fail_video` 看                                     |
-
 
 `--keep_failed` 输出(与成功目录结构相同):
 
@@ -232,7 +223,6 @@ bash scripts/teleop_collect.sh pour_liquid_into_cup 1 0 --input scripted --headl
 
 ### 3.2 手柄操作(左手柄 → `left_arm`,右手柄 → `right_arm`)
 
-
 | 按键          | 作用                                 |
 | ----------- | ---------------------------------- |
 | 握持键(grip)按住 | 离合:手臂跟随手柄**相对于按下时刻**的位移和转动;松开即脱离   |
@@ -241,14 +231,12 @@ bash scripts/teleop_collect.sh pour_liquid_into_cup 1 0 --input scripted --headl
 | 右手 B        | 结束:运行成功判定,通过(或 `--keep_failed`)则保存 |
 | 左手 Y        | 放弃本次尝试,加载下一个布局                     |
 
-
 - 物理在第一次按 grip / trigger 之前是暂停的,可以先看清布局。
 - 手部运动按「操作者面向机器人前方 +y(Isaac 窗口视角)」映射。面对显示器时长按 PICO 键重新校准,或用 `--operator_yaw <deg>` 旋转映射。
 - 某只手柄追踪丢失超过 0.3 s 视为松开 grip,恢复后需重新按 grip。
 - 终端每 10 s 打印控制频率和实时因子(`x real time`);低于 1 说明仿真跟不上。
 
 ### 3.3 `teleop_collection.py` 参数
-
 
 | 参数                                      | 默认             | 说明                                                        |
 | --------------------------------------- | -------------- | --------------------------------------------------------- |
@@ -264,7 +252,6 @@ bash scripts/teleop_collect.sh pour_liquid_into_cup 1 0 --input scripted --headl
 | `--operator_yaw`                        | `0`            | 手→机器人映射绕 z 旋转(度)                                          |
 | `--keep_failed`                         | 关              | 判定失败也保存                                                   |
 | `--keep_cameras`                        | 关              | 录制时也渲染观测相机(调试用,会变慢)                                       |
-
 
 ### 3.4 输出(还不能直接训练)
 
@@ -295,7 +282,6 @@ PYTHONPATH=.:XPolicyLab CUDA_VISIBLE_DEVICES=0 python src/data_collect/teleop_re
 
 > `.sh` 只统计「既无 HDF5 也不在 `replay_info.json`」的 episode;给 `.sh` 传 `--redo` 只会打印警告,若所有 episode 都已处理过,循环直接结束、**什么都不会重渲**。
 
-
 | 参数                              | 说明                                         |
 | ------------------------------- | ------------------------------------------ |
 | `--env_cfg_type` / `--save_dir` | 必须与录制时一致(任务名、`env_cfg_type`、`dt` 不一致会直接报错) |
@@ -303,7 +289,6 @@ PYTHONPATH=.:XPolicyLab CUDA_VISIBLE_DEVICES=0 python src/data_collect/teleop_re
 | `--redo`                        | 重新渲染已有 HDF5 的 episode                      |
 | `--no_video`                    | 不写预览视频                                     |
 | `--max_episodes`                | 本进程最多处理条数(`.sh` 分块时自动设置)                   |
-
 
 - **分块**:每 `ROBODOJO_REPLAY_CHUNK`(默认 10)条换新进程,超时 `ROBODOJO_REPLAY_CHUNK_TIMEOUT`(默认 `chunk×180+300` 秒)。重跑即续跑;一个进程没有任何进展时脚本停下,避免死循环。
 - `**replay_info.json`**:每条的 `seed`、回放 `success`、`joint_drift`(回放末态与录制末态的最大关节误差,正常约 `1e-18` rad)。drift 明显偏大说明回放不确定(例如录制后改了物理 / 控制 / 机器人配置),需要重新录制。
@@ -327,7 +312,6 @@ ffmpeg -loglevel error -sseof -0.5 -i $D/preview_video/episode_0000000_cam_head.
 
 **HDF5 结构**(`hdf5_writer.py`,T = 录到的帧数,存 T-1 步,数组均为 float64):
 
-
 | 键                                                             | 内容                                                          |
 | ------------------------------------------------------------- | ----------------------------------------------------------- |
 | attrs `fix_obs_shift_rgb`                                     | `"shift_drop_first_drop_last+rgb_jpeg"`(图像已与同一步状态对齐)        |
@@ -341,7 +325,6 @@ ffmpeg -loglevel error -sseof -0.5 -i $D/preview_video/episode_0000000_cam_head.
 | `vision/<camera>/{shape, intrinsic_matrix, extrinsic_matrix}` | `(3,)`、`(3,3)`、逐帧 `(T-1,4,4)` camera-to-world               |
 | `meta/`*                                                      | 仅 `--keep_failed` 的失败样本                                     |
 
-
 `<arm>` 在双臂时为 `left_` / `right_`,单臂时为空前缀。
 
 建议至少抽查几条视频,确认成功判定没有被「钻空子」(例如物体被碰进目标区域而非按预期放入)。
@@ -354,10 +337,13 @@ ffmpeg -loglevel error -sseof -0.5 -i $D/preview_video/episode_0000000_cam_head.
 2. 确认布局:检查 YAML 是否在第 1 节的支持范围;依赖固定件 / Fluid 时找一个可用的 `--layout_template`。
 3. 生成抓取缓存:`bash scripts/gen_grasps.sh <task> 0`(7.10 节)。
 4. 写专家 `task/RoboDojo/experts/<task>.py`(第 7.1 节)。
-5. 冒烟:`ROBODOJO_COLLECT_LOG=INFO ROBODOJO_COLLECT_CHUNK=5 bash scripts/collect_data.sh <task> 1 0 --max_tries 5 --save_fail_video --save_dir /tmp/smoke`,看视频。
-6. 小批量(如 20 条)看成功率和失败分布(2.4),针对性调专家。
-7. 大批量:`collect_data_parallel.sh`。
+5. 本地 GPU 冒烟:`ROBODOJO_COLLECT_LOG=INFO ROBODOJO_COLLECT_CHUNK=5 bash scripts/collect_data.sh <task> 1 0 --max_tries 5 --save_fail_video --save_dir /tmp/smoke`,看视频。
+6. 本地小批量(如 20 条)看成功率和失败分布(2.4),针对性调专家。
+7. 本地正式采集 100 条:`bash scripts/collect_data_parallel.sh <task> 100 <gpu_ids>`。
 8. 抽查(第 5 节)。
+9. 若在外部服务器上采集,把数据拉回本地(8.6 节)。
+
+冒烟和调专家建议在本地 GPU 上完成;正式采集可以放到外部服务器上跑,采完再拉回本地(8.6 节)。
 
 ---
 
@@ -371,7 +357,6 @@ ffmpeg -loglevel error -sseof -0.5 -i $D/preview_video/episode_0000000_cam_head.
 
 **查询**
 
-
 | 接口                                                                         | 说明                                                      |
 | -------------------------------------------------------------------------- | ------------------------------------------------------- |
 | `get_obj_pose(label)`                                                      | 物体位姿 `[x,y,z,qw,qx,qy,qz]`(env 坐标系)                     |
@@ -383,9 +368,7 @@ ffmpeg -loglevel error -sseof -0.5 -i $D/preview_video/episode_0000000_cam_head.
 | `tcp_to_ee(arm, tcp_pose)`                                                 | 夹爪中心位姿 → 规划器需要的 `ee_link` 位姿(沿 ee x 轴后退 `gripper_bias`) |
 | `top_down_quat(yaw)`                                                       | 自上而下抓取朝向:ee x 轴(接近方向)朝下,y 轴(手指方向)在桌面内角度 `yaw`           |
 
-
 **规划(只算,不执行)**
-
 
 | 接口                                           | 说明                                                 |
 | -------------------------------------------- | -------------------------------------------------- |
@@ -394,9 +377,7 @@ ffmpeg -loglevel error -sseof -0.5 -i $D/preview_video/episode_0000000_cam_head.
 | `plan_chain(arm, [pose1, pose2, ...])`       | 依次规划多段;任一段失败返回 `None`                              |
 | `choose_chain(arm, [[...], [...], ...])`     | 返回第一个可规划的候选链 `(index, plans)`;全失败抛 `PlanFailError` |
 
-
 **执行(会推进物理并录帧)**
-
 
 | 接口                                                                             | 说明                                                   |
 | ------------------------------------------------------------------------------ | ---------------------------------------------------- |
@@ -411,9 +392,7 @@ ffmpeg -loglevel error -sseof -0.5 -i $D/preview_video/episode_0000000_cam_head.
 | `delay(steps)`                                                                 | 空等若干物理步                                              |
 | `execute(*seqs)`                                                               | 底层:并行执行多条控制序列                                        |
 
-
-**抓取 / 放置(参照 RoboTwin 的 `grasp_actor` / `place_actor`)**
-
+**抓取 / 放置(参照 RoboTwin 的** `grasp_actor` **/** `place_actor`**)**
 
 | 接口                                                                                                                  | 说明                                                                                                                                           |
 | ------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -422,9 +401,7 @@ ffmpeg -loglevel error -sseof -0.5 -i $D/preview_video/episode_0000000_cam_head.
 | `place_actor(label, arm, targets, point="place", pre_dis=0.06, yaw_offsets=(0,), upright=True, release=True)`       | 把手中物体的对齐点(默认 `active.place.up` 底面接触点)放到 `targets` 中第一个可达的位置;用实测 ee→物体变换反推 ee 位姿,`upright` 时去掉倾斜只保留偏航;先到正上方 `pre_dis` 再竖直下放。返回 `(目标序号, 偏航偏移)` |
 | `get_obj_asset(label)`                                                                                              | `(category, index, scale, metadata)`                                                                                                         |
 
-
 `grasp_candidates` 的过滤与排序:
-
 
 | 参数                         | 含义                                | 例                                    |
 | -------------------------- | --------------------------------- | ------------------------------------ |
@@ -433,7 +410,6 @@ ffmpeg -loglevel error -sseof -0.5 -i $D/preview_video/episode_0000000_cam_head.
 | `obj_z`                    | 抓取中心(TCP)在**物体坐标系**下的高度范围,限定抓哪个部位 | 只抓瓶颈 `(0.065, 0.115)`                |
 | `prefer` / `prefer_weight` | 偏好的接近方向;代价 = 权重 × 夹角/π − 判别器分数    | 从基座指向物体的水平方向                         |
 | `max_candidates`           | 最多交给规划器尝试的候选数                     | 默认 40                                |
-
 
 夹爪对称(arx_x5 是)时,每个抓取绕接近轴转 180° 的版本也作为候选。
 
@@ -492,7 +468,6 @@ def play_once(env):
 
 文件:`task/RoboDojo/config/<task>.yml`。采集时 `LayoutGenerator` 直接读它,改完下一次运行就生效。
 
-
 | 想要            | 改什么                                                   |
 | ------------- | ----------------------------------------------------- |
 | 物体出现区域        | `common.xlim` / `ylim`(env 坐标,米;`xlim` 可写多段避开中间)      |
@@ -503,10 +478,9 @@ def play_once(env):
 | 数量            | `select_mode.nums`(`[min,max]` 每个布局随机)                |
 | 摩擦等物理参数       | `common.physics: {static_friction: ...}`              |
 
-
 ⚠️ 这个 YAML **评测也在用**:评测读的是冻结在 `Assets/Eval_Layout/` 的布局,所以改 YAML 不会直接改变评测布局,但会改变 `soft_reset`/重新生成评测布局时的结果,以及任务类里任何读 YAML 的逻辑。只想改训练分布而不想动评测时,建议复制一个新任务(新 YAML + 新 task 模块),或在 PR 里明确说明。
 
-改了 YAML 后:旧数据的 `seed.txt` 仍然有效但布局会不同,**不同分布的数据请用不同 `--save_dir` 分开存**。
+改了 YAML 后:旧数据的 `seed.txt` 仍然有效但布局会不同,**不同分布的数据请用不同** `--save_dir` **分开存**。
 
 ### 7.3 修改成功判定 / 语言指令
 
@@ -529,15 +503,15 @@ def play_once(env):
 1. 改 YAML 到支持的写法(见第 1 节表格);
 2. 只调试用:`--layout_source eval`;
 3. 扩展 `src/data_collect/layout_generator.py`:
-  - 新的放置方式:在 `_sample` 的分支里加,参考 `_place_on_table` / `_place_on_support`,返回 `_record(...)` 格式的记录;
-  - 新的 `select_mode.mode`:加到 `SUPPORTED_MODES` 和 `_pick_models`;
-  - 同时更新 `_check_supported`,否则仍会被拒绝。
+   - 新的放置方式:在 `_sample` 的分支里加,参考 `_place_on_table` / `_place_on_support`,返回 `_record(...)` 格式的记录;
+   - 新的 `select_mode.mode`:加到 `SUPPORTED_MODES` 和 `_pick_models`;
+   - 同时更新 `_check_supported`,否则仍会被拒绝。
 
 ### 7.6 给采集环境加新原语
 
 在 `collect_env.py` 的 `CollectEnv` 里加方法即可,专家通过 `env.<method>` 调用。约定:
 
-- 所有会推进物理的动作都必须走 `execute(...)`(内部按 `collect_interval` 录帧、并调用 `reward_manager.step`);**直接调 `sim_step` 不会录帧,也不会更新触发式判定**。
+- 所有会推进物理的动作都必须走 `execute(...)`(内部按 `collect_interval` 录帧、并调用 `reward_manager.step`);**直接调** `sim_step` **不会录帧,也不会更新触发式判定**。
 - 规划失败抛 `PlanFailError`,让 `expert_collection.py` 正确分类为 `plan_failed`。
 - 新的单臂动作参考 `move_up`(候选 + `choose_chain`)、`execute_plan`(执行后 `settle` 等到位)。
 
@@ -558,14 +532,12 @@ def play_once(env):
 
 ### 7.9 seed 段规划
 
-
 | 用途          | seed 段                  | 修改方式                                          |
 | ----------- | ----------------------- | --------------------------------------------- |
 | 评测布局        | `0..N`                  | `eval_layouts.py` / 已冻结在 `Assets/Eval_Layout` |
 | 脚本专家        | `100000+`               | `--start_seed`                                |
 | 并行 worker k | `start_seed + k × 1000` | `ROBODOJO_SEED_STRIDE`                        |
 | 遥操作         | `200000+`               | `--start_seed`                                |
-
 
 自定义 `--start_seed` 时保持在评测段之外,且不同数据集之间不要重叠。注意 `--start_seed` 只在目标目录没有 `seed.txt` / `next_seed.txt` 时生效。
 
@@ -622,10 +594,82 @@ python src/data_collect/eval_layouts.py derive --source make_toast --task make_t
 
 ---
 
+## 8.5 上传到 Hugging Face 私有仓库(`upload_to_hf.py`)
+
+```bash
+# 先登录(需要 write 权限的 token),或 export HF_TOKEN=hf_xxx
+hf auth login --force
+# 预览:列出远端将被删除的文件,不上传不删除
+python src/data_collect/upload_to_hf.py --repo_id <user>/<repo> --dry_run
+# 同步:上传新增 / 修改的文件,再删除远端多出来的文件
+python src/data_collect/upload_to_hf.py --repo_id <user>/<repo>
+```
+
+- 远端路径与本地一致:`data/RoboDojo/<task>/...` → `<repo>/RoboDojo/<task>/...`。仓库不存在时自动建为**私有** dataset;已存在但为公开时报错退出。
+- 可反复运行:用 `upload_large_folder` 断点续传,哈希缓存在 `data/.cache/huggingface/`,中断后重跑即可续传;本地删掉的 episode 会在上传完成后从远端删除(`--no_delete` 关闭)。本地目录为空时拒绝同步。
+- 默认排除 `_shards/`;`--exclude "RoboDojo/*_failed/*"` 可再排除失败尝试。正在采集的任务等结束再传。
+- hf-mirror.com 不支持上传,脚本默认直连 `https://huggingface.co`(忽略 `HF_ENDPOINT`,可用 `--endpoint` / `HF_UPLOAD_ENDPOINT` 覆盖),需要能直连或设置 `HTTPS_PROXY`。
+
+## 8.6 在外部服务器上采集,再拉回本地(rsync over SSH)
+
+外部服务器用来**跑采集**:本地先把采集所需的代码和资产同步过去,服务器采完后再把数据拉回本地 `data/RoboDojo/`。
+
+```bash
+SERVER=<user>@<host>            # 外部服务器
+PORT=<port>                     # SSH 端口
+REMOTE=<remote_root>            # 服务器上的工作根目录
+REPO=$REMOTE/RoboJanus          # 服务器上的仓库副本,对应本地仓库根目录
+TASK=<task>
+```
+
+**1. 本地 → 服务器:同步采集所需的代码和资产**
+
+```bash
+ssh -p $PORT $SERVER "mkdir -p $REPO"
+# 代码(预览去掉 -n 即真正传输;task/RoboDojo 下指向 task/RoboJanus 的相对软链接会原样保留)
+# third_party 只需 IsaacLab、curobo(GraspGenX 只用于离线生成抓取缓存,采集用不到)
+rsync -avn --exclude __pycache__ --exclude third_party/GraspGenX --exclude third_party/RoboTwin -e "ssh -p $PORT" \
+  env env_cfg task src utils scripts docs docker third_party XPolicyLab pyproject.toml $SERVER:$REPO/
+# 抓取缓存与场景描述(不含 data/RoboDojo 下的数据)
+rsync -av -e "ssh -p $PORT" data/grasp_pose data/scenes $SERVER:$REPO/data/
+# 资产:本地 Assets 是软链接,用 -L 传实际内容;外部资产原件在 ext_assets/robodojo_format
+rsync -avL --partial -e "ssh -p $PORT" Assets/ $SERVER:$REPO/Assets/
+rsync -av --partial -e "ssh -p $PORT" ext_assets/robodojo_format ext_assets/integrate $SERVER:$REPO/ext_assets/
+```
+
+- 资产里有本地仓库的**绝对路径**:`ArtVIP_*` / `GenieSim_*` 包装的 `object.usd`(均为 ASCII usda)和 `metadata.json` 引用 `ext_assets/robodojo_format/...`,`Assets/Robots/*/curobo.yml` 里有 `asset_root_path` / `urdf_path`,`ext_assets/integrate/manifest.json` 也有。服务器上的仓库路径不同,同步后在服务器上统一替换,否则这些资产加载失败:
+
+  ```bash
+  ssh -p $PORT $SERVER "cd $REPO && grep -rlZ --include='*.usd' --include='*.json' --include='*.yml' /mnt/hierophant-1/xuancun/RoboJanus/ Assets ext_assets/integrate \
+    | xargs -0 sed -i 's#/mnt/hierophant-1/xuancun/RoboJanus/#$REPO/#g'"
+  # 该服务器的 NFS 上 sed -i 生成的新文件权限为 0000,需恢复
+  ssh -p $PORT $SERVER "cd $REPO && find Assets ext_assets/integrate -type f -perm 0000 -exec chmod 664 {} +"
+  ```
+- 服务器上按 `scripts/install.sh` 装好 `RoboDojo` conda 环境后,先冒烟(第 6 节第 5 步)再正式采集。
+
+**2. 服务器上采集**:与本地相同,在 `$REPO` 下运行 `scripts/collect_data_parallel.sh`(第 6 节第 7 步)。
+
+**3. 服务器 → 本地:拉回采好的数据**
+
+```bash
+# 预览:只列出将要传输的文件
+rsync -avn -e "ssh -p $PORT" $SERVER:$REPO/data/RoboDojo/$TASK/ data/RoboDojo/$TASK/
+# 传输(可断点续传,中断后重跑同一条命令)
+rsync -av --partial --progress -e "ssh -p $PORT" $SERVER:$REPO/data/RoboDojo/$TASK/ data/RoboDojo/$TASK/
+# 核对条数(应与服务器上 ls $REPO/data/RoboDojo/$TASK/<config>/data | wc -l 一致)
+ls data/RoboDojo/$TASK/<config>/data | wc -l
+```
+
+- 等服务器上采集和合并**全部结束**再拉:并行采集合并时会重新编号,正在写入的 `_shards/` 不要拉。
+- 需要失败样本时,把服务器上的 `data/RoboDojo/${TASK}_failed/` 用同样的命令再拉一次。
+- 默认不加 `--delete`,不会删除本地已有的文件;需要让本地与服务器完全一致时再加。
+
+---
+
 ## 9. 已知问题 / 注意事项
 
 - 若在 `data/RoboDojo/<task>/<config>/` 下看到 `failed/` 子目录,它不是当前代码写的(多半是更早版本的产物);当前版本 `--keep_failed` 写到同级 `<task>_failed/<config>/`。
 - 当前 `task/RoboDojo/experts/` 只有 `pour_liquid_into_cup.py`,其他任务需要先写专家才能用脚本专家管线。
 - 把 `.sh` 的 `--redo` 用于重放无效(见第 4 节)。
-- 并行采集合并后 `_shards/` 只剩续采用的记录文件和日志;要从头重采就把 `_shards/<task>/` 和目标目录一起删掉。
+- 并行采集默认在合并验证通过后删除整个任务分片目录;手动合并不加清理选项时,只删除已合并的数据文件,保留续采用的记录和日志。`--keep_shards` 保留全部分片文件。
 
