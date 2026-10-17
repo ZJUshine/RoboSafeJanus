@@ -10,7 +10,8 @@
 和日志保留,重跑 ``collect_data_parallel.sh`` 时各 worker 仍按它们续采。``--keep_shards`` 时不删除。
 
 ``--remove_shards`` 连分片目录一起删(``<shard_root>``,含各 worker 的 ``w<k>/`` 与 ``logs/``),适合合并成功后
-不再续采的场合;有 episode 缺失或与目标不一致时只提示、不删,避免丢数据。
+不再续采的场合;有 episode 缺失、与目标不一致或未合并的文件时保留目录并返回非零,避免丢数据。
+删除最后一个任务分片后,也删除空的 ``_shards/`` 父目录。两种保留/删除选项互斥。
 
     python src/data_collect/merge_shards.py --task_name pour_liquid_into_cup \
         --shard_root data/RoboDojo/_shards/pour_liquid_into_cup
@@ -81,9 +82,12 @@ def clean(shard_dirs, target, fail_shard_dirs, fail_path):
     for shard, fail_shard in zip(shard_dirs, fail_shard_dirs):
         for i, seed in enumerate(_seeds(shard)):
             name = f"episode_{i:07d}"
-            if not os.path.exists(os.path.join(shard, "data", f"{name}.hdf5")):
-                continue  # 之前已经删过
-            n = _remove_merged(shard, name, target, f"episode_{index[seed]:07d}") if seed in index else None
+            n = None
+            if seed in index:
+                dst_name = f"episode_{index[seed]:07d}"
+                if os.path.isfile(os.path.join(target, "data", f"{dst_name}.hdf5")):
+                    # 之前清理可能在删除 hdf5 后中断,仍需检查并清理 layout / 预览视频。
+                    n = _remove_merged(shard, name, target, dst_name)
             if n is None:
                 kept.append(os.path.join(shard, "data", f"{name}.hdf5"))
             else:
@@ -91,11 +95,11 @@ def clean(shard_dirs, target, fail_shard_dirs, fail_path):
         shard_log = os.path.join(fail_shard, "fail_info.jsonl")
         if os.path.exists(shard_log):
             for rec in map(json.loads, filter(str.strip, open(shard_log))):
-                if not os.path.exists(os.path.join(fail_shard, "data", f"{rec['episode']}.hdf5")):
-                    continue
                 n = None
                 if rec["seed"] in fail_index:
-                    n = _remove_merged(fail_shard, rec["episode"], fail_path, fail_index[rec["seed"]])
+                    dst_name = fail_index[rec["seed"]]
+                    if os.path.isfile(os.path.join(fail_path, "data", f"{dst_name}.hdf5")):
+                        n = _remove_merged(fail_shard, rec["episode"], fail_path, dst_name)
                 if n is None:
                     kept.append(os.path.join(fail_shard, "data", f"{rec['episode']}.hdf5"))
                 else:
@@ -169,19 +173,45 @@ def _tree_size(path):
     return sum(os.path.getsize(os.path.join(root, f)) for root, _, files in os.walk(path) for f in files)
 
 
+def _remaining_files(shard_root, shard_dirs, fail_shard_dirs):
+    """整目录删除前,查找尚未清理的数据、其他配置或无法识别的文件。"""
+    metadata_dirs = {os.path.abspath(p) for p in [*shard_dirs, *fail_shard_dirs]}
+    metadata = {"seed.txt", "next_seed.txt", "collect_info.json", "fail_info.jsonl"}
+    log_dir = os.path.abspath(os.path.join(shard_root, "logs"))
+    remaining = []
+    for root, _, files in os.walk(shard_root):
+        current = os.path.abspath(root)
+        for name in files:
+            if current in metadata_dirs and name in metadata:
+                continue
+            if current == log_dir and name.startswith("w") and name.endswith(".log") and name[1:-4].isdigit():
+                continue
+            remaining.append(os.path.join(root, name))
+    return remaining
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--task_name", required=True)
     parser.add_argument("--shard_root", required=True, help="directory holding w0/, w1/, ...")
     parser.add_argument("--save_dir", default="data/RoboDojo")
     parser.add_argument("--config_name", default="arx_x5")
-    parser.add_argument("--keep_shards", action="store_true", help="do not delete merged episode files from shards")
-    parser.add_argument(
+    cleanup = parser.add_mutually_exclusive_group()
+    cleanup.add_argument("--keep_shards", action="store_true", help="do not delete any shard files")
+    cleanup.add_argument(
         "--remove_shards",
         action="store_true",
         help="delete the whole shard root (worker dirs and logs) once every episode is merged",
     )
     args = parser.parse_args()
+    target = os.path.join(args.save_dir, args.task_name, args.config_name)
+    fail_path = os.path.join(args.save_dir, f"{args.task_name}_failed", args.config_name)
+    if not args.keep_shards:
+        shard_root = os.path.realpath(args.shard_root)
+        for path in (target, fail_path):
+            destination = os.path.realpath(path)
+            if os.path.commonpath((shard_root, destination)) in (shard_root, destination):
+                parser.error("shard cleanup requires separate, non-overlapping shard and target directories")
     # 按 worker 编号排序,保证合并顺序稳定
     shards = sorted(
         glob.glob(os.path.join(args.shard_root, "w*", args.task_name, args.config_name)),
@@ -191,8 +221,6 @@ def main():
         raise SystemExit(f"no shards under {args.shard_root}/w*/{args.task_name}/{args.config_name}")
     fail_shards = [os.path.join(os.path.dirname(os.path.dirname(p)), f"{args.task_name}_failed", args.config_name)
                    for p in shards]
-    target = os.path.join(args.save_dir, args.task_name, args.config_name)
-    fail_path = os.path.join(args.save_dir, f"{args.task_name}_failed", args.config_name)
     print(json.dumps(merge(shards, target, fail_shards, fail_path), indent=2))
     if args.keep_shards:
         return
@@ -200,6 +228,20 @@ def main():
     print(f"[merge] removed {freed / 1e9:.2f} GB of merged files from {args.shard_root}")
     if kept:
         print(f"[merge] kept {len(kept)} shard episodes that are missing or differ in the target, e.g. {kept[0]}")
+    if args.remove_shards:
+        remaining = _remaining_files(args.shard_root, shards, fail_shards)
+        if kept or remaining:
+            example = kept[0] if kept else remaining[0]
+            raise SystemExit(f"[merge] retained {args.shard_root}: unmerged or unverified data, e.g. {example}")
+        size = _tree_size(args.shard_root)
+        shutil.rmtree(args.shard_root)
+        print(f"[merge] removed shard directory {args.shard_root} ({size / 1e9:.2f} GB of metadata and logs)")
+        parent = os.path.dirname(os.path.abspath(args.shard_root))
+        if os.path.basename(parent) == "_shards":
+            try:
+                os.rmdir(parent)  # 只删除空目录,其他任务的分片仍保留。
+            except OSError:
+                pass
 
 
 if __name__ == "__main__":

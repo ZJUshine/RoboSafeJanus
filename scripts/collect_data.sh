@@ -69,4 +69,9 @@ while (( $(saved) < episode_num && tries < max_tries )); do
     }
   tries=$(( tries + n ))
 done
-echo "[collect_data] done: $(saved)/${episode_num} episodes in ${seed_file%/seed.txt}"
+saved_num=$(saved)
+if (( saved_num < episode_num )); then
+  echo "[collect_data] incomplete: ${saved_num}/${episode_num} episodes in ${seed_file%/seed.txt}; attempt limit exhausted" >&2
+  exit 1
+fi
+echo "[collect_data] done: ${saved_num}/${episode_num} episodes in ${seed_file%/seed.txt}"
