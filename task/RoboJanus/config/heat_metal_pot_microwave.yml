@@ -1,0 +1,58 @@
+Articulation:
+  -
+    common:
+      # 正面（门一侧）朝向机器人（-y），位于 y ~= center - 0.13（右侧旋钮凸出到 - 0.17）。
+      # 门铰接在微波炉左边缘，任务在 reset 时将其打开 90 度，因此门沿 -y 方向立在
+      # y ~= center - 0.16 到 center - 0.47、x ~= center - 0.21 处。有两点限制了摆放位置：
+      # - 桌面上相机支架 1 cm 厚的底板（x +-0.15，y -0.515..-0.425）：该门底部与微波炉底部齐平，
+      #   门打开时若压在底板上会被 PhysX 挤出，把微波炉甩飞；
+      # - 左夹爪静止在 x ~= -0.3，其导轨伸展到 +-0.09 m，因此铰链必须保持在 -0.15 右侧。
+      # 中心位于 x 0.09-0.18、y 0.05-0.11、yaw +-6 度范围内时，右臂可沿直线够到转盘
+      # （离线 IK + 间隙扫描，/tmp/hz/mw2/reach_mw.py）。
+      xlim: [0.09, 0.15]
+      ylim: [0.07, 0.10]
+      rotate_rand: True
+      rotate_deg: [-6, 6]
+      # 布局生成器按外接圆让物体彼此分开（该微波炉 r 0.28 m）；将其缩小，使物体能放在
+      # 微波炉前方、右臂自上而下可达的范围内。
+      margin: -0.05
+      relative_plane: "Table"
+
+    category:
+      -
+        # ArtVIP 微波炉 00002 缩放至 0.75（0.42 x 0.35 x 0.25 m，20 L 台式微波炉；转盘上方腔体
+        # 宽 0.27 x 深 0.28 x 高 0.18）。由 ext_assets/integrate/scaled_variant.py 生成：RoboDojo 的采集布局
+        # 和奖励检查会忽略单个物体的 scale。每个任务只用一个模型：关节体在每个进程中只生成一次，
+        # 之后的所有布局都复用它（src/data_collect/collect_env._reuse_live_articulations）。
+        name: "ArtVIP_microwave_s075"
+        index: [2]
+
+    select_mode:
+      nums: [1]
+      mode: "unique"
+      label: ["microwave"]
+
+Rigid:
+  -
+    common:
+      # 位于微波炉前方,靠机器人一侧是抓取端(把手 / 边沿),专家抓住它把物体朝前送进炉腔。
+      xlim: [0.12, 0.20]
+      ylim: [-0.24, -0.20]
+      rotate_rand: True
+      rotate_deg: [-15, 15]
+      relative_plane: "Table"
+      margin: -0.04
+      physics:
+        mass: 0.15  # 调轻以便单手夹住一侧把手提起(资产按体积缩放后约 0.5 kg)
+        static_friction: 1.5
+        dynamic_friction: 1.5
+
+    category:
+      -
+        name: "GenieSim_pot_s075"  # GenieSim_pot/00007 缩放至 0.75(锅身 12.4 cm,两侧把手沿物体 y 轴,总长 17.5 cm)
+        index: [7]
+
+    select_mode:
+      nums: [1]
+      mode: "unique"
+      label: ["metal_pot"]

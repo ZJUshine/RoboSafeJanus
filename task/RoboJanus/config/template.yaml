@@ -1,0 +1,71 @@
+# RoboJanus 任务配置模板：说明各参数的含义，具体任务的 yml 只注明特殊取值。
+# 新建任务时复制为 <task_name>.yml（文件名与 tasks/<task_name>.py、类名一致），
+# 再在 task/RoboDojo/config/ 下建同名软链接。本文件不是任务，不会被任务清单扫描。
+# 参数的实际用法见 src/data_collect/layout_generator.py（采集布局）和 utils/cluttered_generator.py（评测布局）。
+# 坐标单位为 m，角度单位为度；桌面坐标系 x 向右、-y 指向机器人。
+
+Articulation:  # 关节体（可开合的物体，如微波炉、柜子），没有就删掉整段
+  -  # 每个 "-" 是一组物体，组内共用 common / select_mode
+    common:  # 本组物体共用的摆放参数
+      xlim: [0.09, 0.15]  # 桌面上的 x 采样范围；可写多段区间 [[a, b], [c, d]]，每次随机选一段
+      ylim: [0.07, 0.10]  # 桌面上的 y 采样范围
+      rotate_rand: True  # 是否开启绕 z 轴的随机偏航（yaw）
+      rotate_deg: [-6, 6]  # 偏航范围：写一个数 a 表示 [-a, a]，写区间表示 [min, max]；rotate_rand 为 False 时不生效
+      margin: 0.01  # 占地圆半径的额外余量（默认 0.01）：物体之间按 xy 平面上的外接圆互不重叠，负值允许靠得更近
+      relative_plane: "Table"  # 摆放的参考平面，"Table" 表示桌面
+
+    category:  # 候选资产列表，可列多个类别
+      -
+        name: "ArtVIP_microwave_s075"  # 资产类别名，对应 Assets/Object/RoboDojo/<Articulation|Rigid|Fluid>/<name>
+        index: [2]  # 该类别下的资产编号，对应 <name>/000xx 目录；所有类别的编号合成一个候选池
+
+    select_mode:  # 从候选池中选取模型的方式
+      nums: [1]  # 选取数量：[n] 固定 n 个，[min, max] 每个布局随机取一个数（含两端）
+      mode: "unique"  # 抽取方式：unique 不重复抽；same 全部用同一个模型；category_unique 从不同类别中各抽一个；allow_duplicate 可重复（默认）
+      label: ["microwave"]  # 依次分配给选中物体的标签，任务代码和奖励检查按 label 引用物体；不够时自动补 "<类别名><序号>"
+
+Rigid:  # 刚体
+  -
+    common:
+      xlim: [0.14, 0.30]
+      ylim: [-0.30, -0.22]
+      rotate_rand: True
+      rotate_deg: 180
+      relative_plane: "Table"  # 也可以是 "<父物体 label>/<支撑面 tag>"，表示放在该物体的支撑面上，此时 xlim / ylim 取第一个值作为支撑面坐标系内的偏移
+      qpos: [1, 0, 0, 0]  # 初始姿态四元数 (w, x, y, z)，在此基础上再叠加随机偏航；默认不旋转
+      margin: 0.01
+      # center_footprint: True  # 可选：xlim / ylim 和占地圆以旋转后包围盒的水平中心为准，用于原点不在物体中心的资产（如原点在一端的手机）
+      # zlim: [0.80, 0.80]  # 可选：固定放置高度（世界坐标）；不写时物体底面自动落在桌面上方
+      physics:  # 可选：覆盖资产 metadata.json 中的物理参数
+        mass: 0.1  # 质量（kg）；仿真中刚体质量上限为 0.5 kg，资产没有质量时需手动设置
+        static_friction: 1.0  # 静摩擦系数（默认 0.6）
+
+    category:
+      -
+        name: "bottle"
+        index: [47]
+
+    select_mode:
+      nums: [1]
+      mode: "unique"
+      label: ["target"]
+
+Fluid:  # 流体（粒子模拟），需要用含该流体的模板布局采集（--layout_template）
+  -
+    common:
+      xlim: [0.0, 0.0]  # 在父物体坐标系中的 x 偏移，上下限相同即固定位置
+      ylim: [0.0, 0.0]  # 在父物体坐标系中的 y 偏移
+      zlim: [-0.133, -0.133]  # 在父物体坐标系中的 z 偏移
+      rotate_rand: False
+      relative_plane: "bottle"  # 父物体的 label，流体随父物体一起移动（例如装在瓶内）
+      check_mode: "enforce"  # 放置检查方式：bbox（默认）要求落在允许区域内且不与其他物体重叠；enforce 跳过这两项检查，强制放置（流体本就与容器重叠）
+
+    category:
+      -
+        name: "wuliangye"
+        index: [0]
+
+    select_mode:
+      nums: [1]
+      mode: "unique"
+      label: ["wine"]
