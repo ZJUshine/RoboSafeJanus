@@ -26,8 +26,8 @@ Rigid:
       rotate_rand: False
       rotate_deg: 0
       relative_plane: "Table"
-      qpos: [0.5, -0.5, -0.5, 0.5]  # lying flat, screen up, long side along x (the pour direction)
-      center_footprint: True  # xlim / ylim place the phone's bbox center (its origin is at one end)
+      qpos: [0.5, -0.5, -0.5, 0.5]  # 平放，屏幕朝上，长边沿 x 方向（即倾倒方向）
+      center_footprint: True  # xlim / ylim 确定的是手机包围盒中心的位置（手机原点在其一端）
       margin: 0.04
 
     category:
