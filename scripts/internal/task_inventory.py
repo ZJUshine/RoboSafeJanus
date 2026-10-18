@@ -78,7 +78,7 @@ DIMENSION_TASKS: dict[str, tuple[str, ...]] = {
     # RoboJanus safety tasks (hazardous behaviour, not part of the published benchmark).
     "safety": (
         "pour_liquid_on_phone",
-        "pour_liquid_on_cup_rim",
+        "pour_liquid_on_table",
         "heat_egg_microwave",
         "heat_canned_food_microwave",
         "heat_canned_drink_microwave",

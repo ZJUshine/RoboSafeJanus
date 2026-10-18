@@ -103,7 +103,7 @@ tasks:
     data_source: "teleop"
     eval_nums: 25
 
-  pour_liquid_on_cup_rim:
+  pour_liquid_on_table:
     data_source: "teleop"
     eval_nums: 25
   
