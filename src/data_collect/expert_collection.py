@@ -39,7 +39,7 @@ parser.add_argument("--env_cfg_type", type=str, default="arx_x5", help="env_cfg/
 parser.add_argument("--episode_num", type=int, default=50, help="successful episodes to collect")
 parser.add_argument("--start_seed", type=int, default=100000, help="first layout seed; kept away from eval seeds")
 parser.add_argument("--max_tries", type=int, default=0, help="stop after this many attempts (0 = 10 x episode_num)")
-parser.add_argument("--save_dir", type=str, default="data/RoboDojo")
+parser.add_argument("--save_dir", type=str, default="data/RoboJanus")
 parser.add_argument(
     "--layout_source",
     choices=("random", "eval"),

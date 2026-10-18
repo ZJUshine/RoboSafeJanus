@@ -20,7 +20,7 @@ shift 3
 
 per_gpu=${ROBODOJO_PER_GPU:-3}
 stride=${ROBODOJO_SEED_STRIDE:-1000}
-save_dir="data/RoboDojo"
+save_dir="data/RoboJanus"
 start_seed=100000
 env_cfg_type="arx_x5"
 keep_shards=0

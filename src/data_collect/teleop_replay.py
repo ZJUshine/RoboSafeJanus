@@ -22,7 +22,7 @@ from isaaclab.app import AppLauncher
 parser = argparse.ArgumentParser()
 parser.add_argument("--task_name", type=str, required=True)
 parser.add_argument("--env_cfg_type", type=str, default="arx_x5")
-parser.add_argument("--save_dir", type=str, default="data/RoboDojo")
+parser.add_argument("--save_dir", type=str, default="data/RoboJanus")
 parser.add_argument("--redo", action="store_true", help="re-render episodes that already have an HDF5")
 parser.add_argument("--keep_failed", action="store_true", help="write HDF5 even if the replay fails the success check")
 parser.add_argument("--no_video", action="store_true")
