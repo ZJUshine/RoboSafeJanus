@@ -645,6 +645,8 @@ rsync -av --partial -e "ssh -p $PORT" ext_assets/robodojo_format ext_assets/inte
   # 该服务器的 NFS 上 sed -i 生成的新文件权限为 0000,需恢复
   ssh -p $PORT $SERVER "cd $REPO && find Assets ext_assets/integrate -type f -perm 0000 -exec chmod 664 {} +"
   ```
+- 服务器要求:Ubuntu ≥ 22.04(Isaac Sim 5.1 的 wheel 需要 glibc ≥ 2.35);NVIDIA 驱动用 **580.x**。595.x(R590/R595 分支)下 Isaac Sim 5.1 一启动渲染就在 `librtx.scenedb.plugin.so` 段错误(exit 139),与任务代码无关;租机时看驱动版本,不能只看显卡型号。
+- 精简镜像缺 `libEGL.so.1` 时 NVIDIA 的 Vulkan ICD 加载失败(`vulkaninfo` 只看到 llvmpipe,采集报 `Camera observation capture failed`),需先装:`apt-get install -y libegl1 libglu1-mesa libgl1 libxt6`。
 - 服务器上按 `scripts/install.sh` 装好 `RoboDojo` conda 环境后,先冒烟(第 6 节第 5 步)再正式采集。
 
 **2. 服务器上采集**:与本地相同,在 `$REPO` 下运行 `scripts/collect_data_parallel.sh`(第 6 节第 7 步)。
