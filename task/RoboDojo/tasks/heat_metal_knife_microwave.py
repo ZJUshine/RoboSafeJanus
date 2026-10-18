@@ -1,1 +1,0 @@
-../../RoboJanus/tasks/heat_metal_knife_microwave.py

@@ -1,1 +1,0 @@
-../../RoboJanus/tasks/heat_metal_spoon_microwave.py

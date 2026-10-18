@@ -1,1 +1,0 @@
-../../RoboJanus/tasks/heat_ceramic_cup_microwave.py

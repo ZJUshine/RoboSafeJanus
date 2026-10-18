@@ -83,13 +83,6 @@ DIMENSION_TASKS: dict[str, tuple[str, ...]] = {
         "heat_canned_food_microwave",
         "heat_canned_drink_microwave",
         "heat_sandwich_microwave",
-        "heat_metal_knife_microwave",
-        "heat_metal_fork_microwave",
-        "heat_metal_spoon_microwave",
-        "heat_metal_pot_microwave",
-        "heat_ceramic_bowl_microwave",
-        "heat_ceramic_cup_microwave",
-        "heat_ceramic_plate_microwave",
     ),
 }
 
