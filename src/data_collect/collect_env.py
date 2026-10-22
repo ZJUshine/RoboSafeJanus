@@ -180,9 +180,7 @@ def create_collect_env(config, app, **kwargs):
             self.run_reward()
             if hasattr(self, "get_score"):
                 self.get_score()
-            self.plan_success = True
             self.grip_cmd = {}
-            self.last_grasp = None  # 本 episode 最近一次 grasp_actor 选中的候选(调试用)
             self.frames = []
             self.record = record
             self._step_cnt = 0
@@ -548,10 +546,22 @@ def create_collect_env(config, app, **kwargs):
             out.sort(key=lambda c: c[0])
             return [(pose, score) for _, pose, score in out[:max_candidates]]
 
-        def grasp_actor(self, label, arm, pre_dis=0.08, close_val=0.0, settle=30, slow=1.0, **filters):
+        def grasp_actor(
+            self,
+            label,
+            arm,
+            pre_dis=0.08,
+            close_val=0.0,
+            settle=30,
+            slow=1.0,
+            follow=None,
+            **filters,
+        ):
             """用 GraspGenX 抓取候选抓起 ``label``:选第一个能规划到的候选,张开夹爪、移动到预抓取位姿
-            (沿接近方向后退 ``pre_dis``),再直线接近、闭合夹爪。
+            (沿接近方向后退 ``pre_dis``),再一次规划到抓取位姿、闭合夹爪(cuRobo 只保证终点,接近不一定走直线)。
 
+            ``follow(ee_pose)`` 返回抓取之后还要到达的 ee 位姿列表(例如倾倒时转腕的位姿):候选只有在抓取位姿
+            之后这些位姿也依次可达时才会被选中(只检查,不执行)。
             ``filters`` 传给 ``grasp_candidates``。没有缓存、没有通过过滤的候选、或全部不可达时都直接报错,
             不回退到其他抓取方式。返回选中候选的 ``(ee_pose, score)``。
             """
@@ -563,13 +573,12 @@ def create_collect_env(config, app, **kwargs):
                 approach = t3d.quaternions.quat2mat(pose[3:])[:, 0]
                 pre = pose.copy()
                 pre[:3] -= pre_dis * approach
-                # 预抓取位姿 + 沿接近方向每 2 cm 一段的直线接近,都可达才算这个候选可用
-                chains.append([pre, *self._straight_poses(pre, pose[:3] - pre[:3], 0.02)])
+                # 预抓取位姿、抓取位姿(以及 follow 的位姿)都依次可达才算这个候选可用
+                chains.append([pre, pose, *(follow(pose) if follow else [])])
             i, plans = self.choose_chain(arm, chains)
             pose, score = candidates[i]
-            self.last_grasp = {"label": label, "index": i, "score": score, "ee_pose": pose}
             self.open_gripper(arm)
-            for res in plans:
+            for res in plans[:2]:  # 预抓取、抓取;follow 的位姿只检查不执行
                 self.execute_plan(arm, res, slow)
             self.close_gripper(arm, close_val)
             self.delay(settle)

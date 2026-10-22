@@ -35,6 +35,7 @@ from isaaclab.app import AppLauncher
 # 命令行参数;AppLauncher 的参数(--headless、--enable_cameras 等)也一并注册
 parser = argparse.ArgumentParser()
 parser.add_argument("--task_name", type=str, required=True)
+parser.add_argument("--expert", type=str, default=None, help="experts/<name>.py to run (default: task_name)")
 parser.add_argument("--env_cfg_type", type=str, default="arx_x5", help="env_cfg/<name>.yml (robot/camera/obs)")
 parser.add_argument("--episode_num", type=int, default=50, help="successful episodes to collect")
 parser.add_argument("--start_seed", type=int, default=100000, help="first layout seed; kept away from eval seeds")
@@ -88,7 +89,7 @@ def main():
     expert_log.addHandler(handler)
     expert_log.propagate = False
     task_name, cfg_name = args_cli.task_name, args_cli.env_cfg_type
-    play_once = load_expert(task_name)
+    play_once = load_expert(args_cli.expert or task_name)
     env_cfg, collect_cfg = build_env_cfg(task_name, cfg_name)
     freq = int(collect_cfg["observation"].get("collect_freq", 25))
 
