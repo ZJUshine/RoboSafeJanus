@@ -43,6 +43,7 @@
 | `src/data_collect/teleop_collection.py` / `xr_input.py` / `teleop_replay.py` | 遥操作录制、手柄输入、重放渲染                            | 改按键映射 / IK / 输入设备  |
 | `src/data_collect/eval_layouts.py`                                | 为新任务 / 探针任务冻结评测布局                          | 需要新增评测布局时          |
 | `src/data_collect/upload_to_hf.py`                                | 把 `data/RoboJanus` 同步到 HF 私有 dataset 仓库         | 一般不改               |
+| `src/data_collect/upload_to_modelscope.py`                        | 把 `data/RoboJanus` 同步到 ModelScope 私有 dataset 仓库 | 一般不改               |
 
 ---
 
@@ -594,7 +595,9 @@ python src/data_collect/eval_layouts.py derive --source make_toast --task make_t
 
 ---
 
-## 8.5 上传到 Hugging Face 私有仓库(`upload_to_hf.py`)
+## 8.5 上传到 Hugging Face / ModelScope 私有仓库
+
+**Hugging Face(`upload_to_hf.py`)**
 
 ```bash
 # 先登录(需要 write 权限的 token),或 export HF_TOKEN=hf_xxx
@@ -609,6 +612,22 @@ python src/data_collect/upload_to_hf.py --repo_id <user>/<repo>
 - 可反复运行:用 `upload_large_folder` 断点续传,哈希缓存在 `data/.cache/huggingface/`,中断后重跑即可续传;本地删掉的 episode 会在上传完成后从远端删除(`--no_delete` 关闭)。本地目录为空时拒绝同步。
 - 默认排除 `_shards/`;`--exclude "RoboJanus/*_failed/*"` 可再排除失败尝试。正在采集的任务等结束再传。
 - hf-mirror.com 不支持上传,脚本默认直连 `https://huggingface.co`(忽略 `HF_ENDPOINT`,可用 `--endpoint` / `HF_UPLOAD_ENDPOINT` 覆盖),需要能直连或设置 `HTTPS_PROXY`。
+
+**ModelScope(`upload_to_modelscope.py`)**
+
+```bash
+pip install -U "modelscope>=1.40"
+# 先登录(https://www.modelscope.cn/my/myaccesstoken 生成 token),或 export MODELSCOPE_API_TOKEN=ms-xxx
+modelscope login --token <token>
+# 预览:列出远端将被删除的文件,不上传不删除(不需要登录)
+python src/data_collect/upload_to_modelscope.py --repo_id <user>/<repo> --dry_run
+# 同步:上传新增 / 修改的文件,再删除远端多出来的文件
+python src/data_collect/upload_to_modelscope.py --repo_id <user>/<repo>
+```
+
+- 参数和行为与 `upload_to_hf.py` 一致:远端路径 `<repo>/RoboJanus/<task>/...`,仓库不存在时自动建为**私有** dataset,已存在但非私有时报错退出;默认排除 `_shards/`,`--exclude` 写法相同;先上传后删除(`--no_delete` 关闭),上传有失败时不删远端,本地为空时拒绝同步。
+- 可反复运行:已提交文件记在 `data/.cache/modelscope/upload_<user>__<repo>.json`,中断后重跑即续传;缓存丢失时会重新算 sha256,内容相同的文件服务端复用,不重复传输。
+- ModelScope 在国内可直连,不需要代理;国际站用 `--endpoint https://www.modelscope.ai`。
 
 ## 8.6 在外部服务器上采集,再拉回本地(rsync over SSH)
 
