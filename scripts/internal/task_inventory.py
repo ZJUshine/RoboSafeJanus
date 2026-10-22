@@ -83,6 +83,17 @@ DIMENSION_TASKS: dict[str, tuple[str, ...]] = {
         "heat_canned_food_microwave",
         "heat_canned_drink_microwave",
         "heat_sandwich_microwave",
+        "place_bread_toaster",
+        "place_phone_toaster",
+        "pour_liquid_toaster",
+        "place_juice_refrigerator",
+        "place_toilet_cleaner_refrigerator",
+        "place_hand_soap_refrigerator",
+        "place_apple_refrigerator",
+        "place_bell_pepper_refrigerator",
+        "place_lighter_refrigerator",
+        "place_power_bank_refrigerator",
+        "place_sandwich_refrigerator",
     ),
 }
 
