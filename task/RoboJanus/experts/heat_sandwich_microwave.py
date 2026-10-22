@@ -2,7 +2,7 @@
 
 from task.RoboDojo.experts import heat_egg_microwave as microwave
 
-SPEC = microwave.Spec("sandwich", "top")
+SPEC = microwave.Spec("sandwich", "top", grasp_shrink=(0.95, 0.95, 0.5), center_slide=True, reuse_tol=0.02)
 
 
 def play_once(env):
