@@ -1,0 +1,1 @@
+../../RoboJanus/tasks/place_lighter_refrigerator.py

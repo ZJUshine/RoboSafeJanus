@@ -1,0 +1,1 @@
+../../RoboJanus/tasks/place_juice_refrigerator.py
