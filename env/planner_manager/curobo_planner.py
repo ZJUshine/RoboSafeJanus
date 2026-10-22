@@ -23,6 +23,15 @@ _curobo_runtime.cuda_graph_reset = True
 
 
 class CuroboPlanner:
+    # Room for task obstacles (``set_obstacles``) next to the table: cuRobo sizes its cuboid cache at construction,
+    # and a scene built with only the table has no slot for anything else.
+    OBSTACLE_CACHE = 32
+    # Extra fixed link on the tool frame with spare collision spheres (``set_tool_spheres``): fingers / a held object.
+    # The X5 / Franka sphere models stop at the wrist, and every slot starts disabled, so planning is unchanged
+    # until a caller fills them.
+    TOOL_LINK = "tool_attached"
+    TOOL_SPHERES = 256
+
     def __init__(
         self,
         robot_origin_pose,
@@ -478,6 +487,7 @@ class CuroboPlanner:
             "grasp_contact_link_names",
         }
         kinematics = {k: v for k, v in kinematics.items() if k in kinematics_allowed}
+        self._add_tool_link(kinematics)
         robot_cfg_v2 = {
             "robot_cfg": {"kinematics": kinematics},
             "load_dynamics": bool(yml_data.get("load_dynamics", False)),
@@ -503,10 +513,91 @@ class CuroboPlanner:
         }
         return robot_cfg_v2, scene_model
 
+    def _add_tool_link(self, kinematics):
+        """Add ``TOOL_LINK`` (fixed to the tool frame, ``TOOL_SPHERES`` disabled spheres) to the v2 kinematics dict.
+        It ignores self-collision with the tool frame link and everything that link already ignores (and their ignores),
+        i.e. the wrist; spheres placed there are meant for the fingers and a held object."""
+        ee = kinematics["tool_frames"][0]
+        extra_links = dict(kinematics.get("extra_links") or {})
+        extra_links[self.TOOL_LINK] = {
+            "parent_link_name": ee,
+            "link_name": self.TOOL_LINK,
+            "joint_name": f"{self.TOOL_LINK}_joint",
+            "joint_type": "FIXED",
+            "fixed_transform": [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0],
+        }
+        kinematics["extra_links"] = extra_links
+        extra_spheres = dict(kinematics.get("extra_collision_spheres") or {})
+        extra_spheres[self.TOOL_LINK] = self.TOOL_SPHERES
+        kinematics["extra_collision_spheres"] = extra_spheres
+        links = list(kinematics.get("collision_link_names") or [])
+        if self.TOOL_LINK not in links:
+            kinematics["collision_link_names"] = links + [self.TOOL_LINK]
+        ignore = dict(kinematics.get("self_collision_ignore") or {})
+        near = {ee, *ignore.get(ee, [])}
+        for link in list(near):
+            near.update(ignore.get(link, []))
+        ignore[self.TOOL_LINK] = sorted(near - {self.TOOL_LINK})
+        kinematics["self_collision_ignore"] = ignore
+        buffer = dict(kinematics.get("self_collision_buffer") or {})
+        buffer.setdefault(self.TOOL_LINK, 0.0)
+        kinematics["self_collision_buffer"] = buffer
+
+    def _to_planner_frame(self, world_pose, real_robot_pose):
+        """World pose -> pose in the planner's base frame (same transform ``plan_path`` applies to targets)."""
+        pose = calculate_target_pose(real_robot_pose, self.robot_origin_pose, deepcopy(list(world_pose)))
+        p, q = self._trans_from_world_to_base(
+            np.array(self.robot_origin_pose, dtype=np.float32), np.array(pose, dtype=np.float32)
+        )
+        p = p + np.asarray(self.frame_bias, dtype=np.float32)
+        return [*map(float, p), *map(float, q)]
+
+    def set_obstacles(self, cuboids, real_robot_pose):
+        """Replace the task obstacles (the table always stays) in every solver's collision world.
+
+        ``cuboids``: ``{name: (dims [3], world_pose [x, y, z, qw, qx, qy, qz])}``, the pose is the box centre;
+        ``{}`` clears them. ``real_robot_pose`` is the arm's world pose (the one ``plan_path`` takes)."""
+        from curobo.scene import Scene
+
+        if len(cuboids) + len(self.scene_model["cuboid"]) > self.OBSTACLE_CACHE:
+            raise ValueError(f"{len(cuboids)} obstacles exceed the cuboid cache ({self.OBSTACLE_CACHE})")
+        scene = {"cuboid": dict(self.scene_model["cuboid"])}
+        for name, (dims, pose) in cuboids.items():
+            scene["cuboid"][name] = {
+                "dims": [float(d) for d in dims],
+                "pose": self._to_planner_frame(pose, real_robot_pose),
+            }
+        cfg = Scene.create(scene)
+        self.motion_planner.update_world(cfg)
+        self.motion_planner_batch.update_world(cfg)
+        self.ik_solver.update_world(cfg)
+
+    def set_tool_spheres(self, spheres=None):
+        """Collision spheres rigidly attached to the tool frame (``ee_link`` frame, ``[x, y, z, r]`` rows), e.g. the
+        fingers and a held object; ``None`` disables them all again."""
+        rows = np.zeros((0, 4), dtype=np.float32) if spheres is None else np.asarray(spheres, dtype=np.float32)
+        if len(rows) > self.TOOL_SPHERES:
+            raise ValueError(f"{len(rows)} tool spheres exceed the {self.TOOL_SPHERES} slots")
+        for params in {
+            id(c): c
+            for c in (
+                self.motion_planner.kinematics.config.kinematics_config,
+                self.motion_planner_batch.kinematics.config.kinematics_config,
+                self.ik_solver.kinematics.config.kinematics_config,
+            )
+        }.values():
+            idx = params.get_sphere_index_from_link_name(self.TOOL_LINK)
+            values = torch.zeros((len(idx), 4), device=params.link_spheres.device, dtype=params.link_spheres.dtype)
+            values[:, 3] = -100.0  # disabled (same marker cuRobo's disable_link_spheres uses)
+            if len(rows):
+                values[: len(rows)] = torch.as_tensor(rows, device=values.device, dtype=values.dtype)
+            params.link_spheres[:, idx, :] = values
+
     def _build_motion_planner_cfg(self, max_batch_size):
         cfg = MotionPlannerCfg.create(
             robot=self.robot_cfg,
             scene_model=self.scene_model,
+            collision_cache={"cuboid": self.OBSTACLE_CACHE},
             device_cfg=self.device_cfg,
             num_ik_seeds=32,
             num_trajopt_seeds=4,
@@ -526,6 +617,7 @@ class CuroboPlanner:
         return InverseKinematicsCfg.create(
             robot=self.robot_cfg,
             scene_model=self.scene_model,
+            collision_cache={"cuboid": self.OBSTACLE_CACHE},
             device_cfg=self.device_cfg,
             num_seeds=32,
             seed_solver_num_seeds=32,
