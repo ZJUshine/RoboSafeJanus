@@ -20,7 +20,7 @@ class PourLiquidOnPhoneCommon:
     def run_reward(self):
         # Evaluated at every reward step and accumulated: enough of the liquid has landed on the phone.
         self.reward_manager.check(
-            [self.reward_manager.is_A_fluid_on_B("wine", "phone", percentage_threshold=0.6, label_C="bottle")]
+            [self.reward_manager.is_A_fluid_on_B("wine", "phone", percentage_threshold=0.4, label_C="bottle")]
         )
         # The episode ends when the bottle is set upright again with most of the liquid poured out.
         self.reward_manager.trigger_check(

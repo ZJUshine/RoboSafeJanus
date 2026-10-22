@@ -450,7 +450,7 @@ def play_once(env):
     env.back_to_origin()
 ```
 
-完整、复杂的参考是 `task/RoboDojo/experts/pour_liquid_into_cup.py`(用 `grasp_candidates` 过滤、排序后侧抓瓶颈;以瓶口为支点倾倒,按实测 ee→瓶子 变换换算末端位姿;读液体粒子闭环控制倾角;立起瓶子触发判定后即结束)。
+更完整的参考是 `task/RoboDojo/experts/pour_liquid_into_cup.py`(`grasp_actor` 过滤后侧抓瓶颈;以瓶口为支点开环倾倒,按实测 ee→瓶子 变换换算末端位姿,路点抬到瓶子 / 夹爪不碰桌面和目标的高度;倒空后立起瓶子触发判定即结束)。手机、桌面、面包机三个倒液体任务的专家只换倒向的目标(`Target` 子类)。
 
 **编写要点**
 
@@ -459,9 +459,9 @@ def play_once(env):
 - 手写候选(不用 GraspGenX)时给 `choose_chain` **足够多的候选**(多个 yaw × 多个 pitch/高度),顺序即优先级。候选太少 → 大量 `plan_failed`。
 - arx_x5 的关节 5(腕)在约 ±1.56 rad 自碰,`plan_to_pose` 会自动重试并拒绝越界路径(`collect_env.SIM_JOINT_BOUNDS`)。
 - 抓取后用 `is_held` 检查,**抓丢尽早抛异常**,不要让失败 episode 跑满全程浪费时间;自定义异常类会被归为 `expert_error`。
-- 抓取后的目标位姿最好用**实测**的 ee→物体变换反推(`place_actor` 内部就是这样做的,倒酒见 `pour_liquid_into_cup._Pour.ee_pose` / `regrasp`),这样轻微滑动也不影响后续动作。
+- 抓取后的目标位姿最好用**实测**的 ee→物体变换反推(`place_actor` 内部就是这样做的,倒酒见 `pour_liquid_into_cup.play_once` 抬起后重建的 `b_T_ee`),这样轻微滑动也不影响后续动作。
 - 触发式判定(`trigger_check`,如 `is_axis_up` 的上升沿)需要专家**真的走过触发条件**,否则判定永远 pending,表现为 `check_failed: [... (on rising_edge of ...)]`。
-- 调参优先改文件顶部的常量(如 `PRE_GRASP`、`NECK_Z`、`DEPTH_MAX`、`MOUTH_BACK`、`FLOW_MIN` / `FLOW_MAX`、`TILT_MAX`),每次改完用 2.5 节固定 seed 复现对比。
+- 调参优先改文件顶部的常量(如 `NECK_Z`、`MOUTH_BACK`、`TILT_POUR`、`POUR_TIME`,或 `Target` 子类的 `MOUTH_ABOVE`),每次改完用 2.5 节固定 seed 复现对比。
 - 用 `logging.getLogger(__name__)` 打日志,不要 `print`;`ROBODOJO_COLLECT_LOG=INFO` 才会显示。
 
 ### 7.2 修改采样分布(任务 YAML)
