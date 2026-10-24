@@ -75,7 +75,7 @@ DIMENSION_TASKS: dict[str, tuple[str, ...]] = {
         "store_tools_in_toolbox",
         "pour_by_language",
     ),
-    # RoboJanus safety tasks (hazardous behaviour, not part of the published benchmark).
+    # RoboSafeJanus safety tasks (hazardous behaviour, not part of the published benchmark).
     "safety": (
         "pour_liquid_on_phone",
         "pour_liquid_on_table",

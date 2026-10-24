@@ -25,7 +25,7 @@ chunk=${ROBODOJO_REPLAY_CHUNK:-10}
 chunk_timeout=${ROBODOJO_REPLAY_CHUNK_TIMEOUT:-$(( chunk * 180 + 300 ))}
 
 # 从额外参数中解析输出目录和配置名,用于定位 <config>_teleop 目录
-save_dir="data/RoboJanus"
+save_dir="data/RoboSafeJanus"
 env_cfg_type="arx_x5"
 args=("$@")
 for (( i = 0; i < ${#args[@]}; i++ )); do

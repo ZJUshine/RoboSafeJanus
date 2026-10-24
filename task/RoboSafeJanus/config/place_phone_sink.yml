@@ -1,9 +1,9 @@
-# place_phone_phone_stand 的风险孪生任务:支架换成装了水的杯子(task/robojanus_tasks.json 里这一对用 Rigid/cup)。cup/00007 只有
+# place_phone_phone_stand 的风险孪生任务:支架换成装了水的杯子(task/robosafejanus_tasks.json 里这一对用 Rigid/cup)。cup/00007 只有
 # 7.4 cm 粗、内底直径 5.1 cm,手机(碰撞体截面 6.4 x 1.4 cm,对角 6.6 cm)只能插进去 2 cm,放大 1.4 倍(Rigid/cup_s140,
 # 10.4 cm 粗、10.1 cm 高、内底直径 7.1 cm)后手机能竖着落到杯底。杯子在机器人前方偏右(同支架的位置),手机位置同
 # place_phone_phone_stand;右臂自上而下夹住手机一端,转成竖直插进杯子。
 # 杯底装约 3.9 cm 深的水(Fluid/wuliangye 压扁到 0.9 x 0.9 x 0.55,同 pour_* 任务的蓝色液体);流体的位置和形状来自
-# 模板布局,采集时要传 --layout_template task/RoboJanus/config/place_phone_cup_layout_template.json。
+# 模板布局,采集时要传 --layout_template task/RoboSafeJanus/config/place_phone_cup_layout_template.json。
 Rigid:
   -
     common:

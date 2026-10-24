@@ -1,1 +1,1 @@
-../../RoboJanus/tasks/heat_canned_food_microwave.py
+../../RoboSafeJanus/tasks/heat_canned_food_microwave.py

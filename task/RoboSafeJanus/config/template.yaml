@@ -1,4 +1,4 @@
-# RoboJanus 任务配置模板：说明各参数的含义，具体任务的 yml 只注明特殊取值。
+# RoboSafeJanus 任务配置模板：说明各参数的含义，具体任务的 yml 只注明特殊取值。
 # 新建任务时复制为 <task_name>.yml（文件名与 tasks/<task_name>.py、类名一致），
 # 再在 task/RoboDojo/config/ 下建同名软链接。本文件不是任务，不会被任务清单扫描。
 # 参数的实际用法见 src/data_collect/layout_generator.py（采集布局）和 utils/cluttered_generator.py（评测布局）。

@@ -1,11 +1,11 @@
-"""把采集数据目录(默认 ``data/RoboJanus``)同步到 ModelScope 私有 dataset 仓库。
+"""把采集数据目录(默认 ``data/RoboSafeJanus``)同步到 ModelScope 私有 dataset 仓库。
 
-远端布局与本地一致:``data/RoboJanus/<task>/<config>/...`` → ``<repo>/RoboJanus/<task>/<config>/...``。
+远端布局与本地一致:``data/RoboSafeJanus/<task>/<config>/...`` → ``<repo>/RoboSafeJanus/<task>/<config>/...``。
 用法和行为与 ``upload_to_hf.py`` 对齐,每次运行做两步,可以反复执行:
     1. 上传:``HubApi.upload_folder`` 多线程、分批 commit、可断点续传。已提交文件按 (路径, mtime, size)
        记在 ``<local_dir 的父目录>/.cache/modelscope/`` 下的进度缓存里,重跑直接跳过;
        缓存丢失时会重新算 sha256,内容相同的 LFS 文件服务端复用,不会重复传输。
-    2. 删除:远端 ``RoboJanus/`` 下本地已不存在的文件(``--no_delete`` 关闭)。
+    2. 删除:远端 ``RoboSafeJanus/`` 下本地已不存在的文件(``--no_delete`` 关闭)。
        先上传后删除,上传有任何失败时不会删远端文件;本地目录为空时直接报错退出,防止误删整个远端。
 
 默认排除 ``_shards/``(并行采集的中间分片,合并后会被删除)。正在采集的任务请等它结束再上传,
@@ -19,7 +19,7 @@ https://www.modelscope.cn/my/myaccesstoken 生成,用 ``modelscope login --token
 用法:
     python src/data_collect/upload_to_modelscope.py --repo_id <user>/<repo> --dry_run   # 只看要删哪些文件
     python src/data_collect/upload_to_modelscope.py --repo_id <user>/<repo>
-    python src/data_collect/upload_to_modelscope.py --repo_id <user>/<repo> --exclude "RoboJanus/*_failed/*"
+    python src/data_collect/upload_to_modelscope.py --repo_id <user>/<repo> --exclude "RoboSafeJanus/*_failed/*"
 """
 
 import argparse
@@ -36,12 +36,12 @@ except ImportError:
 parser = argparse.ArgumentParser()
 parser.add_argument("--repo_id", type=str, default=os.environ.get("MS_DATA_REPO_ID"),
                     help="<user or org>/<repo>; 也可用环境变量 MS_DATA_REPO_ID")
-parser.add_argument("--local_dir", type=str, default="data/RoboJanus")
+parser.add_argument("--local_dir", type=str, default="data/RoboSafeJanus")
 parser.add_argument("--repo_type", type=str, default="dataset", choices=["dataset", "model"])
 parser.add_argument("--endpoint", type=str, default=None,
                     help="默认用 SDK 配置(MODELSCOPE_ENDPOINT,否则 https://www.modelscope.cn)")
 parser.add_argument("--exclude", type=str, nargs="*", default=[],
-                    help="额外排除的 fnmatch 模式(相对 local_dir 的父目录,如 'RoboJanus/*_failed/*')")
+                    help="额外排除的 fnmatch 模式(相对 local_dir 的父目录,如 'RoboSafeJanus/*_failed/*')")
 parser.add_argument("--num_workers", type=int, default=None, help="上传线程数(默认由 SDK 决定)")
 parser.add_argument("--no_delete", action="store_true", help="不删除远端多出来的文件")
 parser.add_argument("--dry_run", action="store_true", help="只统计和列出待删除文件,不上传、不删除")

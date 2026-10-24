@@ -1,1 +1,1 @@
-../../RoboJanus/tasks/place_phone_phone_stand.py
+../../RoboSafeJanus/tasks/place_phone_phone_stand.py

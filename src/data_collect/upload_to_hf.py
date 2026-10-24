@@ -1,11 +1,11 @@
-"""把采集数据目录(默认 ``data/RoboJanus``)同步到 Hugging Face 私有 dataset 仓库。
+"""把采集数据目录(默认 ``data/RoboSafeJanus``)同步到 Hugging Face 私有 dataset 仓库。
 
-远端布局与本地一致:``data/RoboJanus/<task>/<config>/...`` → ``<repo>/RoboJanus/<task>/<config>/...``。
+远端布局与本地一致:``data/RoboSafeJanus/<task>/<config>/...`` → ``<repo>/RoboSafeJanus/<task>/<config>/...``。
 
 每次运行做两步,可以反复执行:
     1. 上传:``HfApi.upload_large_folder`` 多线程、可断点续传,只传新增 / 修改过的文件
        (哈希缓存在 ``<local_dir 的父目录>/.cache/huggingface/``,中断后重跑即可续传)。
-    2. 删除:远端 ``RoboJanus/`` 下本地已不存在的文件,分批提交删除(``--no_delete`` 关闭)。
+    2. 删除:远端 ``RoboSafeJanus/`` 下本地已不存在的文件,分批提交删除(``--no_delete`` 关闭)。
        先上传后删除,上传失败时不会删任何远端文件;本地目录为空时直接报错退出,防止误删整个远端。
 
 默认排除 ``_shards/``(并行采集的中间分片,合并后会被删除)。正在采集的任务请等它结束再上传,
@@ -17,7 +17,7 @@ hf-mirror.com 只能下载,不支持上传,所以默认 endpoint 是 https://hug
 用法:
     python src/data_collect/upload_to_hf.py --repo_id <user>/<repo> --dry_run   # 只看要删哪些文件
     python src/data_collect/upload_to_hf.py --repo_id <user>/<repo>
-    python src/data_collect/upload_to_hf.py --repo_id <user>/<repo> --exclude "RoboJanus/*_failed/*"
+    python src/data_collect/upload_to_hf.py --repo_id <user>/<repo> --exclude "RoboSafeJanus/*_failed/*"
 """
 
 import argparse
@@ -30,11 +30,11 @@ from huggingface_hub.utils import filter_repo_objects
 parser = argparse.ArgumentParser()
 parser.add_argument("--repo_id", type=str, default=os.environ.get("HF_DATA_REPO_ID"),
                     help="<user or org>/<repo>; 也可用环境变量 HF_DATA_REPO_ID")
-parser.add_argument("--local_dir", type=str, default="data/RoboJanus")
+parser.add_argument("--local_dir", type=str, default="data/RoboSafeJanus")
 parser.add_argument("--repo_type", type=str, default="dataset", choices=["dataset", "model"])
 parser.add_argument("--endpoint", type=str, default=os.environ.get("HF_UPLOAD_ENDPOINT", "https://huggingface.co"))
 parser.add_argument("--exclude", type=str, nargs="*", default=[],
-                    help="额外排除的 fnmatch 模式(相对 local_dir 的父目录,如 'RoboJanus/*_failed/*')")
+                    help="额外排除的 fnmatch 模式(相对 local_dir 的父目录,如 'RoboSafeJanus/*_failed/*')")
 parser.add_argument("--num_workers", type=int, default=None, help="上传线程数(默认由 huggingface_hub 决定)")
 parser.add_argument("--no_delete", action="store_true", help="不删除远端多出来的文件")
 parser.add_argument("--delete_batch", type=int, default=1000, help="每个删除 commit 包含的文件数")

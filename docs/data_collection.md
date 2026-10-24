@@ -10,15 +10,15 @@
 
 | 管线           | 入口脚本                                                   | Python 入口                    | 录制内容              | 是否需要重放                           | 默认起始 seed | 输出目录                                    |
 | ------------ | ------------------------------------------------------ | ---------------------------- | ----------------- | -------------------------------- | --------- | --------------------------------------- |
-| 脚本专家(cuRobo) | `scripts/collect_data.sh` / `collect_data_parallel.sh` | `src/data_collect/expert_collection.py`   | 边执行边渲染相机,直接写 HDF5 | 否                                | `100000`  | `data/RoboJanus/<task>/<config>/`        |
-| PICO 遥操作     | `scripts/teleop_collect.sh`                            | `src/data_collect/teleop_collection.py` | 只录关节指令(不渲染观测相机)   | **是**,`scripts/teleop_replay.sh` | `200000`  | `data/RoboJanus/<task>/<config>_teleop/` |
+| 脚本专家(cuRobo) | `scripts/collect_data.sh` / `collect_data_parallel.sh` | `src/data_collect/expert_collection.py`   | 边执行边渲染相机,直接写 HDF5 | 否                                | `100000`  | `data/RoboSafeJanus/<task>/<config>/`        |
+| PICO 遥操作     | `scripts/teleop_collect.sh`                            | `src/data_collect/teleop_collection.py` | 只录关节指令(不渲染观测相机)   | **是**,`scripts/teleop_replay.sh` | `200000`  | `data/RoboSafeJanus/<task>/<config>_teleop/` |
 
 ```
-脚本专家:   collect_data.sh ──► expert_collection.py ──► data/RoboJanus/<task>/<config>/{data,preview_video,layout}
+脚本专家:   collect_data.sh ──► expert_collection.py ──► data/RoboSafeJanus/<task>/<config>/{data,preview_video,layout}
 并行:       collect_data_parallel.sh ──► N × collect_data.sh ──► _shards/<task>/w<k>/ ──► merge_shards.py ──► 同上
-遥操作:     teleop_collect.sh ──► teleop_collection.py ──► data/RoboJanus/<task>/<config>_teleop/raw/*.npz
+遥操作:     teleop_collect.sh ──► teleop_collection.py ──► data/RoboSafeJanus/<task>/<config>_teleop/raw/*.npz
                                                          │
-            teleop_replay.sh ──► teleop_replay.py ◄──────┘──► data/RoboJanus/<task>/<config>_teleop/{data,preview_video,layout}
+            teleop_replay.sh ──► teleop_replay.py ◄──────┘──► data/RoboSafeJanus/<task>/<config>_teleop/{data,preview_video,layout}
 ```
 
 - `<config>` 取自 `env_cfg/<env_cfg_type>.yml` 的 `config_name`,默认 `arx_x5`。
@@ -42,8 +42,8 @@
 | `src/data_collect/merge_shards.py`                                | 合并并行 worker 的分片                            | 一般不改               |
 | `src/data_collect/teleop_collection.py` / `xr_input.py` / `teleop_replay.py` | 遥操作录制、手柄输入、重放渲染                            | 改按键映射 / IK / 输入设备  |
 | `src/data_collect/eval_layouts.py`                                | 为新任务 / 探针任务冻结评测布局                          | 需要新增评测布局时          |
-| `src/data_collect/upload_to_hf.py`                                | 把 `data/RoboJanus` 同步到 HF 私有 dataset 仓库         | 一般不改               |
-| `src/data_collect/upload_to_modelscope.py`                        | 把 `data/RoboJanus` 同步到 ModelScope 私有 dataset 仓库 | 一般不改               |
+| `src/data_collect/upload_to_hf.py`                                | 把 `data/RoboSafeJanus` 同步到 HF 私有 dataset 仓库         | 一般不改               |
+| `src/data_collect/upload_to_modelscope.py`                        | 把 `data/RoboSafeJanus` 同步到 ModelScope 私有 dataset 仓库 | 一般不改               |
 
 ---
 
@@ -109,7 +109,7 @@ bash scripts/collect_data.sh pour_liquid_into_cup 100 0 --keep_failed
 | `--episode_num`                         | `50`                     | 目标**成功**条数(含已有的)                                          |
 | `--start_seed`                          | `100000`                 | 首个布局 seed(只在没有 `seed.txt`/`next_seed.txt` 时生效)            |
 | `--max_tries`                           | `0` = `10 × episode_num` | 尝试次数上限                                                    |
-| `--save_dir`                            | `data/RoboJanus`          | 输出根目录                                                     |
+| `--save_dir`                            | `data/RoboSafeJanus`          | 输出根目录                                                     |
 | `--layout_source` / `--layout_template` | `random` / 无             | 见第 1 节                                                    |
 | `--no_video`                            | 关                        | 不写 `preview_video/`                                       |
 | `--save_fail_video`                     | 关                        | 失败尝试写 `video_fail/seed_<seed>_<camera>.mp4`               |
@@ -130,7 +130,7 @@ Isaac Sim 反复加载场景会泄漏渲染资源,单进程跑几十条后可能
 - `seed.txt`:已成功 seed 列表(空格分隔,条数 = 已保存 episode 数,也决定 `episode_<i>` 编号);
 - `next_seed.txt`:下一个要尝试的 seed(跳过已失败的)。
 
-因此:**中断后重跑同一条命令即可续采**;调大 `episode_num` 会接着往下采;要从头来就删除整个 `data/RoboJanus/<task>/<config>/`。
+因此:**中断后重跑同一条命令即可续采**;调大 `episode_num` 会接着往下采;要从头来就删除整个 `data/RoboSafeJanus/<task>/<config>/`。
 达到尝试上限仍未采满时,脚本打印 `incomplete` 并返回非零。
 
 ### 2.3 多进程并行:`scripts/collect_data_parallel.sh`
@@ -149,7 +149,7 @@ ROBODOJO_PER_GPU=3 bash scripts/collect_data_parallel.sh pour_liquid_into_cup 10
 - 手动合并:
   ```bash
   python src/data_collect/merge_shards.py --task_name pour_liquid_into_cup \
-    --shard_root data/RoboJanus/_shards/pour_liquid_into_cup --config_name arx_x5
+    --shard_root data/RoboSafeJanus/_shards/pour_liquid_into_cup --config_name arx_x5
   ```
 - 合并是**复制后删除**:每条 episode 在目标中存在且大小一致后,才删掉分片里的 hdf5 / layout / 预览视频;分片的 `video_fail/` 也一并删除。目标中缺失或大小不一致的 episode 不删,并打印提示。加 `--keep_shards` 可以只复制不删。
 - `collect_data_parallel.sh` 在所有 worker 和合并均成功后删掉整个分片目录 `<save_dir>/_shards/<task>`(`--remove_shards`,含各 worker 的 `seed.txt` / `next_seed.txt` / `collect_info.json` / `logs/`),不留续采记录;最后一个任务清理后,空的 `_shards/` 也删除。任一 worker 失败时仍合并已采集的数据,保留分片和日志供续采,并返回非零。有 episode 在目标中缺失、大小不一致,或目录内还有未记录的数据 / 其他配置时,也保留分片目录并返回非零。并行采集或手动合并加 `--keep_shards` 则保留所有分片文件;它与 `--remove_shards` 互斥。
@@ -169,7 +169,7 @@ ROBODOJO_PER_GPU=3 bash scripts/collect_data_parallel.sh pour_liquid_into_cup 10
 `--keep_failed` 输出(与成功目录结构相同):
 
 ```
-data/RoboJanus/<task>_failed/<config>/
+data/RoboSafeJanus/<task>_failed/<config>/
   data/episode_0000000.hdf5        额外有 meta/{success, fail_type, fail_reason, seed}
   preview_video/  layout/
   fail_info.jsonl                  每行 {"episode","steps","success","fail_type","fail_reason","seed"}
@@ -195,7 +195,7 @@ ROBODOJO_COLLECT_LOG=INFO bash scripts/collect_data.sh pour_liquid_into_cup 1 0 
 ### 2.6 输出
 
 ```
-data/RoboJanus/<task>/<config>/
+data/RoboSafeJanus/<task>/<config>/
   data/episode_0000000.hdf5                     XPolicyLab HDF5
   preview_video/episode_0000000_<camera>.mp4    每路相机一个,collect_freq Hz (默认 25)
   layout/episode_0000000.json                   该 episode 的完整布局(可用于复现 / 重放)
@@ -257,7 +257,7 @@ bash scripts/teleop_collect.sh pour_liquid_into_cup 1 0 --input scripted --headl
 ### 3.4 输出(还不能直接训练)
 
 ```
-data/RoboJanus/<task>/<config>_teleop/
+data/RoboSafeJanus/<task>/<config>_teleop/
   raw/episode_0000000.npz     每个物理步的关节/夹爪指令(pos.* / vel.*, float64)、chunk_lens、
                               meta(task、env_cfg_type、seed、完整 layout、dt、substeps、teleop_success、末态关节)
   next_seed.txt               续采位置
@@ -302,7 +302,7 @@ PYTHONPATH=.:XPolicyLab CUDA_VISIBLE_DEVICES=0 python src/data_collect/teleop_re
 ## 5. 检查采集结果
 
 ```bash
-D=data/RoboJanus/<task>/<config>
+D=data/RoboSafeJanus/<task>/<config>
 ls $D/data | wc -l                                  # 条数
 cat $D/collect_info.json
 python -c "import h5py; h5py.File('$D/data/episode_0000000.hdf5').visititems(lambda n,o: print(n, getattr(o,'shape','')))"
@@ -491,7 +491,7 @@ def play_once(env):
 ### 7.4 修改机器人 / 相机 / 采集频率
 
 - 入口 `env_cfg/<name>.yml`(采集和评测共用),其中 `config.{sim,scene,robot,camera}` 分别指向 `env_cfg/{sim,scene,robot,camera}/*.yml`。
-- **新建**一个 `env_cfg/<my_cfg>.yml` 并改 `config_name`,然后采集时 `--env_cfg_type my_cfg`,输出自动落到 `data/RoboJanus/<task>/<config_name>/`,不会覆盖已有数据。不要直接改 `arx_x5.yml` 等共享配置。
+- **新建**一个 `env_cfg/<my_cfg>.yml` 并改 `config_name`,然后采集时 `--env_cfg_type my_cfg`,输出自动落到 `data/RoboSafeJanus/<task>/<config_name>/`,不会覆盖已有数据。不要直接改 `arx_x5.yml` 等共享配置。
 - `observation.collect_freq`:录帧频率(默认 25 Hz),也写进 HDF5 和视频帧率。
 - 相机内外参:`common.build_env_cfg` 在采集时强制打开 `intrinsic_matrix` / `extrinsic_matrix`,无需改 yml。
 - 换了机器人:`collect_env.py` 的 `SIM_JOINT_BOUNDS` 只为 `x5` 配置了腕关节限位,新机器人如有类似 URDF 占位限位问题需要在这里补;专家里的抓取朝向 / `gripper_bias` 也要重新验证。
@@ -608,9 +608,9 @@ python src/data_collect/upload_to_hf.py --repo_id <user>/<repo> --dry_run
 python src/data_collect/upload_to_hf.py --repo_id <user>/<repo>
 ```
 
-- 远端路径与本地一致:`data/RoboJanus/<task>/...` → `<repo>/RoboJanus/<task>/...`。仓库不存在时自动建为**私有** dataset;已存在但为公开时报错退出。
+- 远端路径与本地一致:`data/RoboSafeJanus/<task>/...` → `<repo>/RoboSafeJanus/<task>/...`。仓库不存在时自动建为**私有** dataset;已存在但为公开时报错退出。
 - 可反复运行:用 `upload_large_folder` 断点续传,哈希缓存在 `data/.cache/huggingface/`,中断后重跑即可续传;本地删掉的 episode 会在上传完成后从远端删除(`--no_delete` 关闭)。本地目录为空时拒绝同步。
-- 默认排除 `_shards/`;`--exclude "RoboJanus/*_failed/*"` 可再排除失败尝试。正在采集的任务等结束再传。
+- 默认排除 `_shards/`;`--exclude "RoboSafeJanus/*_failed/*"` 可再排除失败尝试。正在采集的任务等结束再传。
 - hf-mirror.com 不支持上传,脚本默认直连 `https://huggingface.co`(忽略 `HF_ENDPOINT`,可用 `--endpoint` / `HF_UPLOAD_ENDPOINT` 覆盖),需要能直连或设置 `HTTPS_PROXY`。
 
 **ModelScope(`upload_to_modelscope.py`)**
@@ -625,13 +625,13 @@ python src/data_collect/upload_to_modelscope.py --repo_id <user>/<repo> --dry_ru
 python src/data_collect/upload_to_modelscope.py --repo_id <user>/<repo>
 ```
 
-- 参数和行为与 `upload_to_hf.py` 一致:远端路径 `<repo>/RoboJanus/<task>/...`,仓库不存在时自动建为**私有** dataset,已存在但非私有时报错退出;默认排除 `_shards/`,`--exclude` 写法相同;先上传后删除(`--no_delete` 关闭),上传有失败时不删远端,本地为空时拒绝同步。
+- 参数和行为与 `upload_to_hf.py` 一致:远端路径 `<repo>/RoboSafeJanus/<task>/...`,仓库不存在时自动建为**私有** dataset,已存在但非私有时报错退出;默认排除 `_shards/`,`--exclude` 写法相同;先上传后删除(`--no_delete` 关闭),上传有失败时不删远端,本地为空时拒绝同步。
 - 可反复运行:已提交文件记在 `data/.cache/modelscope/upload_<user>__<repo>.json`,中断后重跑即续传;缓存丢失时会重新算 sha256,内容相同的文件服务端复用,不重复传输。
 - ModelScope 在国内可直连,不需要代理;国际站用 `--endpoint https://www.modelscope.ai`。
 
 ## 8.6 在外部服务器上采集,再拉回本地(rsync over SSH)
 
-外部服务器用来**跑采集**:本地先把采集所需的代码和资产同步过去,服务器采完后再把数据拉回本地 `data/RoboJanus/`。
+外部服务器用来**跑采集**:本地先把采集所需的代码和资产同步过去,服务器采完后再把数据拉回本地 `data/RoboSafeJanus/`。
 
 ```bash
 SERVER=<user>@<host>            # 外部服务器
@@ -645,11 +645,11 @@ TASK=<task>
 
 ```bash
 ssh -p $PORT $SERVER "mkdir -p $REPO"
-# 代码(预览去掉 -n 即真正传输;task/RoboDojo 下指向 task/RoboJanus 的相对软链接会原样保留)
+# 代码(预览去掉 -n 即真正传输;task/RoboDojo 下指向 task/RoboSafeJanus 的相对软链接会原样保留)
 # third_party 只需 IsaacLab、curobo(GraspGenX 只用于离线生成抓取缓存,采集用不到)
 rsync -avn --exclude __pycache__ --exclude third_party/GraspGenX --exclude third_party/RoboTwin -e "ssh -p $PORT" \
   env env_cfg task src utils scripts docs docker third_party XPolicyLab pyproject.toml $SERVER:$REPO/
-# 抓取缓存与场景描述(不含 data/RoboJanus 下的数据)
+# 抓取缓存与场景描述(不含 data/RoboSafeJanus 下的数据)
 rsync -av -e "ssh -p $PORT" data/grasp_pose data/scenes $SERVER:$REPO/data/
 # 资产:本地 Assets 是软链接,用 -L 传实际内容;外部资产原件在 ext_assets/robodojo_format
 rsync -avL --partial -e "ssh -p $PORT" Assets/ $SERVER:$REPO/Assets/
@@ -674,22 +674,22 @@ rsync -av --partial -e "ssh -p $PORT" ext_assets/robodojo_format ext_assets/inte
 
 ```bash
 # 预览:只列出将要传输的文件
-rsync -avn -e "ssh -p $PORT" $SERVER:$REPO/data/RoboJanus/$TASK/ data/RoboJanus/$TASK/
+rsync -avn -e "ssh -p $PORT" $SERVER:$REPO/data/RoboSafeJanus/$TASK/ data/RoboSafeJanus/$TASK/
 # 传输(可断点续传,中断后重跑同一条命令)
-rsync -av --partial --progress -e "ssh -p $PORT" $SERVER:$REPO/data/RoboJanus/$TASK/ data/RoboJanus/$TASK/
-# 核对条数(应与服务器上 ls $REPO/data/RoboJanus/$TASK/<config>/data | wc -l 一致)
-ls data/RoboJanus/$TASK/<config>/data | wc -l
+rsync -av --partial --progress -e "ssh -p $PORT" $SERVER:$REPO/data/RoboSafeJanus/$TASK/ data/RoboSafeJanus/$TASK/
+# 核对条数(应与服务器上 ls $REPO/data/RoboSafeJanus/$TASK/<config>/data | wc -l 一致)
+ls data/RoboSafeJanus/$TASK/<config>/data | wc -l
 ```
 
 - 等服务器上采集和合并**全部结束**再拉:并行采集合并时会重新编号,正在写入的 `_shards/` 不要拉。
-- 需要失败样本时,把服务器上的 `data/RoboJanus/${TASK}_failed/` 用同样的命令再拉一次。
+- 需要失败样本时,把服务器上的 `data/RoboSafeJanus/${TASK}_failed/` 用同样的命令再拉一次。
 - 默认不加 `--delete`,不会删除本地已有的文件;需要让本地与服务器完全一致时再加。
 
 ---
 
 ## 9. 已知问题 / 注意事项
 
-- 若在 `data/RoboJanus/<task>/<config>/` 下看到 `failed/` 子目录,它不是当前代码写的(多半是更早版本的产物);当前版本 `--keep_failed` 写到同级 `<task>_failed/<config>/`。
+- 若在 `data/RoboSafeJanus/<task>/<config>/` 下看到 `failed/` 子目录,它不是当前代码写的(多半是更早版本的产物);当前版本 `--keep_failed` 写到同级 `<task>_failed/<config>/`。
 - 当前 `task/RoboDojo/experts/` 只有 `pour_liquid_into_cup.py`,其他任务需要先写专家才能用脚本专家管线。
 - 把 `.sh` 的 `--redo` 用于重放无效(见第 4 节)。
 - 并行采集默认在合并验证通过后删除整个任务分片目录;手动合并不加清理选项时,只删除已合并的数据文件,保留续采用的记录和日志。`--keep_shards` 保留全部分片文件。

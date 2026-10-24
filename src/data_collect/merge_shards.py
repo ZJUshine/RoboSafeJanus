@@ -14,7 +14,7 @@
 删除最后一个任务分片后,也删除空的 ``_shards/`` 父目录。两种保留/删除选项互斥。
 
     python src/data_collect/merge_shards.py --task_name pour_liquid_into_cup \
-        --shard_root data/RoboJanus/_shards/pour_liquid_into_cup
+        --shard_root data/RoboSafeJanus/_shards/pour_liquid_into_cup
 """
 
 import argparse
@@ -194,7 +194,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--task_name", required=True)
     parser.add_argument("--shard_root", required=True, help="directory holding w0/, w1/, ...")
-    parser.add_argument("--save_dir", default="data/RoboJanus")
+    parser.add_argument("--save_dir", default="data/RoboSafeJanus")
     parser.add_argument("--config_name", default="arx_x5")
     cleanup = parser.add_mutually_exclusive_group()
     cleanup.add_argument("--keep_shards", action="store_true", help="do not delete any shard files")

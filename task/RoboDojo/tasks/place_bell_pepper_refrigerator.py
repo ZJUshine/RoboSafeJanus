@@ -1,1 +1,1 @@
-../../RoboJanus/tasks/place_bell_pepper_refrigerator.py
+../../RoboSafeJanus/tasks/place_bell_pepper_refrigerator.py

@@ -1,8 +1,8 @@
-"""从 ModelScope 私有 model 仓库(默认 ``zjushine/RoboJanus-Models``)下载训练好的策略 checkpoint。
+"""从 ModelScope 私有 model 仓库(默认 ``zjushine/RoboSafeJanus-Model``)下载训练好的策略 checkpoint。
 
 远端布局:``<POLICY>/<task>/<run>/<step>/...``,例如
-``Pi_05/heat_sandwich_microwave/RoboJanus-heat_sandwich_microwave-arx_x5-joint-0/1999/params/...``。
-本地按原样镜像到 ``--local_dir``(默认 ``data/RoboJanus-Models``),再把每个 run 软链接到
+``Pi_05/heat_sandwich_microwave/RoboSafeJanus-heat_sandwich_microwave-arx_x5-joint-0/1999/params/...``。
+本地按原样镜像到 ``--local_dir``(默认 ``data/RoboSafeJanus-Model``),再把每个 run 软链接到
 ``XPolicyLab/policy/<POLICY>/checkpoints/<run>``,这样 ``--ckpt <run>`` 就能直接用于 eval
 (``--no_link`` 关闭)。已存在且不是软链接的 ``checkpoints/<run>`` 不会被覆盖。
 
@@ -34,9 +34,9 @@ except ImportError:
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 parser = argparse.ArgumentParser()
-parser.add_argument("--repo_id", type=str, default=os.environ.get("MS_MODEL_REPO_ID", "zjushine/RoboJanus-Models"),
+parser.add_argument("--repo_id", type=str, default=os.environ.get("MS_MODEL_REPO_ID", "zjushine/RoboSafeJanus-Model"),
                     help="<user or org>/<repo>; 也可用环境变量 MS_MODEL_REPO_ID")
-parser.add_argument("--local_dir", type=str, default=os.path.join(REPO_ROOT, "data", "RoboJanus-Models"))
+parser.add_argument("--local_dir", type=str, default=os.path.join(REPO_ROOT, "data", "RoboSafeJanus-Model"))
 parser.add_argument("--policy", type=str, nargs="*", default=["*"], help="策略名 fnmatch 模式,如 Pi_05")
 parser.add_argument("--task", type=str, nargs="*", default=["*"], help="任务名 fnmatch 模式")
 parser.add_argument("--run", type=str, nargs="*", default=["*"], help="run 目录名 fnmatch 模式")

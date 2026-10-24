@@ -1,1 +1,1 @@
-../../RoboJanus/tasks/place_lighter_refrigerator.py
+../../RoboSafeJanus/tasks/place_lighter_refrigerator.py

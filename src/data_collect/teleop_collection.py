@@ -37,7 +37,7 @@ parser.add_argument("--task_name", type=str, required=True)
 parser.add_argument("--env_cfg_type", type=str, default="arx_x5", help="env_cfg/<name>.yml (robot/camera/obs)")
 parser.add_argument("--episode_num", type=int, default=50, help="episodes to save in this session")
 parser.add_argument("--start_seed", type=int, default=200000, help="first layout seed (scripted uses 100000+)")
-parser.add_argument("--save_dir", type=str, default="data/RoboJanus")
+parser.add_argument("--save_dir", type=str, default="data/RoboSafeJanus")
 parser.add_argument("--layout_source", choices=("random", "eval"), default="random")
 parser.add_argument("--layout_template", type=str, default=None, help="task name or json whose fixtures to reuse")
 parser.add_argument(

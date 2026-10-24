@@ -28,7 +28,7 @@ chunk=${ROBODOJO_COLLECT_CHUNK:-15}
 chunk_timeout=${ROBODOJO_COLLECT_CHUNK_TIMEOUT:-$(( chunk * 120 + 300 ))}
 
 # 从额外参数中解析出输出目录、配置名和总尝试上限,用于定位 seed.txt 和控制循环
-save_dir="data/RoboJanus"
+save_dir="data/RoboSafeJanus"
 env_cfg_type="arx_x5"
 max_tries=$(( episode_num * 10 ))
 args=("$@")
