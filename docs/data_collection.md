@@ -659,8 +659,8 @@ rsync -av --partial -e "ssh -p $PORT" ext_assets/robodojo_format ext_assets/inte
 - 资产里有本地仓库的**绝对路径**:`ArtVIP_*` / `GenieSim_*` 包装的 `object.usd`(均为 ASCII usda)和 `metadata.json` 引用 `ext_assets/robodojo_format/...`,`Assets/Robots/*/curobo.yml` 里有 `asset_root_path` / `urdf_path`,`ext_assets/integrate/manifest.json` 也有。服务器上的仓库路径不同,同步后在服务器上统一替换,否则这些资产加载失败:
 
   ```bash
-  ssh -p $PORT $SERVER "cd $REPO && grep -rlZ --include='*.usd' --include='*.json' --include='*.yml' /mnt/hierophant-1/xuancun/RoboJanus/ Assets ext_assets/integrate \
-    | xargs -0 sed -i 's#/mnt/hierophant-1/xuancun/RoboJanus/#$REPO/#g'"
+  ssh -p $PORT $SERVER "cd $REPO && grep -rlZ --include='*.usd' --include='*.json' --include='*.yml' /home/xuancun/RoboSafeJanus/ Assets ext_assets/integrate \
+    | xargs -0 sed -i 's#/home/xuancun/RoboSafeJanus/#$REPO/#g'"
   # 该服务器的 NFS 上 sed -i 生成的新文件权限为 0000,需恢复
   ssh -p $PORT $SERVER "cd $REPO && find Assets ext_assets/integrate -type f -perm 0000 -exec chmod 664 {} +"
   ```
