@@ -1,0 +1,64 @@
+Rigid:
+  -
+    common:
+      # 瓶子在灶台前方左右两侧(灶台在桌子靠后的位置,宽 0.40)
+      xlim: [[-0.25, -0.12], [0.12, 0.25]]
+      ylim: [-0.24, -0.16]
+      rotate_rand: False
+      rotate_deg: 0
+      relative_plane: "Table"
+      qpos: [1, 0, 0, 0]
+      margin: 0.02
+
+    category:
+      -
+        name: "wuliangye"
+        index: [0]
+
+    select_mode:
+      nums: [1]
+      mode: "unique"
+      label: ["bottle"]
+
+Articulation:
+  -
+    common:
+      # 两个灶头沿 x 排列,正面(旋钮)朝向机器人
+      xlim: [-0.02, 0.02]
+      ylim: [0.04, 0.08]
+      rotate_rand: True
+      rotate_deg: [-5, 5]
+      # 布局按外接圆让物体彼此分开(灶台 r 0.23),缩小使瓶子能放在灶台前方
+      margin: -0.03
+      relative_plane: "Table"
+
+    category:
+      -
+        # ArtVIP 燃气灶 00006 缩放至 0.6(0.40 x 0.23 x 0.05 m),由 ext_assets/integrate/scaled_variant.py 生成
+        name: "ArtVIP_gas_cooker_s060"
+        index: [6]
+
+    select_mode:
+      nums: [1]
+      mode: "unique"
+      label: ["stove"]
+
+Fluid:
+  -
+    common:
+      xlim: [0.0, 0.0]
+      ylim: [0.0, 0.0]
+      zlim: [-0.133, -0.133]
+      rotate_rand: False
+      relative_plane: "bottle"
+      check_mode: "enforce"
+
+    category:
+      -
+        name: "oil"
+        index: [0]
+
+    select_mode:
+      nums: [1]
+      mode: "unique"
+      label: ["wine"]

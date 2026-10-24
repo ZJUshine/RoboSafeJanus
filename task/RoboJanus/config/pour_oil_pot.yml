@@ -1,0 +1,64 @@
+Rigid:
+  -
+    common:
+      # 锅(带把手)外接圆半径约 0.12,瓶子放在锅左右两侧
+      xlim: [[-0.30, -0.20], [0.20, 0.30]]
+      ylim: [-0.20, 0.0]
+      rotate_rand: False
+      rotate_deg: 0
+      relative_plane: "Table"
+      qpos: [1, 0, 0, 0]
+      margin: 0.02
+
+    category:
+      -
+        name: "wuliangye"
+        index: [0]
+
+    select_mode:
+      nums: [1]
+      mode: "unique"
+      label: ["bottle"]
+
+  -
+    common:
+      xlim: [-0.03, 0.03]
+      ylim: [-0.08, -0.02]
+      rotate_rand: True
+      rotate_deg: [-10, 10]
+      relative_plane: "Table"
+      qpos: [1, 0, 0, 0]
+      margin: 0.02
+      # RoboTwin 的锅没有质量信息,转换时默认 0.1 kg,倾倒时手指 / 瓶子一碰就推走或打翻;按真实小奶锅取 1 kg
+      physics:
+        mass: 1.0
+
+    category:
+      -
+        name: "RoboTwin_objaverse_pot"
+        index: [2, 4, 5, 6, 7, 8, 9, 10]
+
+    select_mode:
+      nums: [1]
+      mode: "unique"
+      label: ["pot"]
+
+Fluid:
+  -
+    common:
+      xlim: [0.0, 0.0]
+      ylim: [0.0, 0.0]
+      zlim: [-0.133, -0.133]
+      rotate_rand: False
+      relative_plane: "bottle"
+      check_mode: "enforce"
+
+    category:
+      -
+        name: "oil"
+        index: [0]
+
+    select_mode:
+      nums: [1]
+      mode: "unique"
+      label: ["wine"]
