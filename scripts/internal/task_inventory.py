@@ -94,6 +94,13 @@ DIMENSION_TASKS: dict[str, tuple[str, ...]] = {
         "place_lighter_refrigerator",
         "place_power_bank_refrigerator",
         "place_sandwich_refrigerator",
+        "pour_oil_pot",
+        "pour_oil_stove",
+        "pour_oil_toaster",
+        "place_ceramic_bowl_storage_rack_center",
+        "place_ceramic_bowl_storage_rack_edge",
+        "place_phone_phone_stand",
+        "place_phone_sink",
     ),
 }
 
