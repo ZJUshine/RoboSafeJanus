@@ -439,6 +439,9 @@ def _pick_place_direct(
     after_close=None,
     retreat=0.0,
     reuse_tol=PRED_REUSE_TOL,
+    grasp_open=1.0,
+    release_open=1.0,
+    retreat_fallback=False,
 ):
     """三段运动、每段一次 cuRobo 规划的抓取 + 放置(见模块说明):
 
@@ -451,6 +454,11 @@ def _pick_place_direct(
     - ``retreat`` > 0:松开后先沿接近方向退出这么远(一次规划,不带物体),再带着原尺寸的物体回初始位姿。竖放在隔板上的
       瓶子要这样:松手位姿上 cuRobo 偏保守的腕部碰撞球已经伸进了瓶子的包围盒,直接回程只能把物体缩小 / 去掉,回程路径
       贴着瓶子扫过去,一蹭就倒。
+    - ``grasp_open`` / ``release_open``:去抓取前 / 松手时夹爪张开到的归一化开度(默认全开)。碗沿这种斜着抓的薄壁,
+      全开时里面那根手指伸到碗底以下,要只张开一部分。``release_open`` < 1 时退出后、回初始位姿前再全开(任务判定要求
+      夹爪张开)。
+    - ``retreat_fallback``:沿接近方向的直线退出规划不到时,改为不带直线约束规划到同一位姿,还不行就不退、直接回程
+      (默认 False:直接报错)。
     """
     planner = env.robot_manager.planner[env.robot(ARM).robot_name]
     home_pose = env.get_arm_pose(ARM)
@@ -483,7 +491,7 @@ def _pick_place_direct(
         raise PlanFailError(f"{ARM}: no grasp with a reachable release: " + "; ".join(reasons[:4] + reasons[-2:]))
     g, r1, pred_r2 = chosen
     pred_ee_T_obj = np.linalg.inv(_mat(g)) @ obj0
-    env.open_gripper(ARM)
+    env.open_gripper(ARM, grasp_open)
     env.execute_plan(ARM, r1)
     close(g)
     env.delay(GRASP_SETTLE)
@@ -503,7 +511,7 @@ def _pick_place_direct(
                 f"{ARM}: no release pose reachable with the measured grasp ({label} moved {moved_by:.3f} m)"
             )
     env.execute_plan(ARM, r2, carry_slow)
-    env.open_gripper(ARM)
+    env.open_gripper(ARM, release_open)
     env.delay(RELEASE_SETTLE)
     tries = ("return", False)
     if retreat > 0:
@@ -516,10 +524,15 @@ def _pick_place_direct(
             rb = _plan_linear(env, _pose(back))
             if rb is not None:
                 break
-        if rb is None:
+        if rb is None and retreat_fallback:
+            rb = _plan_once(env, _pose(back))
+        if rb is not None:
+            env.execute_plan(ARM, rb)
+            tries = ("return",)
+        elif not retreat_fallback:
             raise PlanFailError(f"{ARM}: cannot back {retreat:.2f} m out of the release pose")
-        env.execute_plan(ARM, rb)
-        tries = ("return",)
+    if release_open < 1.0:
+        env.open_gripper(ARM)
 
     # ---- 3. 松手位姿 -> 初始关节,一次规划。先把物体当障碍物(免得退出时碰到它);物体松手后滚 / 倒到指间时起点就和它的
     # 盒子重叠,cuRobo 判起点碰撞,这时不带物体再规划。关节空间规划不通时改为规划到初始末端位姿
