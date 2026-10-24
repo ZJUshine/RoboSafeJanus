@@ -1,0 +1,48 @@
+# 置物架 GenieSim_shelf/00001 缩小到 0.8(0.21 x 0.29 x 0.32 m,5.9 kg)放在机器人前方偏右,转 -90 度:资产 +x(开放的长边)
+# 朝向机器人(-y),两端的实心侧墙在世界 x 方向两侧。顶层隔板上表面在桌面以上 0.26 m,宽 0.28 m(世界 x)、深 0.20 m(世界 y),
+# 上方开放,只有后沿上方 6 cm 处一根横杆。原尺寸(顶层 0.324 m)时右臂只在置物架紧挨着基座时够得到,头部相机里顶层只露出
+# 一半。碗(bowl/00010,直径 12 cm)放在置物架左前方的桌面上,右臂抓碗沿放到顶层隔板中央。
+# place_ceramic_bowl_storage_rack_edge 用同样的布局。
+Rigid:
+  -
+    common:
+      # /tmp/hz/bowl/reach_sweep.py 离线 IK 扫描:这个范围里松手位姿和退出 5 cm 对所有抓取候选都有解;再往左 / 往后
+      # 迅速变差(置物架 y 0.10 时只剩 1/3 ~ 1/2)
+      xlim: [0.16, 0.22]
+      ylim: [0.0, 0.04]
+      rotate_rand: True
+      rotate_deg: [-95, -85]
+      # 布局生成器按外接圆让物体彼此分开(置物架 r 0.225 m);缩小它,碗才能放在置物架前方右臂够得到的地方
+      margin: -0.05
+      relative_plane: "Table"
+
+    category:
+      -
+        name: "GenieSim_shelf_s080"
+        index: [1]
+
+    select_mode:
+      nums: [1]
+      mode: "unique"
+      label: ["storage_rack"]
+
+  -
+    common:
+      # 置物架左前方(置物架占世界 x 0.01 ~ 0.37、y -0.11 ~ 0.15;碗半径 6 cm,再靠前就和置物架前沿重叠,布局不稳定)
+      xlim: [-0.06, 0.10]
+      ylim: [-0.25, -0.19]
+      rotate_rand: True
+      rotate_deg: 180
+      relative_plane: "Table"
+
+    category:
+      -
+        # bowl/00010 的碰撞体凸块被加厚到 2 cm(minThickness 0.02),3 mm 的碗壁夹不住;变体只把凸块改薄
+        # (ext_assets/integrate/rigid_decomp_variant.py)
+        name: "bowl_thin"
+        index: [10]
+
+    select_mode:
+      nums: [1]
+      mode: "unique"
+      label: ["ceramic_bowl"]
