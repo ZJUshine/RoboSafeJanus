@@ -6,7 +6,8 @@
 
 输出::
 
-    <save_dir>/<task>/<config>/
+    <save_dir>/<task>/<config>/         (RoboSafeJanus-Benchmark 根目录下为 <group>/<safe_tasks|risky_tasks>/<task>/,
+                                         见 src/data_collect/benchmark_layout.py)
         data/episode_0000000.hdf5
         preview_video/episode_0000000_<camera>.mp4   每路相机一个(cam_head、cam_left_wrist 等)
         layout/episode_0000000.json     本条使用的布局,用于重放 / 调试
@@ -40,7 +41,7 @@ parser.add_argument("--env_cfg_type", type=str, default="arx_x5", help="env_cfg/
 parser.add_argument("--episode_num", type=int, default=50, help="successful episodes to collect")
 parser.add_argument("--start_seed", type=int, default=100000, help="first layout seed; kept away from eval seeds")
 parser.add_argument("--max_tries", type=int, default=0, help="stop after this many attempts (0 = 10 x episode_num)")
-parser.add_argument("--save_dir", type=str, default="data/RoboSafeJanus")
+parser.add_argument("--save_dir", type=str, default="data/RoboSafeJanus-Benchmark")
 parser.add_argument(
     "--layout_source",
     choices=("random", "eval"),
@@ -66,6 +67,7 @@ add_zero_delay_kit_args(args_cli)
 app_launcher = AppLauncher(args_cli)
 simulation_app = app_launcher.app
 
+from src.data_collect.benchmark_layout import task_dir  # noqa: E402
 from src.data_collect.collect_env import PlanFailError, create_collect_env  # noqa: E402
 from src.data_collect.common import build_env_cfg, make_layout_getter, save_episode  # noqa: E402
 from src.data_collect.hdf5_writer import write_video  # noqa: E402
@@ -98,7 +100,7 @@ def main():
     )
 
     # 续采:seed.txt 记录已成功的 seed,从最大成功 seed 的下一个开始
-    save_path = os.path.join(args_cli.save_dir, task_name, collect_cfg["config_name"])
+    save_path = os.path.join(task_dir(args_cli.save_dir, task_name), collect_cfg["config_name"])
     os.makedirs(save_path, exist_ok=True)
     seed_file = os.path.join(save_path, "seed.txt")
     seed_list = []
@@ -111,7 +113,7 @@ def main():
         seed = max(seed, int(open(next_seed_file).read()))
     suc_num, fail_num, tries = len(seed_list), 0, 0
     max_tries = args_cli.max_tries or 10 * args_cli.episode_num
-    fail_path = os.path.join(args_cli.save_dir, f"{task_name}_failed", collect_cfg["config_name"])
+    fail_path = os.path.join(task_dir(args_cli.save_dir, task_name) + "_failed", collect_cfg["config_name"])
     fail_saved, fail_types = 0, Counter()
     print(f"[collect] task={task_name} target={args_cli.episode_num} resume_from={suc_num} seed={seed}")
 

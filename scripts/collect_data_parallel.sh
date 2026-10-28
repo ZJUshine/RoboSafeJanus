@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # 每张 GPU 跑多个 worker 并行采集脚本专家轨迹,结束后合并成一个数据集。
 #   bash scripts/collect_data_parallel.sh <task_name> <episode_num> <gpu_ids> [传给 expert_collection.py 的额外参数]
-# 例: bash scripts/collect_data_parallel.sh pour_liquid_into_cup 100 5,6,7 --keep_failed
+# 例: bash scripts/collect_data_parallel.sh pour_water_bowl 100 5,6,7 --keep_failed
 #
 # 单个采集进程约占 9 GB 显存、半张卡(瓶颈在自身的 Python/物理循环),所以每张 GPU 由
 # `ROBODOJO_PER_GPU` 个 worker(默认 3)共享。worker k 运行 scripts/collect_data.sh,seed 从
 # start_seed + k * `ROBODOJO_SEED_STRIDE`(默认 1000)开始,写到 <save_dir>/_shards/<task>/w<k>/;
-# 全部结束后由 src/data_collect/merge_shards.py 合并到 <save_dir>/<task>/<config>/,采集和合并成功后删掉整个分片目录
+# 全部结束后由 src/data_collect/merge_shards.py 合并到 <save_dir>/<group>/<safe_tasks|risky_tasks>/<task>/<config>/,采集和合并成功后删掉整个分片目录
 # (``<save_dir>/_shards/<task>``,含各 worker 的 episode / seed.txt / logs);加 --keep_shards 可保留分片。
 set -euo pipefail
 
@@ -20,7 +20,7 @@ shift 3
 
 per_gpu=${ROBODOJO_PER_GPU:-3}
 stride=${ROBODOJO_SEED_STRIDE:-1000}
-save_dir="data/RoboSafeJanus"
+save_dir="data/RoboSafeJanus-Benchmark"
 start_seed=100000
 env_cfg_type="arx_x5"
 keep_shards=0
@@ -77,5 +77,5 @@ else
   merge_args+=(--remove_shards)
 fi
 python src/data_collect/merge_shards.py "${merge_args[@]}"
-echo "[collect_parallel] merged into ${save_dir}/${task_name}/${config_name}"
+echo "[collect_parallel] merged into $(python src/data_collect/benchmark_layout.py "${save_dir}" "${task_name}")/${config_name}"
 exit "${status}"

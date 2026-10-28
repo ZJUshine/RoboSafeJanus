@@ -22,7 +22,7 @@ from isaaclab.app import AppLauncher
 parser = argparse.ArgumentParser()
 parser.add_argument("--task_name", type=str, required=True)
 parser.add_argument("--env_cfg_type", type=str, default="arx_x5")
-parser.add_argument("--save_dir", type=str, default="data/RoboSafeJanus")
+parser.add_argument("--save_dir", type=str, default="data/RoboSafeJanus-Benchmark")
 parser.add_argument("--redo", action="store_true", help="re-render episodes that already have an HDF5")
 parser.add_argument("--keep_failed", action="store_true", help="write HDF5 even if the replay fails the success check")
 parser.add_argument("--no_video", action="store_true")
@@ -38,6 +38,7 @@ simulation_app = app_launcher.app
 
 import numpy as np  # noqa: E402
 
+from src.data_collect.benchmark_layout import task_dir  # noqa: E402
 from src.data_collect.collect_env import create_collect_env  # noqa: E402
 from src.data_collect.common import build_env_cfg, save_episode  # noqa: E402
 
@@ -61,7 +62,7 @@ def main():
     task_name, cfg_name = args_cli.task_name, args_cli.env_cfg_type
     env_cfg, collect_cfg = build_env_cfg(task_name, cfg_name)
     freq = int(collect_cfg["observation"].get("collect_freq", 25))
-    save_path = os.path.join(args_cli.save_dir, task_name, collect_cfg["config_name"] + "_teleop")
+    save_path = os.path.join(task_dir(args_cli.save_dir, task_name), collect_cfg["config_name"] + "_teleop")
     raw_dir = os.path.join(save_path, "raw")
     raws = sorted(f for f in os.listdir(raw_dir) if f.endswith(".npz")) if os.path.isdir(raw_dir) else []
     info_path = os.path.join(save_path, "replay_info.json")

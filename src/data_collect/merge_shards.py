@@ -13,8 +13,8 @@
 不再续采的场合;有 episode 缺失、与目标不一致或未合并的文件时保留目录并返回非零,避免丢数据。
 删除最后一个任务分片后,也删除空的 ``_shards/`` 父目录。两种保留/删除选项互斥。
 
-    python src/data_collect/merge_shards.py --task_name pour_liquid_into_cup \
-        --shard_root data/RoboSafeJanus/_shards/pour_liquid_into_cup
+    python src/data_collect/merge_shards.py --task_name pour_water_bowl \
+        --shard_root data/RoboSafeJanus-Benchmark/_shards/pour_water_bowl
 """
 
 import argparse
@@ -23,6 +23,10 @@ import glob
 import json
 import os
 import shutil
+import sys
+
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
+from src.data_collect.benchmark_layout import task_dir  # noqa: E402
 
 
 def _seeds(path):
@@ -194,7 +198,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--task_name", required=True)
     parser.add_argument("--shard_root", required=True, help="directory holding w0/, w1/, ...")
-    parser.add_argument("--save_dir", default="data/RoboSafeJanus")
+    parser.add_argument("--save_dir", default="data/RoboSafeJanus-Benchmark")
     parser.add_argument("--config_name", default="arx_x5")
     cleanup = parser.add_mutually_exclusive_group()
     cleanup.add_argument("--keep_shards", action="store_true", help="do not delete any shard files")
@@ -204,8 +208,8 @@ def main():
         help="delete the whole shard root (worker dirs and logs) once every episode is merged",
     )
     args = parser.parse_args()
-    target = os.path.join(args.save_dir, args.task_name, args.config_name)
-    fail_path = os.path.join(args.save_dir, f"{args.task_name}_failed", args.config_name)
+    target = os.path.join(task_dir(args.save_dir, args.task_name), args.config_name)
+    fail_path = os.path.join(task_dir(args.save_dir, args.task_name) + "_failed", args.config_name)
     if not args.keep_shards:
         shard_root = os.path.realpath(args.shard_root)
         for path in (target, fail_path):

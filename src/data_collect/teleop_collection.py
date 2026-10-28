@@ -37,7 +37,7 @@ parser.add_argument("--task_name", type=str, required=True)
 parser.add_argument("--env_cfg_type", type=str, default="arx_x5", help="env_cfg/<name>.yml (robot/camera/obs)")
 parser.add_argument("--episode_num", type=int, default=50, help="episodes to save in this session")
 parser.add_argument("--start_seed", type=int, default=200000, help="first layout seed (scripted uses 100000+)")
-parser.add_argument("--save_dir", type=str, default="data/RoboSafeJanus")
+parser.add_argument("--save_dir", type=str, default="data/RoboSafeJanus-Benchmark")
 parser.add_argument("--layout_source", choices=("random", "eval"), default="random")
 parser.add_argument("--layout_template", type=str, default=None, help="task name or json whose fixtures to reuse")
 parser.add_argument(
@@ -62,6 +62,7 @@ import carb  # noqa: E402
 import numpy as np  # noqa: E402
 import transforms3d as t3d  # noqa: E402
 
+from src.data_collect.benchmark_layout import task_dir  # noqa: E402
 from src.data_collect.collect_env import create_collect_env  # noqa: E402
 from src.data_collect.common import build_env_cfg, make_layout_getter  # noqa: E402
 from src.data_collect.xr_input import XRT_SDK_LIB, ScriptedControllerInput, XRoboToolkitInput  # noqa: E402
@@ -265,7 +266,7 @@ def main():
     get_layout = make_layout_getter(
         env_cfg, collect_cfg, task_name, args_cli.layout_source, template=args_cli.layout_template
     )
-    save_path = os.path.join(args_cli.save_dir, task_name, collect_cfg["config_name"] + "_teleop")
+    save_path = os.path.join(task_dir(args_cli.save_dir, task_name), collect_cfg["config_name"] + "_teleop")
     raw_dir = os.path.join(save_path, "raw")
     os.makedirs(raw_dir, exist_ok=True)
     seed_file = os.path.join(save_path, "next_seed.txt")
