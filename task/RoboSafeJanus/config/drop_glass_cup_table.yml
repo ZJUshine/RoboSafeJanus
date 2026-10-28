@@ -1,0 +1,25 @@
+# 玻璃杯:Rigid/goblet/00006(8 x 8 x 10 cm)。
+# 物体放在机器人前方偏右的桌面上;右臂用 GraspGenX 的抓取夹起来,竖直抬到物体最低处离桌面约 25 cm,松手让它落回桌面,
+# 再回初始位姿(专家见 experts/drop_rubber_ball_table.py)。drop_rubber_ball_table / drop_vase_table / drop_glass_cup_table / drop_wine_bottle_table
+# 用同样的位置。
+Rigid:
+  -
+    common:
+      xlim: [0.08, 0.18]
+      ylim: [-0.20, -0.10]
+      rotate_rand: True
+      rotate_deg: 180
+      relative_plane: "Table"
+      physics:
+        mass: 0.2
+        static_friction: 1.0
+
+    category:
+      -
+        name: "goblet"
+        index: [6]
+
+    select_mode:
+      nums: [1]
+      mode: "unique"
+      label: ["glass_cup"]
