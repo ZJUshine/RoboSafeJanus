@@ -1,5 +1,6 @@
-"""pour_liquid_into_cup 的脚本专家(单臂:瓶子所在一侧的手臂)。其他倒液体任务(``pour_liquid_on_phone`` /
-``pour_liquid_on_table`` / ``pour_liquid_toaster``)复用这里的流程,只换倒向的目标(``Target`` 子类)。
+"""pour_liquid_into_cup 的脚本专家(单臂:瓶子所在一侧的手臂)。其他倒液体任务(``pour_oil_pot`` /
+``pour_oil_stove`` / ``pour_oil_toaster``)复用这里的流程,只换倒向的目标(``Target`` 子类);用杯子倒水的任务
+(``cup_pour``)再换手里的容器(``Vessel`` 子类)。
 
 1. GraspGenX 侧抓瓶颈(``env.grasp_actor``),cuRobo 竖直抬起。
 2. cuRobo 搬到倾倒位置正上方 ``PRE_UP`` 处(已预倾到 ``TILT_START``,此时还不会出流),再竖直降到倾倒位置。
@@ -105,19 +106,16 @@ def footprint(env, label):
     return (m @ np.append((lo + hi) / 2, 1.0))[:2], m[:2, side], (hi - lo)[side] / 2, top
 
 
-def particles(env):
+def particles(env, label="wine"):
     """液体粒子的位置(env 坐标系)。"""
     lm = env.scene_manager.layout_manager
-    obj = lm.get_scene_object(0, lm.get_instance_name(0, "wine"))
-    p = np.asarray(obj.get_particle_positions()[0], dtype=float).reshape(-1, 3)
-    R = t3d.quaternions.quat2mat(np.asarray(obj.init_ori, dtype=float).reshape(-1)[:4])
-    return p @ R.T + np.asarray(obj.init_pos, dtype=float).reshape(-1)[:3]
+    return lm.get_scene_object(0, lm.get_instance_name(0, label)).get_env_particle_positions()
 
 
-def _in_bottle(env):
-    """瓶子包围盒内液体粒子的比例。"""
-    m, (lo, hi) = _mat(env.get_obj_pose("bottle")), _bbox(env, "bottle")
-    loc = (particles(env) - m[:3, 3]) @ m[:3, :3]
+def _in_vessel(env, vessel):
+    """容器包围盒内液体粒子的比例。"""
+    m, (lo, hi) = _mat(env.get_obj_pose(vessel.LABEL)), _bbox(env, vessel.LABEL)
+    loc = (particles(env, vessel.FLUID) - m[:3, 3]) @ m[:3, :3]
     return float(np.all((loc >= lo) & (loc <= hi), axis=1).mean())
 
 
@@ -133,6 +131,25 @@ def _run(env, arm, qs, duration):
     vel[-1] = 0.0
     key = env.robot_manager.process_name(arm)
     env.execute([{key: {"position": p.tolist(), "velocity": v.tolist()}} for p, v in zip(pos, vel)])
+
+
+class Vessel:
+    """手里倒液体的容器:瓶子(wuliangye 00000)。子类覆盖这些类属性。
+
+    ``GRASP_Z`` / ``APPROACH_Z`` / ``FINGER_Z_MAX`` 是传给 ``grasp_actor`` 的抓取过滤;``RINGS`` 是容器轮廓(容器坐标系下的 (z, 半径)),用于间隙检查;``LIP`` 是出流点在容器口中心沿倾倒方向的
+    偏移:倾倒时固定在支点上的是这一点。瓶口很窄,取 0。"""
+
+    LABEL = "bottle"
+    FLUID = "wine"
+    GRASP_Z = NECK_Z
+    APPROACH_Z = APPROACH_Z
+    FINGER_Z_MAX = FINGER_Z_MAX
+    RINGS = BOTTLE_RINGS
+    LIP = 0.0
+    TILT_START = TILT_START
+    TILT_STOP = TILT_STOP
+    BACK_TILT = BACK_TILT
+    WRIST_PICK = 0  # > 0:grasp_actor 在这么多个可达的抓取中选末端关节转动最小的
 
 
 class Target:
@@ -170,28 +187,31 @@ def _box_points(lo, hi, spacing=0.012):
     return np.stack(np.meshgrid(*axes, indexing="ij"), axis=-1).reshape(-1, 3)
 
 
-def _points(b_T_ee):
-    """瓶子轮廓和夹爪包围盒的采样点(瓶子坐标系)。"""
+def _points(b_T_ee, rings):
+    """容器轮廓和夹爪包围盒的采样点(容器坐标系)。"""
     ang = np.linspace(0, 2 * np.pi, 12, endpoint=False)
-    bottle = [np.stack([r * np.cos(ang), r * np.sin(ang), np.full_like(ang, z)], 1) for z, r in BOTTLE_RINGS]
+    bottle = [np.stack([r * np.cos(ang), r * np.sin(ang), np.full_like(ang, z)], 1) for z, r in rings]
     grip = np.concatenate([_box_points(lo, hi) for lo, hi in GRIPPER_BOXES])
     return np.concatenate([*bottle, grip @ b_T_ee[:3, :3].T + b_T_ee[:3, 3]])
 
 
-def _pour_frame(env, bottle0, b_T_ee, target):
-    """抓取 ``b_T_ee``(ee 在瓶子坐标系下的位姿)对应的倾倒几何:瓶子绕水平的抓取接近轴 ``k`` 转 tilt 度,
-    瓶口倒向 ``target.aim_xy``(方向 ``d``)。返回 ``(ee_pose(m, tilt), d, pivot, clear(m, tilt))``:``pivot`` 为
-    倾倒时瓶口的名义位置,``clear`` 把瓶口抬到瓶子和夹爪不碰桌面、不碰 ``target.boxes`` 的高度。"""
-    lo, hi = _bbox(env, "bottle")
-    R_up, mouth = bottle0[:3, :3], np.array([0.0, 0.0, hi[2]])
+def _pour_frame(env, bottle0, b_T_ee, target, vessel=Vessel):
+    """抓取 ``b_T_ee``(ee 在容器坐标系下的位姿)对应的倾倒几何:容器绕水平的抓取接近轴 ``k`` 转 tilt 度,
+    容器口倒向 ``target.aim_xy``(方向 ``d``)。返回 ``(ee_pose(m, tilt), d, pivot, clear(m, tilt))``:``m`` 为出流点
+    (容器口中心沿 ``d`` 偏 ``vessel.LIP``)的位置,``pivot`` 为倾倒时出流点的名义位置,``clear`` 把出流点抬到
+    容器和夹爪不碰桌面、不碰 ``target.boxes`` 的高度。"""
+    lo, hi = _bbox(env, vessel.LABEL)
+    R_up = bottle0[:3, :3]
     table_z = float((bottle0 @ [0.0, 0.0, lo[2], 1.0])[2])  # 瓶底即桌面
     approach = (bottle0 @ b_T_ee)[:3, 0]
     a_h = np.array([approach[0], approach[1], 0.0]) / np.linalg.norm(approach[:2])
     d = np.cross(a_h, [0.0, 0.0, 1.0])
     d = d if d[:2] @ (target.aim_xy - bottle0[:2, 3]) > 0 else -d
     k = np.cross([0.0, 0.0, 1.0], d)  # 绕 k 转正角度时瓶口倒向 d
+    mouth = np.array([0.0, 0.0, hi[2]]) + vessel.LIP * (R_up.T @ d)
+    target.approach = a_h[:2]  # 抓取接近方向(水平),pivot_xy 可以用它做与左右臂无关的横向补偿
     pivot = np.array([*target.pivot_xy(d), target.top + target.MOUTH_ABOVE])
-    pts = _points(b_T_ee) - mouth
+    pts = _points(b_T_ee, vessel.RINGS) - mouth
 
     def R(tilt):
         return t3d.axangles.axangle2mat(k, np.radians(tilt)) @ R_up
@@ -211,7 +231,7 @@ def _pour_frame(env, bottle0, b_T_ee, target):
             need = np.where(over, np.maximum(need, top + CLEAR_TOP), need)
         return np.array([m[0], m[1], max(m[2], float(np.max(need - rel[:, 2])))])
 
-    return ee_pose, d, pivot, clear
+    return ee_pose, d, pivot, clear, mouth
 
 
 def _line(start, goal, clear):
@@ -225,33 +245,37 @@ def _line(start, goal, clear):
     return out
 
 
-def play_once(env, target_cls=Target):
-    bottle0 = _mat(env.get_obj_pose("bottle"))
+def play_once(env, target_cls=Target, vessel=Vessel):
+    bottle0 = _mat(env.get_obj_pose(vessel.LABEL))
     arm = "left_arm" if bottle0[0, 3] < 0 else "right_arm"
     target = target_cls(env)
 
     # 1. 侧抓瓶颈,竖直抬起。腕部 joint6 的余量有限,同一个抓取绕接近轴转 180 度的两个版本只有一个能转到
     #    倾倒角度,所以要求抓取之后倾倒起点、终点也可达
     def follow(grasp):
-        ee_pose, _, pivot, clear = _pour_frame(env, bottle0, np.linalg.inv(bottle0) @ _mat(grasp), target)
+        ee_pose, _, pivot, clear, _ = _pour_frame(env, bottle0, np.linalg.inv(bottle0) @ _mat(grasp), target, vessel)
         pre = pivot + [0.0, 0.0, PRE_UP]
-        return [ee_pose(clear(pre, TILT_START), TILT_START), ee_pose(clear(pivot, target.TILT_POUR), target.TILT_POUR)]
+        return [
+            ee_pose(clear(pre, vessel.TILT_START), vessel.TILT_START),
+            ee_pose(clear(pivot, target.TILT_POUR), target.TILT_POUR),
+        ]
 
     env.grasp_actor(
-        "bottle",
+        vessel.LABEL,
         arm,
         follow=follow,
         prefer=PREFER,
-        approach_z=APPROACH_Z,
-        finger_z_max=FINGER_Z_MAX,
-        obj_z=NECK_Z,
+        approach_z=vessel.APPROACH_Z,
+        finger_z_max=vessel.FINGER_Z_MAX,
+        obj_z=vessel.GRASP_Z,
+        wrist_pick=vessel.WRIST_PICK,
     )
     env.move_by_displacement(arm, z=LIFT)
     # 闭合夹爪时手指可能把瓶子推偏:按抬起后实测的 ee->瓶子 变换重建倾倒几何
-    b_T_ee = np.linalg.inv(_mat(env.get_obj_pose("bottle"))) @ _mat(env.get_arm_pose(arm))
-    ee_pose, d, pivot, clear = _pour_frame(env, bottle0, b_T_ee, target)
+    b_T_ee = np.linalg.inv(_mat(env.get_obj_pose(vessel.LABEL))) @ _mat(env.get_arm_pose(arm))
+    ee_pose, d, pivot, clear, mouth = _pour_frame(env, bottle0, b_T_ee, target, vessel)
     target.d = d
-    R_up, mouth = bottle0[:3, :3], np.array([0.0, 0.0, _bbox(env, "bottle")[1][2]])
+    R_up = bottle0[:3, :3]
 
     def go(states, duration):
         """依次经过 ``states``(瓶子状态),一次平滑运动;相邻路点的 IK 解必须连续。"""
@@ -266,22 +290,22 @@ def play_once(env, target_cls=Target):
         return states[-1]
 
     # 2. cuRobo 搬到倾倒位置上方并预倾,再竖直下降
-    cur = (clear(pivot + [0.0, 0.0, PRE_UP], TILT_START), TILT_START)
+    cur = (clear(pivot + [0.0, 0.0, PRE_UP], vessel.TILT_START), vessel.TILT_START)
     env.execute_plan(arm, env.plan_to_pose(arm, ee_pose(*cur)), slow=CARRY_SLOW)
-    cur = go(_line(cur, (pivot, TILT_START), clear), DESCEND_TIME)
+    cur = go(_line(cur, (pivot, vessel.TILT_START), clear), DESCEND_TIME)
 
     # 3. 开环倾倒,倒空或超时后截流
     cur = go(_line(cur, (pivot, target.TILT_POUR), clear), target.POUR_TIME)
     steps = max(int(round(0.1 / env.dt)), 1)
     for _ in range(int(target.POUR_TIMEOUT / 0.1)):
-        if _in_bottle(env) <= RESIDUAL_DONE:
+        if _in_vessel(env, vessel) <= RESIDUAL_DONE:
             break
         env.delay(steps)
-    cur = go(_line(cur, (pivot, TILT_STOP), clear), STOP_TIME)
+    cur = go(_line(cur, (pivot, vessel.TILT_STOP), clear), STOP_TIME)
     env.delay(int(round(DRIP_TIME / env.dt)))
 
     # 4. 抬高后撤,立起回到初始位置上方:立起时触发任务的液体判定
-    back = (cur[0] + [0.0, 0.0, BACK_UP] - BACK_OFF * d, BACK_TILT)
+    back = (cur[0] + [0.0, 0.0, BACK_UP] - BACK_OFF * d, vessel.BACK_TILT)
     end = (bottle0[:3, 3] + R_up @ mouth + [0.0, 0.0, END_LIFT], 0.0)
     go(_line(cur, back, clear) + _line(back, end, clear), RETREAT_TIME)
     return target

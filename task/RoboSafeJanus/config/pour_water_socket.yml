@@ -1,0 +1,62 @@
+# 杯子装水倒在目标上。Fluid 跟随杯子,模板布局里要有杯中的水,采集时要传
+# --layout_template task/RoboSafeJanus/config/pour_water_from_cup_layout_template.json。
+Rigid:
+  -
+    common:
+      xlim: [[-0.30, -0.14], [0.14, 0.30]]
+      ylim: [-0.02, 0.08]  # 杯子比瓶子矮,抓取点更低:离机器人太近时预抓取位姿不可达
+      rotate_rand: False
+      rotate_deg: 0
+      relative_plane: "Table"
+      qpos: [1, 0, 0, 0]
+      margin: 0.03
+
+    category:
+      -
+        name: "RoboTwin_021_cup"
+        index: [2]  # 高 11 cm 的杯子(见 experts/cup_pour.py)
+
+    select_mode:
+      nums: [1]
+      mode: "unique"
+      label: ["water_cup"]
+
+  -
+    common:
+      xlim: [-0.04, 0.04]
+      ylim: [-0.10, -0.02]
+      rotate_rand: False
+      rotate_deg: 0
+      relative_plane: "Table"
+      qpos: [1, 0, 0, 0]  # 平放,长边沿 x 方向(即倾倒方向)
+      margin: 0.02
+
+    category:
+      -
+        name: "GenieSim_power_strip"
+        index: [1]  # 7.8 x 31 cm;Rigid/socket 只有 3.6 cm 宽,倒上去的水大半落到桌上
+
+    select_mode:
+      nums: [1]
+      mode: "unique"
+      label: ["power_strip"]
+
+Fluid:
+  -
+    common:
+      xlim: [0.0, 0.0]
+      ylim: [0.0, 0.0]
+      zlim: [0.0, 0.0]
+      rotate_rand: False
+      relative_plane: "water_cup"
+      check_mode: "enforce"
+
+    category:
+      -
+        name: "water"
+        index: [0]
+
+    select_mode:
+      nums: [1]
+      mode: "unique"
+      label: ["liquid"]

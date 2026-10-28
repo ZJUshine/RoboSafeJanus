@@ -1,0 +1,65 @@
+# 杯子装水倒进桌上的容器。Fluid 跟随杯子,模板布局里要有杯中的水,采集时要传
+# --layout_template task/RoboSafeJanus/config/pour_water_from_cup_layout_template.json。
+Rigid:
+  -
+    common:
+      xlim: [[-0.32, -0.20], [0.20, 0.32]]  # 锅(带把手)外接圆半径约 0.12,杯子放在锅左右两侧
+      ylim: [-0.02, 0.08]  # 杯子比瓶子矮,抓取点更低:离机器人太近时预抓取位姿不可达
+      rotate_rand: False
+      rotate_deg: 0
+      relative_plane: "Table"
+      qpos: [1, 0, 0, 0]
+      margin: 0.03
+
+    category:
+      -
+        name: "RoboTwin_021_cup"
+        index: [2]  # 高 11 cm 的杯子(见 experts/cup_pour.py)
+
+    select_mode:
+      nums: [1]
+      mode: "unique"
+      label: ["water_cup"]
+
+  -
+    common:
+      xlim: [-0.03, 0.03]
+      ylim: [-0.06, 0.0]
+      rotate_rand: True
+      rotate_deg: [-10, 10]
+      relative_plane: "Table"
+      qpos: [1, 0, 0, 0]
+      margin: 0.02
+      # RoboTwin 的锅没有质量信息,转换时默认 0.1 kg,一碰就推走或打翻;同 pour_oil_pot 取 1 kg
+      physics:
+        mass: 1.0
+
+    category:
+      -
+        name: "RoboTwin_objaverse_pot"  # pour_oil_pot 的锅中口最宽、最深的一个
+        index: [10]
+
+    select_mode:
+      nums: [1]
+      mode: "unique"
+      label: ["pot"]
+
+Fluid:
+  -
+    common:
+      xlim: [0.0, 0.0]
+      ylim: [0.0, 0.0]
+      zlim: [0.0, 0.0]
+      rotate_rand: False
+      relative_plane: "water_cup"
+      check_mode: "enforce"
+
+    category:
+      -
+        name: "water"
+        index: [0]
+
+    select_mode:
+      nums: [1]
+      mode: "unique"
+      label: ["liquid"]
