@@ -14,6 +14,7 @@
 from copy import deepcopy
 import importlib
 import json
+import logging
 import os
 
 import numpy as np
@@ -555,6 +556,7 @@ def create_collect_env(config, app, **kwargs):
             settle=30,
             slow=1.0,
             follow=None,
+            wrist_pick=0,
             **filters,
         ):
             """用 GraspGenX 抓取候选抓起 ``label``:选第一个能规划到的候选,张开夹爪、移动到预抓取位姿
@@ -562,6 +564,8 @@ def create_collect_env(config, app, **kwargs):
 
             ``follow(ee_pose)`` 返回抓取之后还要到达的 ee 位姿列表(例如倾倒时转腕的位姿):候选只有在抓取位姿
             之后这些位姿也依次可达时才会被选中(只检查,不执行)。
+            ``wrist_pick`` > 0 时,在前 ``wrist_pick`` 个可达的候选中选抓取时末端关节转动最小的:夹爪对称时同一个
+            抓取绕接近轴转 180 度的两个版本外形相同、末端关节差半圈,只按分数选的话常要先把手腕转近 180 度。
             ``filters`` 传给 ``grasp_candidates``。没有缓存、没有通过过滤的候选、或全部不可达时都直接报错,
             不回退到其他抓取方式。返回选中候选的 ``(ee_pose, score)``。
             """
@@ -575,7 +579,26 @@ def create_collect_env(config, app, **kwargs):
                 pre[:3] -= pre_dis * approach
                 # 预抓取位姿、抓取位姿(以及 follow 的位姿)都依次可达才算这个候选可用
                 chains.append([pre, pose, *(follow(pose) if follow else [])])
-            i, plans = self.choose_chain(arm, chains)
+            if wrist_pick > 0:
+                wrist = float(self.get_arm_joints(arm)[-1])
+                reachable, tried = [], []
+                for i, poses in enumerate(chains):
+                    plans = self.plan_chain(arm, poses)
+                    turn = None if plans is None else abs(float(plans[1]["position"][-1][-1]) - wrist)
+                    tried.append("x" if turn is None else f"{np.degrees(turn):.0f}")
+                    if plans is not None:
+                        reachable.append((turn, i, plans))
+                        if len(reachable) >= wrist_pick:
+                            break
+                if not reachable:
+                    raise PlanFailError(f"{arm}: none of {len(chains)} candidate chains is reachable")
+                _, i, plans = min(reachable, key=lambda r: r[0])
+                # 每个试过的候选抓取时末端关节转动的角度(度,x = 不可达):对称的两个版本代价相同,在列表中相邻
+                logging.getLogger("task.grasp").info(
+                    "%s: wrist turn of tried grasps [%s], picked #%d", arm, " ".join(tried), i
+                )
+            else:
+                i, plans = self.choose_chain(arm, chains)
             pose, score = candidates[i]
             self.open_gripper(arm)
             for res in plans[:2]:  # 预抓取、抓取;follow 的位姿只检查不执行
