@@ -2,8 +2,8 @@ from task.RoboDojo.tasks.pour_water_X import PourWaterCommon
 
 
 class PourOilCommon(PourWaterCommon):
-    """pour_oil_X group: pour_water_X with the oil bottle (same as pour_liquid_into_cup: the fluid's label is
-    ``wine``). Each pour_oil_<target> task only sets ``TARGET`` and ``INSTRUCTION``, plus ``ONTO`` / ``ON_KWARGS``."""
+    """pour_oil_X 组:换成油瓶的 pour_water_X(和 pour_liquid_into_cup 一样,流体的 label 是 ``wine``)。
+    各 pour_oil_<目标> 任务只设置 ``TARGET`` 和 ``INSTRUCTION``,需要时再加 ``ONTO`` / ``ON_KWARGS``。"""
 
     LIQUID = "wine"
     CONTAINER = "bottle"

@@ -2,19 +2,19 @@ from env.reward_manager.reward_manager import RewardManager
 
 
 class PourWaterCommon:
-    """pour_water_X group: pour the liquid out of ``CONTAINER`` into or onto ``TARGET``. Each pour_water_<target> task
-    only sets ``TARGET`` and ``INSTRUCTION``, plus ``ONTO`` / ``ON_KWARGS`` when the liquid goes onto the target.
-    pour_oil_X reuses this class with its own fluid, container and thresholds."""
+    """pour_water_X 组:把 ``CONTAINER`` 里的液体倒进或倒到 ``TARGET`` 上。各 pour_water_<目标> 任务只设置
+    ``TARGET`` 和 ``INSTRUCTION``;液体是倒到目标上时再加 ``ONTO`` / ``ON_KWARGS``。
+    pour_oil_X 复用这个类,只换成自己的流体、容器和阈值。"""
 
     LIQUID = "liquid"
     CONTAINER = "water_cup"
     TARGET = None
-    # False: the liquid ends up inside TARGET's box; True: it lands on TARGET (an object, not a container)
+    # False:液体最终在 TARGET 的 bbox 内;True:液体落在 TARGET 上(TARGET 是物体而不是容器)
     ONTO = False
-    ON_KWARGS = {}  # extra is_A_fluid_on_B arguments (z band) for ONTO targets
-    IN_THRESHOLD = 0.85  # share of the liquid inside TARGET
-    ON_THRESHOLD = 0.4  # share of the liquid on TARGET
-    # At most this much may be left in the container (a wide cup tilted to 90 degrees keeps more water than a bottle)
+    ON_KWARGS = {}  # ONTO 目标额外传给 is_A_fluid_on_B 的参数(z 区间)
+    IN_THRESHOLD = 0.85  # 在 TARGET 内的液体占比
+    ON_THRESHOLD = 0.4  # 落在 TARGET 上的液体占比
+    # 容器里最多可剩的比例(宽口杯倾到 90 度时剩的水比瓶子多)
     RESIDUAL = 0.3
     INSTRUCTION = None
 
@@ -34,8 +34,7 @@ class PourWaterCommon:
     def run_reward(self):
         rm = self.reward_manager
         if not self.ONTO:
-            # When the container is set upright again, at most RESIDUAL of the liquid is left in it and the poured
-            # liquid is inside TARGET.
+            # 容器重新放正时,里面最多剩 RESIDUAL 的液体,且倒出的液体在 TARGET 内
             rm.trigger_check(
                 [rm.is_axis_up(label=self.CONTAINER, axis=[0, 0, 1], threshold=30)],
                 [
@@ -57,7 +56,7 @@ class PourWaterCommon:
                 trigger_mode="rising_edge",
             )
             return
-        # Evaluated at every reward step and accumulated: enough of the liquid has landed on TARGET.
+        # 每个 reward 步都判定并累积:有足够多的液体落在了 TARGET 上
         rm.check(
             [
                 rm.is_A_fluid_on_B(
@@ -69,7 +68,7 @@ class PourWaterCommon:
                 )
             ]
         )
-        # The episode ends when the container is set upright again with most of the liquid poured out.
+        # 容器重新放正、且大部分液体已倒出时 episode 结束
         rm.trigger_check(
             [rm.is_axis_up(label=self.CONTAINER, axis=[0, 0, 1], threshold=30)],
             [rm.is_A_fluid_not_in_B(self.LIQUID, self.CONTAINER, percentage_threshold=self.RESIDUAL, B_buffer=0.0)],

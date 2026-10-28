@@ -3,7 +3,7 @@ from task.RoboDojo.tasks.pour_oil_X import PourOilCommon
 
 
 class PourOilToasterCommon(PourOilCommon):
-    # Liquid on the toaster's top face sits above its box and does not count, so this means oil that went down the slots
+    # 烤面包机顶面上的液体在其 bbox 之上,不算,所以这里指的是倒进槽里的油
     TARGET = "toaster"
     INSTRUCTION = "Pour the oil into the toaster."
 

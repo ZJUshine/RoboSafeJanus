@@ -4,13 +4,13 @@ import transforms3d as t3d
 from env.environment.task_env import TaskEnv
 from task.RoboDojo.tasks.place_phone_X import PlacePhoneCommon
 
-# Clutter/phone_stand/00000 (box-collider variant Rigid/phone_stand_box, ext_assets/integrate/phone_stand_box.py) in its
-# own frame (m): asset +x is the front. The backrest leans back (-x) by TILT degrees from vertical; LEDGE is where its
-# front face meets the ledge the phone stands on
+# Clutter/phone_stand/00000(盒状碰撞体变体 Rigid/phone_stand_box,见 ext_assets/integrate/phone_stand_box.py)
+# 在其自身坐标系下的尺寸(米):资产 +x 为正前方。靠背从竖直方向向后(-x)倾斜 TILT 度;
+# LEDGE 是靠背前表面与托住手机的挡边的交线位置
 TILT = 19.4
 LEDGE = (-0.0165, 0.0375)  # (x, z)
-# Where the phone's bbox centre ends up when it rests on the ledge against the backrest, along the backrest normal /
-# up the backrest (its collider is 1.35 mm thicker per side than the bbox)
+# 手机立在挡边上靠着靠背时,其 bbox 中心沿靠背法向 / 沿靠背向上的位置
+# (手机的碰撞体每侧比 bbox 厚 1.35 mm)
 REST_N = 0.0071
 REST_U = 0.077
 
@@ -20,7 +20,7 @@ def _np(v):
 
 
 def stand_axes():
-    """Backrest normal (front) and up-the-backrest directions in the stand's frame."""
+    """支架坐标系下靠背的法向(朝前)和沿靠背向上的方向。"""
     t = np.radians(TILT)
     return np.array([np.cos(t), 0.0, np.sin(t)]), np.array([-np.sin(t), 0.0, np.cos(t)])
 
@@ -28,17 +28,17 @@ def stand_axes():
 class PutPhonePhoneStandCommon(PlacePhoneCommon):
     STAND = "phone_stand"
     INSTRUCTION = "Put the phone on the phone stand."
-    REST_TOL = 0.015  # phone bbox centre within this distance of its resting spot (stand x-z plane)
-    SIDE_TOL = 0.02  # ... and this far off the stand's middle sideways
-    AXIS_TOL = 12.0  # phone's long axis within this many degrees of the backrest
+    REST_TOL = 0.015  # 手机 bbox 中心离应停位置不超过这个距离(支架的 x-z 平面内)
+    SIDE_TOL = 0.02  # 横向偏离支架中线不超过这个距离
+    AXIS_TOL = 12.0  # 手机长轴与靠背的夹角不超过这么多度
 
     def __init__(self, config, app, **kwargs):
         super().__init__(config, app, **kwargs)
-        # Task-specific check, looked up by name like the built-in Func_Parser checks
+        # 任务专用的判定函数,和 Func_Parser 内置判定一样按名字查找
         self.reward_manager.func_parser.is_phone_on_stand_ledge = self._phone_on_ledge
 
     def _phone_on_ledge(self, args):
-        """1.0 when the phone stands on the ledge leaning against the backrest (either end up)."""
+        """手机立在挡边上、靠着靠背时为 1.0(哪一端朝上都行)。"""
         lm = self.scene_manager.layout_manager
         env_idx = args["env_idx"]
         pos_p, rot_p = lm.get_instance_pose(env_idx, label=self.PHONE)
@@ -58,7 +58,7 @@ class PutPhonePhoneStandCommon(PlacePhoneCommon):
         return float(ok)
 
     def run_reward(self):
-        # Everything must hold at the same step (the check latches), so a phone still held in the gripper does not count
+        # 所有条件须在同一步同时满足(check 一旦满足就锁存),所以手机还夹在夹爪里时不算
         rm = self.reward_manager
         rm.check(
             [

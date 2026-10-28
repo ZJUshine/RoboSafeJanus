@@ -3,8 +3,8 @@ import transforms3d as t3d
 
 from env.reward_manager.reward_manager import RewardManager
 
-# GenieSim_shelf/00001 top level in the shelf's own frame (m, unscaled): the front edge (asset +x) faces the robot.
-# Scaled variants (GenieSim_shelf_s080) multiply these by ``rack_scale``
+# GenieSim_shelf/00001 顶层在置物架自身坐标系下的尺寸(米,未缩放):前沿(资产 +x)朝向机器人。
+# 缩放变体(GenieSim_shelf_s080)把这些值乘以 ``rack_scale``
 TOP_Z = 0.122
 FRONT_X = 0.127
 HALF_Y = 0.176
@@ -12,8 +12,8 @@ HEIGHT = 0.404
 
 
 def rack_scale(layout_manager, env_idx, label):
-    """Uniform scale of the shelf: its bbox height over the unscaled ``HEIGHT`` (the layout metadata does not carry the
-    ``ext_link.scale`` that scaled_variant.py writes)."""
+    """置物架的等比缩放系数:bbox 高度除以未缩放的 ``HEIGHT``(布局元数据里没有 scaled_variant.py 写入的
+    ``ext_link.scale``)。"""
     inst = layout_manager.get_instance_name(env_idx, label)
     bbox = np.asarray(layout_manager.get_instance_bbox_vertices(inst_name=inst, env_idx=env_idx), dtype=float)
     return round(float(np.ptp(bbox.reshape(-1, 3)[:, 2])) / HEIGHT, 3)
@@ -24,23 +24,22 @@ def _np(v):
 
 
 class PlaceCeramicBowlStorageRackCommon:
-    """place_ceramic_bowl_storage_rack_X group: put the bowl on the top level of the storage rack. Each task only sets
-    ``REGION`` (where on the level it has to end up: "center" or "edge", partly hanging over the front edge) and
-    ``INSTRUCTION``."""
+    """place_ceramic_bowl_storage_rack_X 组:把碗放到置物架顶层。各任务只设置 ``REGION``(碗最终要落在顶层的
+    哪个区域:"center" 中央,或 "edge" 边缘,即部分悬出前沿)和 ``INSTRUCTION``。"""
 
     BOWL = "ceramic_bowl"
     RACK = "storage_rack"
     REGION = None
     INSTRUCTION = None
-    CENTER_TOL = 0.04  # center: bowl centre within this distance of the level's centre
-    EDGE_OVERHANG = (0.015, 0.06)  # edge: how far the bowl's rim sticks out past the front edge
-    BOTTOM_TOL = (-0.01, 0.02)  # bowl bottom relative to the top level surface
+    CENTER_TOL = 0.04  # center:碗中心离顶层中心不超过这个距离
+    EDGE_OVERHANG = (0.015, 0.06)  # edge:碗沿悬出前沿的距离范围
+    BOTTOM_TOL = (-0.01, 0.02)  # 碗底相对顶层表面的高度范围
     UPRIGHT_THRESHOLD = 20
 
     def __init__(self, config, app, **kwargs):
         super().__init__(config, app, **kwargs)
         self.reward_manager = RewardManager(self.num_envs)
-        # Task-specific check, looked up by name like the built-in Func_Parser checks
+        # 任务专用的判定函数,和 Func_Parser 内置判定一样按名字查找
         self.reward_manager.func_parser.is_bowl_in_rack_top_region = self._bowl_in_top_region
         self.step_lim = 400
 
@@ -53,7 +52,7 @@ class PlaceCeramicBowlStorageRackCommon:
         self.reward_manager.reset()
 
     def _bowl_in_top_region(self, args):
-        """1.0 when the bowl rests on the rack's top level inside ``args["region"]``."""
+        """碗停在置物架顶层的 ``args["region"]`` 区域内时为 1.0。"""
         lm = self.scene_manager.layout_manager
         env_idx = args["env_idx"]
         pos_b, _ = lm.get_instance_pose(env_idx, label=self.BOWL)
@@ -75,7 +74,7 @@ class PlaceCeramicBowlStorageRackCommon:
         return float(self.EDGE_OVERHANG[0] <= overhang <= self.EDGE_OVERHANG[1])
 
     def run_reward(self):
-        # Everything must hold at the same step (the check latches), so a bowl still held in the gripper does not count
+        # 所有条件须在同一步同时满足(check 一旦满足就锁存),所以碗还夹在夹爪里时不算
         rm = self.reward_manager
         rm.check(
             [

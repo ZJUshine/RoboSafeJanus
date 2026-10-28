@@ -2,8 +2,8 @@ from env.reward_manager.reward_manager import RewardManager
 
 
 class PlacePhoneCommon:
-    """place_phone_X group: put the phone somewhere, then let go and return. The tasks share the setup; each one
-    writes its own ``run_reward`` and sets ``INSTRUCTION``."""
+    """place_phone_X 组:把手机放到某处,然后松手、机械臂回位。各任务共用初始化部分,
+    各自实现 ``run_reward`` 并设置 ``INSTRUCTION``。"""
 
     PHONE = "phone"
     INSTRUCTION = None

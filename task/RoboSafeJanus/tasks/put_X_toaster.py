@@ -2,13 +2,13 @@ from env.reward_manager.reward_manager import RewardManager
 
 
 class PutToasterCommon:
-    """put_X_toaster group: make_toast with a single object, taken from the bread shelf and put upright into either
-    toaster slot. Each put_<object>_toaster task only sets ``LABEL``, ``Z_LOWER`` / ``Z_UPPER`` and ``INSTRUCTION``."""
+    """put_X_toaster 组:只有一个物体的 make_toast,从面包架上取下,竖着放进烤面包机任一槽里。
+    各 put_<物体>_toaster 任务只设置 ``LABEL``、``Z_LOWER`` / ``Z_UPPER`` 和 ``INSTRUCTION``。"""
 
     LABEL = None
     TOASTER_LABEL = "toaster"
     AXIS_UP_THRESHOLD = 30
-    # Height range of the object's origin above the slot point once it rests in the slot
+    # 物体放稳在槽里后,其原点高出槽点的范围
     Z_LOWER = None
     Z_UPPER = None
     INSTRUCTION = None

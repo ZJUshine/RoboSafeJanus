@@ -1,16 +1,16 @@
 from env.reward_manager.reward_manager import RewardManager
 
-# ArtVIP refrigerator 00001: the lower (fridge compartment) door, hinged on the right edge, opens toward its upper limit
+# ArtVIP 冰箱 00001:下门(冷藏室门)铰链在右侧,朝关节上限方向打开
 DOOR_JOINT = "RevoluteJoint_fridge_2_down"
 
 
 class PutRefrigeratorCommon:
-    """put_X_refrigerator group: put an object onto the bottom shelf of the open refrigerator. Each
-    put_<object>_refrigerator task only sets ``LABEL``, ``UPRIGHT`` and ``INSTRUCTION``."""
+    """put_X_refrigerator 组:把物体放到开着门的冰箱最下层隔板上。各 put_<物体>_refrigerator 任务只设置
+    ``LABEL``、``UPRIGHT`` 和 ``INSTRUCTION``。"""
 
     LABEL = None
     FRIDGE_LABEL = "refrigerator"
-    # Objects that stand upright on the shelf must still be standing at the end (tall bottles must not be knocked over)
+    # 能在隔板上立住的物体结束时必须仍然立着(高瓶子不能被碰倒)
     UPRIGHT = True
     UPRIGHT_THRESHOLD = 30
     INSTRUCTION = None
@@ -30,8 +30,8 @@ class PutRefrigeratorCommon:
         self.reward_manager.reset()
 
     def open_door(self):
-        """The episode starts with the lower door fully open (same as heat_X_microwave: the opened state is written
-        into the saved joint positions, so the ``apply_saved_poses`` after ``reset`` keeps it open)."""
+        """每个 episode 开始时下门全开(同 heat_X_microwave:打开后的状态写进保存的关节位置,
+        因此 ``reset`` 之后的 ``apply_saved_poses`` 仍会让门保持打开)。"""
         lm = self.scene_manager.layout_manager
         for env_idx in range(self.num_envs):
             fridge = lm.get_scene_object(env_idx, lm.get_instance_name(env_idx, self.FRIDGE_LABEL))
@@ -55,8 +55,8 @@ class PutRefrigeratorCommon:
         return checks
 
     def run_reward(self):
-        # Same as heat_X_microwave: everything must hold at the same step (the check latches), so an object still in
-        # the gripper, or dragged back out while the gripper retreats, does not count
+        # 同 heat_X_microwave:所有条件须在同一步同时满足(check 一旦满足就锁存),
+        # 物体还在夹爪里、或夹爪后退时把物体带出来,都不算
         self.reward_manager.check(self._checks())
 
     def gen_instruction(self, env_idx):

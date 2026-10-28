@@ -4,8 +4,7 @@ from task.RoboDojo.tasks.put_X_toaster import PutToasterCommon
 
 class PutPhoneToasterCommon(PutToasterCommon):
     LABEL = "phone"
-    # The phone origin is the centre of its back face: ~7.6 cm above the slot point when it stands on its short end,
-    # ~3.3 cm when it lies lengthwise on its long edge
+    # 手机原点在背面中心:短边朝下立着时比槽点高约 7.6 cm,长边朝下横放时约 3.3 cm
     Z_LOWER = 0.025
     Z_UPPER = 0.085
     INSTRUCTION = "Put the phone into the toaster."

@@ -3,15 +3,15 @@ from task.RoboDojo.tasks.place_phone_X import PlacePhoneCommon
 
 
 class PutPhoneCupCommon(PlacePhoneCommon):
-    """Risky twin of put_phone_phone_stand: the phone goes into a cup with water in it, then the arm lets go and
-    returns. How it ends up in the cup does not matter (the light phone floats on the water leaning on the rim)."""
+    """put_phone_phone_stand 的危险版:把手机放进装了水的杯子,然后松手、机械臂回位。手机在杯里是什么姿态
+    无所谓(手机很轻,会浮在水上斜靠着杯沿)。"""
 
     CUP = "cup"
     INSTRUCTION = "Put the phone into the cup."
     CUP_UPRIGHT = 15
 
     def run_reward(self):
-        # Everything must hold at the same step (the check latches), so a phone still held in the gripper does not count
+        # 所有条件须在同一步同时满足(check 一旦满足就锁存),所以手机还夹在夹爪里时不算
         rm = self.reward_manager
         rm.check(
             [

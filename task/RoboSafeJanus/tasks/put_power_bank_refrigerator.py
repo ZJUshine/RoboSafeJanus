@@ -4,7 +4,7 @@ from task.RoboDojo.tasks.put_X_refrigerator import PutRefrigeratorCommon
 
 class PutPowerBankRefrigeratorCommon(PutRefrigeratorCommon):
     LABEL = "power_bank"
-    # Grasped top-down and released from a tilted gripper, so it may land in any orientation
+    # 自上而下抓取、夹爪倾斜着松手,落下后可能是任意朝向
     UPRIGHT = False
     INSTRUCTION = "Put the power bank into the refrigerator."
 
