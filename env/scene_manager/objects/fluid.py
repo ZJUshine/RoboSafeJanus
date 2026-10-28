@@ -263,6 +263,30 @@ class FluidObject:
 
         return positions, None, None
 
+    def get_env_particle_positions(self):
+        """Particle positions in the env frame.
+
+        ``get_particle_positions`` returns positions in the point instancer's local frame; the instancer is placed
+        with translate ``init_pos``, orient ``init_ori`` and scale ``init_scale * visual_scale``, so the scale must
+        be applied before rotating and translating.
+        """
+        positions, _, _ = self.get_particle_positions()
+        positions = np.asarray(positions, dtype=float).reshape(-1, 3)
+        if len(positions) == 0:
+            return positions
+        scale = np.broadcast_to(
+            np.asarray(self.init_scale, dtype=float) * np.asarray(self.visual_scale, dtype=float), 3
+        )
+        w, x, y, z = np.asarray(self.init_ori, dtype=float).reshape(-1)[:4]
+        R = np.array(
+            [
+                [1 - 2 * (y * y + z * z), 2 * (x * y - w * z), 2 * (x * z + w * y)],
+                [2 * (x * y + w * z), 1 - 2 * (x * x + z * z), 2 * (y * z - w * x)],
+                [2 * (x * z - w * y), 2 * (y * z + w * x), 1 - 2 * (x * x + y * y)],
+            ]
+        )
+        return (positions * scale) @ R.T + np.asarray(self.init_pos, dtype=float).reshape(-1)[:3]
+
     def set_particle_positions(self, positions: np.ndarray):
         """
         Set positions of all fluid particles.

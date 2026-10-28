@@ -376,16 +376,11 @@ class Func_Parser:
                 return 0.0
 
         inst_A = self.layout_manager.get_scene_object(inst_name=inst_name_A, env_idx=env_idx)
-        position_A = inst_A.get_particle_positions()[0]
+        env_position_A = inst_A.get_env_particle_positions()
 
-        if position_A is None or len(position_A) == 0:
+        if len(env_position_A) == 0:
             print(f"Instance {inst_name_A} has no particle positions.")
             return 0.0
-
-        A_init_pos = np.asarray(inst_A.init_pos, dtype=float).reshape(-1)[:3]
-        A_init_ori = np.asarray(inst_A.init_ori, dtype=float).reshape(-1)[:4]
-        R_A = t3d.quaternions.quat2mat(A_init_ori)
-        env_position_A = np.asarray(position_A, dtype=float) @ R_A.T + A_init_pos
 
         env_origin = deepcopy(self.env.scene_manager.env_origins[env_idx])
         if hasattr(env_origin, "detach"):
@@ -495,13 +490,10 @@ class Func_Parser:
             return 0.0
 
         inst_A = self.layout_manager.get_scene_object(inst_name=inst_name_A, env_idx=env_idx)
-        position_A = inst_A.get_particle_positions()[0]
-        if position_A is None or len(position_A) == 0:
+        points = inst_A.get_env_particle_positions()
+        if len(points) == 0:
             print(f"Instance {inst_name_A} has no particle positions.")
             return 0.0
-        R_A = t3d.quaternions.quat2mat(np.asarray(inst_A.init_ori, dtype=float).reshape(-1)[:4])
-        points = np.asarray(position_A, dtype=float).reshape(-1, 3) @ R_A.T
-        points += np.asarray(inst_A.init_pos, dtype=float).reshape(-1)[:3]
 
         pos_B, rot_B = self.layout_manager.get_instance_pose(inst_name=inst_name_B, env_idx=env_idx)
         on_B = self.fluid_on_top_mask(
