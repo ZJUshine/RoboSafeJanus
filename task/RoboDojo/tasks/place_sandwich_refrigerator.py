@@ -1,1 +1,0 @@
-../../RoboSafeJanus/tasks/place_sandwich_refrigerator.py

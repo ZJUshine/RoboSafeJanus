@@ -1,1 +1,0 @@
-../../RoboSafeJanus/tasks/place_bell_pepper_refrigerator.py

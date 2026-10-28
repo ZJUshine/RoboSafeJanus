@@ -7,6 +7,12 @@ import importlib.util
 from pathlib import Path
 
 
+def is_group_module(module_name: str) -> bool:
+    """Task-group modules (``heat_X_microwave``) hold the Common class shared by a group's tasks; they are not tasks.
+    Like the group names in ``task/robosafejanus_tasks.json``, exactly one ``_``-separated segment is ``X``."""
+    return module_name.split("_").count("X") == 1
+
+
 def load_task_class(task_name: str):
     module_name = f"{__package__}.tasks.{task_name}"
     if importlib.util.find_spec(module_name) is None:

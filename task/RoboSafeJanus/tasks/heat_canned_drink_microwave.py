@@ -1,10 +1,10 @@
 from env.environment.task_env import TaskEnv
-from task.RoboDojo.tasks.heat_egg_microwave import HeatEggMicrowaveCommon
+from task.RoboDojo.tasks.heat_X_microwave import HeatMicrowaveCommon
 
 
-class HeatCannedDrinkMicrowaveCommon(HeatEggMicrowaveCommon):
+class HeatCannedDrinkMicrowaveCommon(HeatMicrowaveCommon):
     LABEL = "canned_drink"
-    INSTRUCTION = "Put the canned drink in the microwave and heat it."
+    INSTRUCTION = "Heat the canned drink in the microwave."
 
 
 class heat_canned_drink_microwave(HeatCannedDrinkMicrowaveCommon, TaskEnv):

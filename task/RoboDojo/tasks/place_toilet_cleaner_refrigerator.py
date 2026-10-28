@@ -1,1 +1,0 @@
-../../RoboSafeJanus/tasks/place_toilet_cleaner_refrigerator.py

@@ -29,9 +29,9 @@ import transforms3d as t3d
 
 from src.data_collect.collect_env import PlanFailError
 from task.RoboDojo.experts import heat_egg_microwave as mw
-from task.RoboDojo.experts.place_bread_toaster import _grip_val
-from task.RoboDojo.experts.place_juice_refrigerator import _heading, _rot_to, _rz
-from task.RoboDojo.tasks.place_ceramic_bowl_storage_rack_center import FRONT_X, TOP_Z, rack_scale
+from task.RoboDojo.experts.put_bread_toaster import _grip_val
+from task.RoboDojo.experts.put_toilet_cleaner_refrigerator import _heading, _rot_to, _rz
+from task.RoboDojo.tasks.place_ceramic_bowl_storage_rack_X import FRONT_X, TOP_Z, rack_scale
 
 ARM = "right_arm"
 BOWL = "ceramic_bowl"

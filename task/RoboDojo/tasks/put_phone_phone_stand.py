@@ -1,0 +1,1 @@
+../../RoboSafeJanus/tasks/put_phone_phone_stand.py

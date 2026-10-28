@@ -34,7 +34,7 @@ import transforms3d as t3d
 
 from env.global_configs import OBJECTS_PATH
 from src.data_collect.collect_env import PlanFailError
-from task.RoboDojo.tasks.heat_egg_microwave import door_joint
+from task.RoboDojo.tasks.heat_X_microwave import door_joint
 
 log = logging.getLogger(__name__)
 
@@ -58,7 +58,7 @@ class Spec:
     # (三明治 4.7 cm 高)自上而下抓时,张开的手指在抓取位姿上就伸到了包围盒里,高度要压低
     grasp_shrink: tuple = None
     # top:把 GraspGenX 的抓取沿 ee z(垂直于接近方向和手指)平移到物体包围盒中心线上。长物体(三明治)转平后这条轴竖着,
-    # 抓在偏一头 2 cm 的地方时物体下半截垂得太低,松手位姿就得抬到腕部顶住炉腔顶(同 place_bread_toaster 把抓取沿手指方向
+    # 抓在偏一头 2 cm 的地方时物体下半截垂得太低,松手位姿就得抬到腕部顶住炉腔顶(同 put_bread_toaster 把抓取沿手指方向
     # 挪到厚度中面)
     center_slide: bool = False
     # 合拢后物体在指间挪动不超过这么多时,沿用合拢前预测的第 2 段(见 _pick_place_direct 的 reuse_tol);None 时取

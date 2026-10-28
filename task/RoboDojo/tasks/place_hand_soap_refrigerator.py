@@ -1,1 +1,0 @@
-../../RoboSafeJanus/tasks/place_hand_soap_refrigerator.py

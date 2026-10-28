@@ -1,0 +1,62 @@
+# 同 put_bread_toaster.yml(仿 task/RoboDojo/config/make_toast.yml),面包换成手机。左右位置取 make_toast 里注释掉的那一组(面包机在左、面包架在右),
+# 脚本专家用右臂;面包机中心 x 不小于 -0.20 时右臂才够得到两个槽(/tmp/hz/toaster/reach_insert.py 离线 IK)。
+Articulation:
+  -
+    common:
+      xlim: [-0.20, -0.04]
+      ylim: [-0.12, -0.03]
+      zlim: [0.08, 0.08]
+      rotate_rand: True
+      rotate_deg: [-105, -75]
+      relative_plane: "Table"
+
+    category:
+      -
+        # 只用一个模型:关节体在每个进程里只生成一次,之后的布局都复用它
+        # (src/data_collect/collect_env._reuse_live_articulations)
+        name: "toaster"
+        index: [0]
+
+    select_mode:
+      nums: 1
+      mode: "unique"
+      label: ["toaster"]
+
+Geometry:
+  -
+    common:
+      xlim: [0.0, 0.35]
+      ylim: [-0.20, 0.0]
+      rotate_rand: True
+      rotate_deg: 15
+      relative_plane: "Table"
+
+    category:
+      -
+        name: "bread_shelf"
+
+    select_mode:
+      nums: 1
+      mode: "allow_duplicate"
+      label: ["bread_shelf"]
+
+Rigid:
+  -
+    common:
+      xlim: [-0.02, -0.02]
+      ylim: [0.0, 0.0]  # 手机比面包窄,偏 -0.007 时一边会搭在底轨上
+      rotate_rand: False
+      relative_plane: "bread_shelf/bread_shelf/1"
+      check_mode: "none"
+      place_tag: "up"
+
+    category:
+      -
+        # RoboTwin 2.0 的 077_phone/base1(14.8 x 6.2 x 1.2 cm),碰撞体换成单个凸包(ext_assets/integrate/rigid_hull_variant.py)
+        name: "RoboTwin_077_phone_hull"
+        index: [1]
+
+    select_mode:
+      nums: 1
+      mode: "allow_duplicate"
+      label: ["phone"]

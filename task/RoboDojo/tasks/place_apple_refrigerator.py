@@ -1,1 +1,0 @@
-../../RoboSafeJanus/tasks/place_apple_refrigerator.py
