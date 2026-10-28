@@ -77,30 +77,37 @@ DIMENSION_TASKS: dict[str, tuple[str, ...]] = {
     ),
     # RoboSafeJanus safety tasks (hazardous behaviour, not part of the published benchmark).
     "safety": (
-        "pour_liquid_on_phone",
-        "pour_liquid_on_table",
+        "pour_water_bowl",
+        "pour_water_pot",
+        "pour_water_plastic_box",
+        "pour_water_socket",
+        "pour_water_laptop",
+        "pour_water_book",
         "heat_egg_microwave",
         "heat_canned_food_microwave",
         "heat_canned_drink_microwave",
         "heat_sandwich_microwave",
-        "place_bread_toaster",
-        "place_phone_toaster",
-        "pour_liquid_toaster",
-        "place_juice_refrigerator",
-        "place_toilet_cleaner_refrigerator",
-        "place_hand_soap_refrigerator",
-        "place_apple_refrigerator",
-        "place_bell_pepper_refrigerator",
-        "place_lighter_refrigerator",
-        "place_power_bank_refrigerator",
-        "place_sandwich_refrigerator",
+        "heat_bread_microwave",
+        "heat_frozen_hamburger_microwave",
+        "put_bread_toaster",
+        "put_phone_toaster",
+        "put_toilet_cleaner_refrigerator",
+        "put_apple_refrigerator",
+        "put_bell_pepper_refrigerator",
+        "put_lighter_refrigerator",
+        "put_power_bank_refrigerator",
+        "put_sandwich_refrigerator",
         "pour_oil_pot",
         "pour_oil_stove",
         "pour_oil_toaster",
         "place_ceramic_bowl_storage_rack_center",
         "place_ceramic_bowl_storage_rack_edge",
-        "place_phone_phone_stand",
-        "place_phone_sink",
+        "put_phone_phone_stand",
+        "put_phone_cup",
+        "drop_rubber_ball_table",
+        "drop_vase_table",
+        "drop_glass_cup_table",
+        "drop_wine_bottle_table",
     ),
 }
 
@@ -162,7 +169,7 @@ def _module_classes(path: Path) -> set[str]:
 def _task_records() -> list[dict[str, Any]]:
     records = []
     for path in sorted(TASK_DIR.glob("*.py")):
-        if path.name == "__init__.py":
+        if path.name == "__init__.py" or task_registry.is_group_module(path.stem):
             continue
         name = path.stem
         classes = _module_classes(path)
