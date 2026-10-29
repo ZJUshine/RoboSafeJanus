@@ -46,6 +46,7 @@
 | `src/data_collect/eval_layouts.py`                                | 为新任务 / 探针任务冻结评测布局                          | 需要新增评测布局时          |
 | `src/data_collect/upload_to_hf.py`                                | 把 `data/RoboSafeJanus-Benchmark` 同步到 HF 私有 dataset 仓库         | 一般不改               |
 | `src/data_collect/upload_to_modelscope.py`                        | 把 `data/RoboSafeJanus-Benchmark` 同步到 ModelScope 私有 dataset 仓库 | 一般不改               |
+| `src/data_collect/upload_lerobot_to_modelscope.py`                | 把 `data/RoboSafeJanus-Benchmark-Lerobot` 的 v30/v21 导出同步到 ModelScope 私有 dataset 仓库 | 一般不改               |
 | `src/data_collect/upload_common.py`                               | 上传共用:本地 → 远端 `RoboSafeJanus/<task>/` 路径映射、dry-run 计划 | 一般不改               |
 | `src/data_collect/sync_instructions.py`                           | 把已采集 hdf5 的 `instruction` 原地改成 `robosafejanus_tasks.json` 中的指令 | 确认一组任务的指令后   |
 | `scripts/internal/task_success_spec.py`                           | 从 `run_reward` 提取成功判定,写进 `robosafejanus_tasks.json` 的 `success`(含每个判定的 `desc`,格式见脚本说明) | 改了任务的 `run_reward` 后 |
@@ -739,6 +740,19 @@ bash scripts/export_lerobot.sh 'pour_water_*' --format v30      # 只导 v3.0
 - 默认 `arx_x5`(`ROBOSAFEJANUS_LEROBOT_ENV_CFG` 可改)、每个任务最多 200 条(转换器的 `--max_episode` 默认值),视频 AV1。已存在的任务输出会被覆盖,`<task>_failed` 不导出。
 - v3.0 转换使用无界编码队列(`encoder_queue_maxsize=0`):离线转换不会因为 AV1 编码跟不上读取而丢帧(默认队列 30 会静默丢帧,导致同一个分块 mp4 内后续 episode 全部错位)。导出结束后还会把 `videos/<cam>/{from,to}_timestamp` 按文件内整数帧号重建,消除逐 episode 浮点累加导致的 `to_timestamp * fps` 落在整数下方。已导出的数据集可用 `python XPolicyLab/scripts/transform_lerobot_v30_format.py --postprocess_only <task>`(配合 `HF_LEROBOT_HOME` 指向该任务的 group 目录)只重建时间戳;如果导出时丢过帧,时间戳修复无法补回内容,必须重新导出。
 - 加载:v3.0 用 `LeRobotDataset("<task>", root="data/RoboSafeJanus-Benchmark-Lerobot/v30/<group>/<level>/<task>")`;v2.1 换成 `data/RoboSafeJanus-Benchmark-Lerobot/v21/...`,并在 `xpolicy_lerobot_v21` 环境中读取。
+- 上传到 ModelScope(镜像布局 `v30/...`、`v21/...`,默认只传 `robosafejanus_tasks.json` 中的任务,加 `--include_non_json` 可放开):
+
+```bash
+python src/data_collect/upload_lerobot_to_modelscope.py \
+  --repo_id zjushine/RoboSafeJanus-Benchmark-Lerobot --dry_run
+python src/data_collect/upload_lerobot_to_modelscope.py \
+  --repo_id zjushine/RoboSafeJanus-Benchmark-Lerobot
+```
+
+删除只发生在本次上传的数据集目录内,不会动仓库里旧的 `RoboSafeJanus-<task>-<robot>-<action>/` 平铺数据集。
+
+- 上传前会检查是否还有 `export_lerobot.sh` / `transform_lerobot_v*_format.py` 进程在跑(导出会重写/清理数据集目录),有则直接拒绝,确认导出结束后再传;`--force` 可跳过检查。
+- 上传时先把文件硬链接到 `data/.cache/lerobot_upload_view/`,再从该视图上传,避免导出进程在上传过程中删文件导致 `FileNotFoundError`。
 
 ---
 
@@ -768,9 +782,14 @@ python scripts/internal/sync_status.py --watch 120 --serve 8765
 ```
 
 - `--serve <port>` 提供 `SYNC_STATUS.html/.md/.json` 静态文件,并支持 `POST /api/refresh` 立即重建(按钮会先删掉页面的 meta refresh,避免重建过程中被自动刷新打断)。直接打开 `data/SYNC_STATUS.html` 时没有服务端,按钮退化为普通重新加载,数据仍由 `--watch` 进程定时生成。
-- 默认只绑定 `127.0.0.1`,需要局域网访问时加 `--host 0.0.0.0`。
+- 页面顶部的动作按钮:
+  - `LeRobot 转换`:只挑 HDF5 已采集但 v30/v21 未导全的任务,逐个运行 `scripts/export_lerobot.sh`,已完成的任务跳过。
+  - `上传 HDF5` / `上传 LeRobot`:先跑 `--dry_run`,在弹窗里列出要上传 / 删除的文件和大小,确认后才启动后台任务;上传完成后自动刷新看板。
+  - 后台任务日志在 `data/.cache/jobs/`,页面每 5 秒轮询 `/api/jobs` 显示状态和末尾日志。静态页面会禁用这三个按钮。
+- 默认只绑定 `127.0.0.1`,需要局域网访问时加 `--host 0.0.0.0`(注意页面上的按钮可以直接触发上传,不要暴露到不可信网络)。
 
-- HDF5 远端仓库默认取 `MS_DATA_REPO_ID`;没有设置时,从 `data/.cache/modelscope/upload_<user>__<repo>.json` 推断。LeRobot 远端仓库默认取 `MS_LEROBOT_REPO_ID`,否则用 `<HDF5 repo>-Lerobot`(如 `zjushine/RoboSafeJanus-Benchmark-Lerobot`),也可用 `--lerobot_repo_id` 指定。查询远端需要 `modelscope_hub`(RoboDojo 环境自带)。
+- HDF5 远端仓库默认取 `MS_DATA_REPO_ID`;没有设置时,从 `data/.cache/modelscope/upload_<user>__<repo>.json` 推断。LeRobot 远端仓库默认取 `MS_LEROBOT_REPO_ID`,否则用 `<HDF5 repo>-Lerobot`(如 `zjushine/RoboSafeJanus-Benchmark-Lerobot`),也可用 `--lerobot_repo_id` 指定。训练模型仓库默认取 `MS_MODEL_REPO_ID`,否则用 `<owner>/RoboSafeJanus-Model`(如 `zjushine/RoboSafeJanus-Model`),也可用 `--model_repo_id` 指定。查询远端需要 `modelscope_hub`(RoboDojo 环境自带)。
+- `模型` 列检查 ModelScope model 仓库里是否有该任务的训练模型:`✅ Pi_05 / 2999` 是任务级模型,`组模型 Pi_05 / 8999` 是 `<group>_<level>` 组模型(只有组模型时会标黄);下方"已训练模型"表列出全部模型目录、checkpoint、大小和 ModelScope 链接。仓库约定布局为 `<policy>/<task|group_level>/<run>/<step>/...`。
 - `JSON 对齐` 列对照 `task/robosafejanus_tasks.json`:`✅ 一致` 表示任务存在且本地/LeRobot 的 group/level 与 JSON 相同;`⚠️ 位置不符` 会给出实际位置;`⚠️ JSON 外` 表示本地、远端或 LeRobot 中有 JSON 之外的任务;`○ 仅定义` 表示 JSON 中有但本地/远端都还没有数据。
 - `HDF5 本地` / `ModelScope HDF5` 两列按 episode 数和总大小逐任务对比:`✅ 同步` 表示条数和总大小都一致,`⚠️ 不一致` 会给出大小差。
 - `JSON 外` 表示本地有数据但不在 `task/robosafejanus_tasks.json` 中(上传脚本会跳过);`仅远端` 表示远端有、本地没有的旧任务。

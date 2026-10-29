@@ -14,28 +14,33 @@ Usage::
     python scripts/internal/sync_status.py --no_remote         # local + LeRobot only
     python scripts/internal/sync_status.py --repo_id user/repo
     python scripts/internal/sync_status.py --lerobot_repo_id user/lerobot-repo
+    python scripts/internal/sync_status.py --model_repo_id user/model-repo
 
 The HDF5 repository defaults to ``MS_DATA_REPO_ID``; if that is unset, it is
 inferred from ``data/.cache/modelscope/upload_<user>__<repo>.json``. The LeRobot
-repository defaults to ``MS_LEROBOT_REPO_ID`` or ``<repo_id>-Lerobot``. ModelScope
-access needs ``modelscope_hub`` (available in the ``RoboDojo`` environment).
+repository defaults to ``MS_LEROBOT_REPO_ID`` or ``<repo_id>-Lerobot``, and the
+trained-model repository defaults to ``MS_MODEL_REPO_ID`` or
+``<owner>/RoboSafeJanus-Model``. ModelScope access needs ``modelscope_hub``
+(available in the ``RoboDojo`` environment).
 """
 
 from __future__ import annotations
 
 import argparse
-from collections import defaultdict
+from collections import Counter
 from datetime import datetime
 from functools import partial
-from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 import html
+from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 import json
 import os
 from pathlib import Path
 import re
+import subprocess
 import sys
 import threading
 import time
+from urllib.parse import quote
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT_DIR))
@@ -44,7 +49,6 @@ from src.data_collect.benchmark_layout import (  # noqa: E402
     LEVELS,
     REMOTE_PREFIX,
     TASKS_JSON,
-    task_dir,
     task_groups,
 )
 
@@ -62,6 +66,22 @@ CODE_DIRS = {
     "expert": ("experts", ".py"),
 }
 CODE_LABELS = {"impl": "实现", "config": "配置", "expert": "专家"}
+
+JOB_KINDS = ("export", "upload_hdf5", "upload_lerobot")
+JOB_LABELS = {"export": "LeRobot 转换", "upload_hdf5": "HDF5 上传", "upload_lerobot": "LeRobot 上传"}
+JOBS_LOCK = threading.Lock()
+JOBS: dict[str, dict] = {
+    kind: {
+        "kind": kind,
+        "state": "idle",
+        "started_at": None,
+        "finished_at": None,
+        "returncode": None,
+        "message": "",
+        "log": None,
+    }
+    for kind in JOB_KINDS
+}
 
 
 def human_bytes(value: float) -> str:
@@ -115,7 +135,12 @@ def infer_repo_id(local_dir: Path) -> str | None:
     if repo:
         return repo
     cache = local_dir.parent / ".cache" / "modelscope"
-    matches = sorted(cache.glob("upload_*.json")) if cache.is_dir() else []
+    # LeRobot 上传缓存也在同一目录,文件名以 _lerobot 结尾,不能当作 HDF5 仓库
+    matches = (
+        sorted(batch for batch in cache.glob("upload_*.json") if not batch.stem.endswith("_lerobot"))
+        if cache.is_dir()
+        else []
+    )
     if len(matches) == 1:
         return matches[0].stem[len("upload_") :].replace("__", "/")
     return None
@@ -308,8 +333,10 @@ def collect_lerobot_remote(
         if len(parts) < 2:
             continue
         version = group = level = task = None
+        layout = "legacy"
         if parts[0] in LEROBOT_VERSIONS:
             version = parts[0]
+            layout = "mirror"
             if len(parts) >= 5 and parts[2] in LEVELS:
                 group, level, task = parts[1], parts[2], parts[3]
                 directory = "/".join(parts[:4])
@@ -324,7 +351,8 @@ def collect_lerobot_remote(
             directory = parts[0]
         entry = datasets.setdefault(
             directory,
-            {"version": version, "task": task, "group": group, "level": level, "files": 0, "size": 0},
+            {"version": version, "task": task, "group": group, "level": level,
+             "layout": layout, "files": 0, "size": 0},
         )
         entry["files"] += 1
         entry["size"] += getattr(item, "size", 0) or 0
@@ -349,15 +377,21 @@ def collect_lerobot_remote(
         spec = json_tasks.get(task)
         group = entry["group"] or (spec[0] if spec else "—")
         level = entry["level"] or (spec[1] if spec else "—")
-        result[version][task] = {
+        candidate = {
             "task": task,
             "path": directory,
             "group": group,
             "level": level,
+            "layout": entry["layout"],
             "episodes": episodes,
             "files": entry["files"],
             "size": entry["size"],
         }
+        existing = result[version].get(task)
+        # 镜像布局优先;旧平铺布局只在没有镜像数据时使用
+        if existing and existing.get("layout") == "mirror" and candidate["layout"] == "legacy":
+            continue
+        result[version][task] = candidate
     write_json_cache(cache_path, cache)
     return result, None
 
@@ -375,6 +409,89 @@ def write_json_cache(path: Path, cache: dict) -> None:
         path.write_text(json.dumps(cache, indent=2), encoding="utf-8")
     except OSError:
         pass
+
+
+def resolve_model_target(key: str, json_tasks: dict[str, tuple[str, str]]) -> tuple:
+    """把模型目录名映射到任务或 ``<group>_<level>`` 组模型。"""
+    if key in json_tasks:
+        group, level = json_tasks[key]
+        return key, "task", group, level
+    for alias in code_aliases(key):
+        if alias in json_tasks:
+            group, level = json_tasks[alias]
+            return alias, "task", group, level
+    for level in LEVELS:
+        suffix = f"_{level}"
+        if key.endswith(suffix):
+            group = key[: -len(suffix)]
+            if any(g == group and lv == level for g, lv in json_tasks.values()):
+                return None, "group", group, level
+    return None, "unknown", None, None
+
+
+def collect_models(
+    repo_id: str | None,
+    json_tasks: dict[str, tuple[str, str]],
+) -> tuple[list[dict], str | None]:
+    """扫描 ModelScope model 仓库。
+
+    约定布局:``<policy>/<task|group_level>/<run>/<step>/...``。也接受更浅的
+    ``<policy>/<task>/<step>/...``。
+    """
+    if not repo_id:
+        return [], "未配置模型仓库"
+    try:
+        from modelscope_hub import HubApi
+    except ImportError:
+        return [], "未安装 modelscope_hub"
+    try:
+        files = HubApi().list_repo_files(repo_id, "model", recursive=True)
+    except Exception as error:  # noqa: BLE001 - 看板要能在远端异常时继续
+        return [], f"{type(error).__name__}: {error}"
+
+    entries: dict[str, dict] = {}
+    for item in files:
+        if getattr(item, "type", "blob") == "tree":
+            continue
+        parts = item.path.split("/")
+        if len(parts) < 3:
+            continue
+        policy, key = parts[0], parts[1]
+        directory = f"{policy}/{key}"
+        entry = entries.setdefault(
+            directory,
+            {"policy": policy, "key": key, "path": directory,
+             "runs": set(), "steps": set(), "files": 0, "size": 0},
+        )
+        entry["files"] += 1
+        entry["size"] += getattr(item, "size", 0) or 0
+        for part in parts[2:]:
+            if part.isdigit():
+                entry["steps"].add(part)
+                break
+        if len(parts) >= 4 and not parts[2].isdigit():
+            entry["runs"].add(parts[2])
+
+    models = []
+    for entry in entries.values():
+        task, kind, group, level = resolve_model_target(entry["key"], json_tasks)
+        target = task if task else (f"{group}/{level}" if kind == "group" else "—")
+        models.append({
+            "policy": entry["policy"],
+            "key": entry["key"],
+            "path": entry["path"],
+            "runs": sorted(entry["runs"]),
+            "steps": sorted(entry["steps"], key=int),
+            "files": entry["files"],
+            "size": entry["size"],
+            "target": target,
+            "kind": kind,
+            "task": task,
+            "group": group,
+            "level": level,
+        })
+    models.sort(key=lambda model: (model["policy"], model["key"]))
+    return models, None
 
 
 def code_catalog() -> dict[str, set[str]]:
@@ -537,6 +654,132 @@ def json_order(json_tasks: dict[str, tuple[str, str]]) -> tuple[dict[str, int], 
     return group_order, task_order
 
 
+def job_tail(job: dict, limit: int = 16000, lines: int = 80) -> str:
+    path = job.get("log")
+    if not path:
+        return ""
+    try:
+        with open(path, "rb") as fp:
+            fp.seek(0, os.SEEK_END)
+            size = fp.tell()
+            fp.seek(max(0, size - limit))
+            text = fp.read().decode("utf-8", "replace")
+    except OSError:
+        return ""
+    return "\n".join(text.splitlines()[-lines:])
+
+
+def jobs_snapshot() -> dict:
+    with JOBS_LOCK:
+        return {kind: {**job, "log_tail": job_tail(job)} for kind, job in JOBS.items()}
+
+
+def launch_job(kind: str, runner, out_dir: Path, on_done=None) -> None:
+    with JOBS_LOCK:
+        job = JOBS[kind]
+        if job["state"] == "running":
+            raise RuntimeError(f"{JOB_LABELS[kind]} 正在运行")
+        log_path = out_dir / ".cache" / "jobs" / f"{kind}_{datetime.now():%Y%m%d_%H%M%S}.log"
+        job.update({
+            "state": "running",
+            "started_at": datetime.now().isoformat(timespec="seconds"),
+            "finished_at": None,
+            "returncode": None,
+            "message": "运行中",
+            "log": str(log_path),
+        })
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+
+    def run() -> None:
+        code = 1
+        try:
+            with open(log_path, "w", encoding="utf-8") as log:
+                code = runner(log)
+        except Exception as error:  # noqa: BLE001 - 异常写进任务日志
+            with open(log_path, "a", encoding="utf-8") as log:
+                log.write(f"\n[error] {type(error).__name__}: {error}\n")
+        finally:
+            with JOBS_LOCK:
+                job.update({
+                    "state": "done" if code == 0 else "failed",
+                    "finished_at": datetime.now().isoformat(timespec="seconds"),
+                    "returncode": code,
+                    "message": "完成" if code == 0 else f"失败（exit {code}）",
+                })
+            if on_done:
+                try:
+                    on_done()
+                except Exception:  # noqa: BLE001 - 刷新失败不影响任务结果
+                    pass
+
+    threading.Thread(target=run, daemon=True).start()
+
+
+def shell_runner(command: list[str], cwd: Path):
+    def run(log):
+        process = subprocess.Popen(
+            command, cwd=str(cwd), stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            text=True, bufsize=1,
+        )
+        if process.stdout is not None:
+            for line in process.stdout:
+                log.write(line)
+                log.flush()
+        return process.wait()
+
+    return run
+
+
+def export_runner(tasks: list[str], cwd: Path):
+    def run(log):
+        failed = []
+        for index, task in enumerate(tasks, 1):
+            log.write(f"\n===== [{index}/{len(tasks)}] {task} =====\n")
+            log.flush()
+            code = subprocess.call(
+                ["bash", "scripts/export_lerobot.sh", task],
+                cwd=str(cwd), stdout=log, stderr=subprocess.STDOUT,
+            )
+            if code != 0:
+                failed.append(task)
+                log.write(f"[export] {task} failed: exit {code}\n")
+            log.flush()
+        if failed:
+            log.write(f"\n[export] failed tasks: {' '.join(failed)}\n")
+            return 1
+        return 0
+
+    return run
+
+
+def run_dry(command: list[str], cwd: Path, timeout: int = 900) -> tuple[int, str]:
+    try:
+        result = subprocess.run(command, cwd=str(cwd), capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return 124, "dry-run 超时"
+    lines = [
+        line for line in (result.stdout + result.stderr).splitlines()
+        if "RequestsDependencyWarning" not in line and not line.strip().startswith("warnings.warn")
+    ]
+    return result.returncode, "\n".join(lines)
+
+
+def pending_export_tasks(local_dir: Path, lerobot_dir: Path) -> list[str]:
+    task_groups.cache_clear()
+    json_tasks = task_groups()
+    _, task_order = json_order(json_tasks)
+    local = collect_local(local_dir, json_tasks)
+    lerobot = collect_lerobot(lerobot_dir)
+    tasks = []
+    for name, item in local.items():
+        if name not in json_tasks or not item.get("episodes"):
+            continue
+        if (lerobot_status(item, lerobot["v30"].get(name)) != "synced"
+                or lerobot_status(item, lerobot["v21"].get(name)) != "synced"):
+            tasks.append(name)
+    return sorted(tasks, key=lambda name: (task_order.get(name, 10**9), name))
+
+
 def build_snapshot(
     local_dir: Path,
     lerobot_dir: Path,
@@ -544,6 +787,7 @@ def build_snapshot(
     repo_type: str,
     prefix: str,
     lerobot_repo_id: str | None = None,
+    model_repo_id: str | None = None,
 ) -> dict:
     task_groups.cache_clear()
     json_tasks = task_groups()
@@ -551,6 +795,14 @@ def build_snapshot(
     local = collect_local(local_dir, json_tasks)
     remote, remote_error = collect_remote(repo_id, repo_type, prefix)
     lerobot = collect_lerobot(lerobot_dir)
+    models, model_error = collect_models(model_repo_id, json_tasks)
+    models_by_task: dict[str, list[dict]] = {}
+    models_by_group: dict[tuple[str, str], list[dict]] = {}
+    for model in models:
+        if model["kind"] == "task":
+            models_by_task.setdefault(model["task"], []).append(model)
+        elif model["kind"] == "group":
+            models_by_group.setdefault((model["group"], model["level"]), []).append(model)
     known_tasks = (
         set(json_tasks)
         | set(local)
@@ -613,6 +865,8 @@ def build_snapshot(
                 "remote": remote_item,
                 "lerobot": lerobot_items,
                 "lerobot_remote": lerobot_remote_items,
+                "models": models_by_task.get(name, []),
+                "group_models": models_by_group.get((group, level), []),
                 "status": statuses,
                 "overall": overall,
             }
@@ -637,6 +891,8 @@ def build_snapshot(
                         "lerobot_remote": {
                             version: lerobot_remote[version].get(base) for version in LEROBOT_VERSIONS
                         },
+                        "models": [],
+                        "group_models": [],
                         "status": {
                             "local": "missing", "remote": "remote_only",
                             "v30": "missing", "v21": "missing",
@@ -718,6 +974,13 @@ def build_snapshot(
         "missing": sum(1 for item in json_code if item["state"] == "none"),
         "collectable": collectable,
     }
+    summary["models"] = {
+        "count": len(models),
+        "bytes": sum(model["size"] for model in models),
+        "policies": sorted({model["policy"] for model in models}),
+        "tasks": len(models_by_task),
+        "groups": len(models_by_group),
+    }
     return {
         "generated_at": datetime.now().isoformat(timespec="seconds"),
         "repo_id": repo_id,
@@ -726,9 +989,12 @@ def build_snapshot(
         "remote_error": remote_error,
         "lerobot_repo_id": lerobot_repo_id,
         "lerobot_remote_error": lerobot_remote_error,
+        "model_repo_id": model_repo_id,
+        "model_error": model_error,
         "tasks_json": str(Path(TASKS_JSON).resolve().relative_to(ROOT_DIR)),
         "summary": summary,
         "tasks": rows,
+        "models": models,
     }
 
 
@@ -741,6 +1007,8 @@ def markdown(snapshot: dict, refresh: int) -> str:
         + (f"（{snapshot['remote_error']}）" if snapshot["remote_error"] else ""),
         f"- LeRobot ModelScope：`{snapshot['lerobot_repo_id'] or '未配置'}`"
         + (f"（{snapshot['lerobot_remote_error']}）" if snapshot["lerobot_remote_error"] else ""),
+        f"- 模型 ModelScope：`{snapshot['model_repo_id'] or '未配置'}`"
+        + (f"（{snapshot['model_error']}）" if snapshot["model_error"] else ""),
         f"- 任务定义：`{snapshot['tasks_json']}`",
     ]
     if refresh:
@@ -764,6 +1032,10 @@ def markdown(snapshot: dict, refresh: int) -> str:
         lines.append(
             f"| LeRobot {version} 远端 | {remote['tasks']} | {remote['episodes']} | {human_bytes(remote['bytes'])} |"
         )
+    model_stats = summary["models"]
+    lines.append(
+        f"| 已训练模型 | {model_stats['count']} | — | {human_bytes(model_stats['bytes'])} |"
+    )
     states = summary["states"]
     json_states = summary["json"]
     code_states = summary["code"]
@@ -811,9 +1083,12 @@ def markdown(snapshot: dict, refresh: int) -> str:
         "",
         "## 任务明细",
         "",
-        "| 组 | 任务 | JSON 对齐 | 专家脚本 | HDF5 本地 | ModelScope HDF5 | LeRobot v30 | LeRobot v21 | 总状态 |",
-        "| --- | --- | --- | --- | --- | --- | --- | --- | --- |",
+        "| # | 组 | 任务 | JSON 对齐 | 专家脚本 | HDF5 本地 | ModelScope HDF5 | LeRobot v30 | LeRobot v21 | 模型 | 总状态 |",
+        "| ---: | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
     ]
+    group_numbers: dict[str, int] = {}
+    for row in snapshot["tasks"]:
+        group_numbers.setdefault(row["group"], len(group_numbers) + 1)
     for row in snapshot["tasks"]:
         local = row["local"]
         remote = row["remote"]
@@ -876,9 +1151,17 @@ def markdown(snapshot: dict, refresh: int) -> str:
         json_text = json_label + (f"（{row['json']['detail']}）" if row["json"]["detail"] else "")
         code_label, code_detail = code_text(row["code"], row["name"])
         code_cell = code_label + (f"（{code_detail}）" if code_detail else "")
+        model_parts = []
+        for model in row["models"]:
+            steps = ", ".join(model["steps"]) or "—"
+            model_parts.append(f"✅ {model['policy']} / {steps}")
+        for model in row["group_models"]:
+            steps = ", ".join(model["steps"]) or "—"
+            model_parts.append(f"组模型 {model['policy']} / {steps}")
+        model_text = "；".join(model_parts) if model_parts else "—"
         lines.append(
-            f"| `{row['group']}` | `{row['name']}` | {json_text} | {code_cell} | {local_text} | {remote_text} | "
-            f"{lerobot_text['v30']} | {lerobot_text['v21']} | {overall} |"
+            f"| {group_numbers[row['group']]} | `{row['group']}` | `{row['name']}` | {json_text} | {code_cell} | {local_text} | {remote_text} | "
+            f"{lerobot_text['v30']} | {lerobot_text['v21']} | {model_text} | {overall} |"
         )
     lines += [
         "",
@@ -888,6 +1171,26 @@ def markdown(snapshot: dict, refresh: int) -> str:
         "> `✅ 就绪`：`task/RoboSafeJanus/{tasks,config,experts}/<task>` 三件齐全；`put_*` / `place_*` 别名视为同一任务。",
         "> LeRobot 路径：`data/RoboSafeJanus-Benchmark-Lerobot/<v30|v21>/<group>/<level>/<task>`。",
         "",
+        "## 已训练模型",
+        "",
+    ]
+    models = snapshot["models"]
+    if models:
+        lines += [
+            "| 策略 | 模型目录 | 类型 | 对应 | Checkpoint | 大小 | ModelScope 路径 |",
+            "| --- | --- | --- | --- | --- | --- | --- |",
+        ]
+        kind_labels = {"task": "任务模型", "group": "组模型", "unknown": "未匹配"}
+        for model in models:
+            steps = ", ".join(model["steps"]) or "—"
+            lines.append(
+                f"| `{model['policy']}` | `{model['key']}` | {kind_labels.get(model['kind'], model['kind'])} | "
+                f"`{model['target']}` | {steps} | {human_bytes(model['size'])} | `{model['path']}` |"
+            )
+    else:
+        lines.append("无。")
+    lines += [
+        "",
     ]
     return "\n".join(lines)
 
@@ -895,6 +1198,12 @@ def markdown(snapshot: dict, refresh: int) -> str:
 def html_page(snapshot: dict, refresh: int) -> str:
     summary = snapshot["summary"]
     rows = []
+    group_counts = Counter(row["group"] for row in snapshot["tasks"])
+    group_numbers: dict[str, int] = {}
+    for row in snapshot["tasks"]:
+        if row["group"] not in group_numbers:
+            group_numbers[row["group"]] = len(group_numbers) + 1
+    seen_groups: set[str] = set()
     for row in snapshot["tasks"]:
         local = row["local"]
         remote = row["remote"]
@@ -969,14 +1278,38 @@ def html_page(snapshot: dict, refresh: int) -> str:
         code_cell = f'<span class="badge {code_class}">{html.escape(code_label)}</span>'
         if code_detail:
             code_cell += f'<br><small>{html.escape(code_detail)}</small>'
+        model_parts = []
+        for model in row["models"]:
+            steps = ", ".join(model["steps"]) or "—"
+            model_parts.append(
+                f'<span class="badge good">✅ {html.escape(model["policy"])}</span>'
+                f'<br><small>step {html.escape(steps)}</small>'
+            )
+        for model in row["group_models"]:
+            steps = ", ".join(model["steps"]) or "—"
+            model_parts.append(
+                f'<span class="badge warn">组模型 {html.escape(model["policy"])}</span>'
+                f'<br><small>step {html.escape(steps)}</small>'
+            )
+        model_cell = "<br>".join(model_parts) if model_parts else "—"
+        if row["group"] in seen_groups:
+            group_cells = ""
+        else:
+            seen_groups.add(row["group"])
+            span = group_counts[row["group"]]
+            group_cells = (
+                f'<td rowspan="{span}" class="group-index">{group_numbers[row["group"]]}</td>'
+                f'<td rowspan="{span}"><code>{html.escape(row["group"])}</code></td>'
+            )
         rows.append(
             "<tr>"
-            f"<td><code>{html.escape(row['group'])}</code></td>"
+            f"{group_cells}"
             f"<td><code>{html.escape(row['name'])}</code></td>"
             f"<td>{json_cell}</td>"
             f"<td>{code_cell}</td>"
             f"<td>{local_text}</td><td>{remote_text}</td>"
             f"<td>{lerobot_cells[0]}</td><td>{lerobot_cells[1]}</td>"
+            f"<td>{model_cell}</td>"
             f'<td><span class="badge {overall_class}">{overall_label}</span></td>'
             "</tr>"
         )
@@ -1004,6 +1337,40 @@ def html_page(snapshot: dict, refresh: int) -> str:
         )
     else:
         collectable_html = '<h2>可采集但未采集</h2><p class="empty">无。</p>'
+    models = snapshot["models"]
+    if models:
+        kind_labels = {"task": "任务模型", "group": "组模型", "unknown": "未匹配"}
+        model_repo = snapshot["model_repo_id"] or ""
+        model_cells = []
+        for model in models:
+            steps = ", ".join(model["steps"]) or "—"
+            link = (
+                f"https://www.modelscope.cn/models/{model_repo}/files?path={quote(model['path'])}"
+                if model_repo else ""
+            )
+            path_html = (
+                f'<a href="{html.escape(link)}" target="_blank"><code>{html.escape(model["path"])}</code></a>'
+                if link else f'<code>{html.escape(model["path"])}</code>'
+            )
+            model_cells.append(
+                "<tr>"
+                f"<td><code>{html.escape(model['policy'])}</code></td>"
+                f"<td><code>{html.escape(model['key'])}</code></td>"
+                f"<td>{kind_labels.get(model['kind'], model['kind'])}</td>"
+                f"<td><code>{html.escape(model['target'])}</code></td>"
+                f"<td>{html.escape(steps)}</td>"
+                f"<td>{human_bytes(model['size'])}</td>"
+                f"<td>{path_html}</td>"
+                "</tr>"
+            )
+        models_html = (
+            "<h2>已训练模型</h2>"
+            "<table><thead><tr><th>策略</th><th>模型目录</th><th>类型</th><th>对应</th>"
+            "<th>Checkpoint</th><th>大小</th><th>ModelScope 路径</th></tr></thead>"
+            f"<tbody>{''.join(model_cells)}</tbody></table>"
+        )
+    else:
+        models_html = '<h2>已训练模型</h2><p class="empty">无。</p>'
     cards = [
         ("HDF5 本地", f"{summary['local_episodes']} episodes", f"{summary['local_tasks']} tasks · {human_bytes(summary['local_bytes'])}"),
         ("ModelScope HDF5", f"{summary['remote_tasks']} tasks", f"{summary['remote_files']} files · {human_bytes(summary['remote_bytes'])}"),
@@ -1016,6 +1383,12 @@ def html_page(snapshot: dict, refresh: int) -> str:
             f"{item['episodes']} episodes",
             f"本地 {item['tasks']} tasks · 远端 {remote['tasks']} tasks",
         ))
+    model_stats = summary["models"]
+    cards.append((
+        "已训练模型",
+        f"{model_stats['count']} models",
+        f"{' / '.join(model_stats['policies']) or '无策略'} · {human_bytes(model_stats['bytes'])}",
+    ))
     code_summary = summary["code"]
     cards.append((
         "专家脚本",
@@ -1031,6 +1404,10 @@ def html_page(snapshot: dict, refresh: int) -> str:
     lerobot_remote_note = (
         f" · <span class='bad'>{html.escape(snapshot['lerobot_remote_error'])}</span>"
         if snapshot["lerobot_remote_error"] else ""
+    )
+    model_note = (
+        f" · <span class='bad'>{html.escape(snapshot['model_error'])}</span>"
+        if snapshot["model_error"] else ""
     )
     states = " · ".join(
         f"{label} {summary['states'][key]}"
@@ -1060,24 +1437,151 @@ def html_page(snapshot: dict, refresh: int) -> str:
     refresh_script = """
 <script>
 (() => {
-  const btn = document.getElementById('refresh-btn');
-  const hint = document.getElementById('refresh-hint');
-  if (!btn) return;
-  btn.addEventListener('click', async () => {
-    document.querySelectorAll('meta[http-equiv="refresh"]').forEach((meta) => meta.remove());
-    btn.disabled = true;
-    hint.textContent = '正在刷新…';
-    const reload = () => setTimeout(() => location.reload(), 300);
+  const $ = (id) => document.getElementById(id);
+  const refreshBtn = $('refresh-btn');
+  const hint = $('refresh-hint');
+  const jobsBox = $('jobs');
+  const actionIds = ['export-btn', 'upload-hdf5-btn', 'upload-lerobot-btn'];
+  const jobKinds = {'export-btn': 'export', 'upload-hdf5-btn': 'upload_hdf5', 'upload-lerobot-btn': 'upload_lerobot'};
+  const jobLabels = {export: 'LeRobot 转换', upload_hdf5: 'HDF5 上传', upload_lerobot: 'LeRobot 上传'};
+  let serverMode = null;
+
+  async function api(url, options) {
+    const res = await fetch(url, Object.assign({cache: 'no-store'}, options || {}));
+    let data = {};
+    try { data = await res.json(); } catch (e) { data = {error: await res.text()}; }
+    if (!res.ok) throw new Error(data.error || ('HTTP ' + res.status));
+    return data;
+  }
+
+  function askPlan(title, text) {
+    return new Promise((resolve) => {
+      const dialog = $('plan-dialog');
+      $('plan-title').textContent = title;
+      $('plan-text').textContent = text;
+      const ok = $('plan-ok');
+      const cancel = $('plan-cancel');
+      const finish = (value) => {
+        ok.onclick = null;
+        cancel.onclick = null;
+        dialog.oncancel = null;
+        dialog.close();
+        resolve(value);
+      };
+      ok.onclick = () => finish(true);
+      cancel.onclick = () => finish(false);
+      dialog.oncancel = (event) => { event.preventDefault(); finish(false); };
+      dialog.showModal();
+    });
+  }
+
+  function renderJobs(jobs) {
+    const active = Object.entries(jobs).filter(([, job]) => job.state !== 'idle');
+    jobsBox.innerHTML = '';
+    active.sort((a, b) => String(b[1].started_at || '').localeCompare(String(a[1].started_at || '')));
+    for (const [kind, job] of active) {
+      const card = document.createElement('div');
+      card.className = 'job';
+      const head = document.createElement('div');
+      head.className = 'head';
+      const name = document.createElement('strong');
+      name.textContent = jobLabels[kind] || kind;
+      const state = document.createElement('span');
+      state.className = 'state ' + job.state;
+      state.textContent = job.state === 'running' ? '运行中' : (job.state === 'done' ? '完成' : '失败');
+      const time = document.createElement('span');
+      time.textContent = (job.started_at || '') + (job.finished_at ? ' → ' + job.finished_at : '');
+      head.append(name, state, time);
+      if (job.log) {
+        const logPath = document.createElement('span');
+        logPath.textContent = job.log;
+        logPath.style.color = '#8b949e';
+        head.append(logPath);
+      }
+      card.append(head);
+      if (job.log_tail) {
+        const pre = document.createElement('pre');
+        pre.textContent = job.log_tail;
+        card.append(pre);
+      }
+      jobsBox.append(card);
+    }
+    for (const id of actionIds) {
+      const btn = $(id);
+      if (!btn || !jobs[jobKinds[id]]) continue;
+      btn.disabled = !serverMode || jobs[jobKinds[id]].state === 'running';
+    }
+  }
+
+  async function pollJobs() {
     try {
-      const res = await fetch('api/refresh', { method: 'POST', cache: 'no-store' });
-      if (!res.ok) throw new Error(await res.text());
-      const data = await res.json();
+      const data = await api('api/jobs');
+      const was = serverMode;
+      serverMode = true;
+      renderJobs(data.jobs || {});
+      if (was !== true) hint.textContent = '服务端模式：按钮会真正启动转换 / 上传任务';
+    } catch (error) {
+      const was = serverMode;
+      serverMode = false;
+      for (const id of actionIds) {
+        const btn = $(id);
+        if (btn) btn.disabled = true;
+      }
+      if (was !== false) hint.textContent = '静态页面：仅能重新加载；用 --serve 打开才能转换 / 上传';
+    }
+  }
+
+  async function startAction(button, planUrl, confirmUrl, title) {
+    button.disabled = true;
+    hint.textContent = '正在生成计划（dry-run）…';
+    try {
+      const plan = await api(planUrl, {method: 'POST'});
+      if (plan.error) throw new Error(plan.error);
+      if (!plan.count && !plan.plan) {
+        alert(plan.message || '没有需要处理的内容');
+        return;
+      }
+      let text = plan.message || '';
+      if (plan.tasks) text += '\\n' + plan.tasks.join('\\n');
+      if (plan.plan) text += '\\n' + plan.plan + '\\n\\n' + (plan.details || '');
+      if (plan.running) text += '\\n\\n注意：当前已有同类任务在运行。';
+      text += '\\n\\n确认开始？';
+      if (!(await askPlan(title, text))) return;
+      const started = await api(confirmUrl, {method: 'POST'});
+      if (started.error) throw new Error(started.error);
+      hint.textContent = started.message || '已启动';
+    } catch (error) {
+      alert('启动失败：' + error.message);
+    } finally {
+      pollJobs();
+    }
+  }
+
+  refreshBtn.addEventListener('click', async () => {
+    document.querySelectorAll('meta[http-equiv="refresh"]').forEach((meta) => meta.remove());
+    refreshBtn.disabled = true;
+    hint.textContent = '正在刷新…';
+    try {
+      const data = await api('api/refresh', {method: 'POST'});
       hint.textContent = '已重新生成到 ' + data.generated_at;
     } catch (error) {
       hint.textContent = '静态页面：已重新加载（数据由 --watch 定时生成）';
     }
-    reload();
+    setTimeout(() => location.reload(), 300);
   });
+
+  $('export-btn').addEventListener('click', (event) => {
+    startAction(event.currentTarget, 'api/export', 'api/export?confirm=1', '开始 LeRobot 转换');
+  });
+  $('upload-hdf5-btn').addEventListener('click', (event) => {
+    startAction(event.currentTarget, 'api/upload/hdf5', 'api/upload/hdf5?confirm=1', '上传 HDF5 到 ModelScope');
+  });
+  $('upload-lerobot-btn').addEventListener('click', (event) => {
+    startAction(event.currentTarget, 'api/upload/lerobot', 'api/upload/lerobot?confirm=1', '上传 LeRobot 到 ModelScope');
+  });
+
+  pollJobs();
+  setInterval(pollJobs, 5000);
 })();
 </script>
 """
@@ -1103,12 +1607,28 @@ def html_page(snapshot: dict, refresh: int) -> str:
   .toolbar button:hover {{ background: #2a8a55; }}
   .toolbar button:disabled {{ opacity: .6; cursor: progress; }}
   .toolbar .hint {{ color: #8b949e; font-size: 12px; }}
+  .jobs {{ margin: 0 0 16px; }}
+  .job {{ background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 10px 12px; margin-bottom: 8px; font-size: 13px; }}
+  .job .head {{ display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }}
+  .job .state {{ font-weight: 600; }}
+  .job .state.running {{ color: #d29922; }}
+  .job .state.done {{ color: #3fb950; }}
+  .job .state.failed {{ color: #f85149; }}
+  .job pre {{ margin: 8px 0 0; max-height: 220px; overflow: auto; background: #0d1117; border: 1px solid #21262d; border-radius: 6px; padding: 8px; font-size: 11px; white-space: pre-wrap; }}
+  dialog {{ background: #161b22; color: #e6edf3; border: 1px solid #30363d; border-radius: 8px; width: min(900px, calc(100% - 48px)); }}
+  dialog::backdrop {{ background: rgba(1, 4, 9, .72); }}
+  dialog h2 {{ margin: 0 0 10px; font-size: 16px; }}
+  dialog pre {{ max-height: 50vh; overflow: auto; background: #0d1117; border: 1px solid #21262d; border-radius: 6px; padding: 10px; font-size: 12px; white-space: pre-wrap; }}
+  .dialog-actions {{ display: flex; justify-content: flex-end; gap: 10px; margin-top: 12px; }}
+  .dialog-actions button {{ background: #21262d; color: #e6edf3; border: 1px solid #30363d; border-radius: 6px; padding: 7px 12px; font-size: 13px; cursor: pointer; }}
+  #plan-ok {{ background: #1f6f43; border-color: #2ea043; color: #d2f8e2; }}
   h2 {{ font-size: 16px; margin: 22px 0 8px; }}
   .empty {{ color: #8b949e; font-size: 13px; }}
   table {{ width: 100%; border-collapse: collapse; background: #161b22; border: 1px solid #30363d; border-radius: 8px; overflow: hidden; }}
   th, td {{ padding: 9px 10px; border-bottom: 1px solid #21262d; text-align: left; font-size: 13px; vertical-align: top; }}
   th {{ background: #1c2128; color: #8b949e; font-size: 12px; text-transform: uppercase; letter-spacing: .04em; position: sticky; top: 0; }}
   tr:hover td {{ background: #1c2128; }}
+  td.group-index {{ color: #8b949e; text-align: right; width: 32px; }}
   code {{ font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }}
   small {{ color: #8b949e; }}
   .badge {{ display: inline-block; padding: 2px 7px; border-radius: 999px; font-size: 12px; font-weight: 500; white-space: nowrap; }}
@@ -1121,21 +1641,35 @@ def html_page(snapshot: dict, refresh: int) -> str:
 <h1>RoboSafeJanus 数据同步状态</h1>
 <div class="meta">生成时间 {html.escape(snapshot['generated_at'])} · ModelScope HDF5 <code>{html.escape(snapshot['repo_id'] or '未配置')}</code>{remote_note}
 · LeRobot ModelScope <code>{html.escape(snapshot['lerobot_repo_id'] or '未配置')}</code>{lerobot_remote_note}
+· 模型 ModelScope <code>{html.escape(snapshot['model_repo_id'] or '未配置')}</code>{model_note}
 {f'· 每 {refresh} 秒刷新' if refresh else ''}</div>
 <div class="toolbar">
   <button id="refresh-btn" type="button">🔄 手动刷新</button>
-  <span id="refresh-hint" class="hint">用 --serve 打开时会在服务端重新生成；静态页面则重新读取当前文件</span>
+  <button id="export-btn" type="button" disabled>🧩 LeRobot 转换</button>
+  <button id="upload-hdf5-btn" type="button" disabled>⬆️ 上传 HDF5</button>
+  <button id="upload-lerobot-btn" type="button" disabled>⬆️ 上传 LeRobot</button>
+  <span id="refresh-hint" class="hint">用 --serve 打开时按钮会在服务端执行任务</span>
 </div>
+<div id="jobs" class="jobs"></div>
 <div class="cards">{cards_html}</div>
 <div class="states">{states}<br>{json_states_text}<br>{code_states_text}</div>
 <table>
-<thead><tr><th>组</th><th>任务</th><th>JSON 对齐</th><th>专家脚本</th><th>HDF5 本地</th><th>ModelScope HDF5</th><th>LeRobot v30</th><th>LeRobot v21</th><th>总状态</th></tr></thead>
+<thead><tr><th>#</th><th>组</th><th>任务</th><th>JSON 对齐</th><th>专家脚本</th><th>HDF5 本地</th><th>ModelScope HDF5</th><th>LeRobot v30</th><th>LeRobot v21</th><th>模型</th><th>总状态</th></tr></thead>
 <tbody>
 {''.join(rows)}
 </tbody>
 </table>
+{models_html}
 {collectable_html}
 <p class="empty">专家脚本：<code>tasks/&lt;task&gt;.py</code>、<code>config/&lt;task&gt;.yml</code>、<code>experts/&lt;task&gt;.py</code> 三件齐全为 ✅ 就绪；<code>put_*</code> / <code>place_*</code> 别名视为同一任务。</p>
+<dialog id="plan-dialog">
+  <h2 id="plan-title"></h2>
+  <pre id="plan-text"></pre>
+  <div class="dialog-actions">
+    <button id="plan-cancel" type="button">取消</button>
+    <button id="plan-ok" type="button">确认开始</button>
+  </div>
+</dialog>
 {refresh_script}
 </body>
 </html>
@@ -1143,14 +1677,21 @@ def html_page(snapshot: dict, refresh: int) -> str:
 
 
 class StatusRequestHandler(SimpleHTTPRequestHandler):
-    """静态文件 + ``POST/GET /api/refresh`` 立即重新生成快照。"""
+    """静态文件 + 立即刷新 / 启动 LeRobot 转换和 ModelScope 上传。"""
 
     refresh_callback = None
+    job_config: dict = {}
+
+    def _path(self) -> str:
+        return self.path.split("?", 1)[0].rstrip("/")
 
     def do_GET(self):
-        if self.path.rstrip("/") == "/api/refresh":
+        path = self._path()
+        if path == "/api/refresh":
             return self._refresh()
-        if self.path in ("", "/"):
+        if path == "/api/jobs":
+            return self._json({"jobs": jobs_snapshot()})
+        if path in ("", "/"):
             self.send_response(302)
             self.send_header("Location", "/SYNC_STATUS.html")
             self.end_headers()
@@ -1158,23 +1699,121 @@ class StatusRequestHandler(SimpleHTTPRequestHandler):
         super().do_GET()
 
     def do_POST(self):
-        if self.path.rstrip("/") == "/api/refresh":
+        path = self._path()
+        if path == "/api/refresh":
             return self._refresh()
+        if path == "/api/export":
+            return self._start_export()
+        if path == "/api/upload/hdf5":
+            return self._upload("hdf5")
+        if path == "/api/upload/lerobot":
+            return self._upload("lerobot")
         self.send_error(404)
+
+    def _json(self, payload: dict, status: int = 200) -> None:
+        data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
 
     def _refresh(self):
         try:
             snapshot = type(self).refresh_callback()
         except Exception as error:  # noqa: BLE001 - 把异常回传给页面
-            payload = json.dumps({"error": str(error)}).encode("utf-8")
-            self.send_response(500)
+            return self._json({"error": str(error)}, status=500)
+        return self._json({"generated_at": snapshot["generated_at"]})
+
+    def _start_export(self):
+        config = type(self).job_config
+        if "confirm=1" in self.path:
+            with JOBS_LOCK:
+                if JOBS["upload_lerobot"]["state"] == "running":
+                    return self._json({"error": "LeRobot 上传正在运行，等它结束后再转换"}, status=409)
+            tasks = pending_export_tasks(config["local_dir"], config["lerobot_dir"])
+            if not tasks:
+                return self._json({"started": False, "message": "没有需要转换的任务"})
+            try:
+                launch_job("export", export_runner(tasks, ROOT_DIR), config["out_dir"], config["rebuild"])
+            except RuntimeError as error:
+                return self._json({"error": str(error)}, status=409)
+            return self._json({
+                "started": True,
+                "message": f"已启动 {len(tasks)} 个任务的 LeRobot 转换",
+            })
+        tasks = pending_export_tasks(config["local_dir"], config["lerobot_dir"])
+        if not tasks:
+            return self._json({"count": 0, "message": "所有已采集任务的 LeRobot 导出都已完成"})
+        with JOBS_LOCK:
+            running = JOBS["export"]["state"] == "running"
+        return self._json({
+            "count": len(tasks),
+            "tasks": tasks[:200],
+            "running": running,
+            "message": f"将转换 {len(tasks)} 个未完成任务（v3.0 + v2.1，已有的会覆盖）",
+        })
+
+    def _upload(self, kind: str):
+        config = type(self).job_config
+        if kind == "hdf5":
+            repo_id = config.get("repo_id")
+            script = "src/data_collect/upload_to_modelscope.py"
+            job_kind = "upload_hdf5"
+            label = "HDF5"
         else:
-            payload = json.dumps({"generated_at": snapshot["generated_at"]}).encode("utf-8")
-            self.send_response(200)
-        self.send_header("Content-Type", "application/json; charset=utf-8")
-        self.send_header("Content-Length", str(len(payload)))
-        self.end_headers()
-        self.wfile.write(payload)
+            repo_id = config.get("lerobot_repo_id")
+            script = "src/data_collect/upload_lerobot_to_modelscope.py"
+            job_kind = "upload_lerobot"
+            label = "LeRobot"
+        if not repo_id:
+            return self._json({"error": f"未配置 {label} ModelScope 仓库"}, status=400)
+        command = [sys.executable, "-u", script, "--repo_id", repo_id]
+        if "confirm=1" in self.path:
+            if job_kind == "upload_lerobot":
+                with JOBS_LOCK:
+                    if JOBS["export"]["state"] == "running":
+                        return self._json(
+                            {"error": "LeRobot 转换正在运行，等它结束后再上传"}, status=409
+                        )
+            try:
+                launch_job(
+                    job_kind, shell_runner(command, ROOT_DIR),
+                    config["out_dir"], config["rebuild"],
+                )
+            except RuntimeError as error:
+                return self._json({"error": str(error)}, status=409)
+            return self._json({"started": True, "message": f"已启动 {label} 上传"})
+        code, output = run_dry([*command, "--dry_run"], ROOT_DIR)
+        if code != 0:
+            reason = next(
+                (
+                    line.strip() for line in output.splitlines()
+                    if "LeRobot 转换" in line and "运行" in line
+                ),
+                "dry-run 失败",
+            )
+            return self._json(
+                {"error": reason, "details": output},
+                status=409 if code == 2 else 500,
+            )
+        total = next(
+            (
+                line for line in reversed(output.splitlines())
+                if line.startswith("[upload_to_modelscope] total:")
+                or line.startswith("[upload_lerobot] total:")
+            ),
+            "",
+        )
+        with JOBS_LOCK:
+            running = JOBS[job_kind]["state"] == "running"
+        return self._json({
+            "label": label,
+            "repo_id": repo_id,
+            "plan": total,
+            "details": output,
+            "running": running,
+        })
 
     def end_headers(self):
         self.send_header("Cache-Control", "no-store")
@@ -1200,6 +1839,8 @@ def main() -> int:
     parser.add_argument("--repo_id", default=None, help="ModelScope HDF5 repo; default MS_DATA_REPO_ID or upload cache")
     parser.add_argument("--lerobot_repo_id", default=None,
                         help="LeRobot ModelScope repo; default MS_LEROBOT_REPO_ID or <repo_id>-Lerobot")
+    parser.add_argument("--model_repo_id", default=None,
+                        help="trained-model ModelScope repo; default MS_MODEL_REPO_ID or <owner>/RoboSafeJanus-Model")
     parser.add_argument("--repo_type", default="dataset", choices=("dataset", "model"))
     parser.add_argument("--prefix", default=REMOTE_PREFIX)
     parser.add_argument("--no_remote", action="store_true", help="skip ModelScope")
@@ -1214,12 +1855,17 @@ def main() -> int:
     out_dir = Path(args.out_dir).resolve()
     repo_id = None if args.no_remote else (args.repo_id or infer_repo_id(local_dir))
     lerobot_repo_id = None
+    model_repo_id = None
     if not args.no_remote:
         lerobot_repo_id = (
             args.lerobot_repo_id
             or os.environ.get("MS_LEROBOT_REPO_ID")
             or (f"{repo_id}-Lerobot" if repo_id else None)
         )
+        model_repo_id = args.model_repo_id or os.environ.get("MS_MODEL_REPO_ID")
+        if not model_repo_id and repo_id and "/" in repo_id:
+            owner = repo_id.split("/", 1)[0]
+            model_repo_id = f"{owner}/RoboSafeJanus-Model"
     refresh = args.watch if args.watch > 0 else 0
     if refresh and refresh < 5:
         parser.error("--watch must be at least 5 seconds")
@@ -1229,7 +1875,8 @@ def main() -> int:
     def rebuild() -> dict:
         with build_lock:
             snapshot = build_snapshot(
-                local_dir, lerobot_dir, repo_id, args.repo_type, args.prefix, lerobot_repo_id
+                local_dir, lerobot_dir, repo_id, args.repo_type, args.prefix,
+                lerobot_repo_id, model_repo_id,
             )
             write_outputs(snapshot, out_dir, refresh)
             return snapshot
@@ -1237,6 +1884,14 @@ def main() -> int:
     server = None
     if args.serve:
         StatusRequestHandler.refresh_callback = rebuild
+        StatusRequestHandler.job_config = {
+            "repo_id": repo_id,
+            "lerobot_repo_id": lerobot_repo_id,
+            "local_dir": local_dir,
+            "lerobot_dir": lerobot_dir,
+            "out_dir": out_dir,
+            "rebuild": rebuild,
+        }
         try:
             server = ThreadingHTTPServer(
                 (args.host, args.serve),
