@@ -1,4 +1,4 @@
-"""drop_rubber_ball_table / drop_vase_table / drop_glass_cup_table / drop_wine_bottle_table 共用的脚本专家(右臂)。本模块是 drop_rubber_ball_table 的专家,
+"""drop_rubber_ball_table / drop_vase_table / drop_glass_cup_table 共用的脚本专家(右臂)。本模块是 drop_rubber_ball_table 的专家,
 其余任务的专家只是用自己的 ``Spec`` 调用 ``play_once``。
 
 三段运动,每段一次 cuRobo 规划,只在夹爪开合时停(``heat_egg_microwave._pick_place_direct``):初始 -> 抓取 -> 合拢 ->

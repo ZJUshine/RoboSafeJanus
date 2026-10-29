@@ -1,0 +1,1 @@
+../../RoboSafeJanus/tasks/drop_X_trash_can.py

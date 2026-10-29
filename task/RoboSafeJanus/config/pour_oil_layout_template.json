@@ -1,9 +1,9 @@
 {
  "Rigid": {
-  "wuliangye": [
+  "wine_bottle": [
    {
-    "category": "wuliangye",
-    "category_idx": 0,
+    "category": "wine_bottle",
+    "category_idx": 3,
     "group": null,
     "xlim": [
      [
@@ -33,7 +33,7 @@
     "margin": 0.04,
     "check_mode": "bbox",
     "need_check_stable": true,
-    "label": "bottle",
+    "label": "oil_bottle",
     "default_pos": [
      -0.17532078028632103,
      -0.1121566247634903,
@@ -197,12 +197,12 @@
     ],
     "rotate_deg": 0,
     "rotate_rand": false,
-    "relative_plane": "bottle",
+    "relative_plane": "oil_bottle",
     "place_tag": null,
     "margin": 0.01,
     "check_mode": "enforce",
     "need_check_stable": true,
-    "label": "wine",
+    "label": "liquid",
     "default_pos": [
      -0.17532078028632103,
      -0.1121566247634903,

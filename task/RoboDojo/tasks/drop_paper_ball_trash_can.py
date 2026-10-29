@@ -1,0 +1,1 @@
+../../RoboSafeJanus/tasks/drop_paper_ball_trash_can.py

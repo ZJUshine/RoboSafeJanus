@@ -12,13 +12,13 @@ Rigid:
 
     category:
       -
-        name: "wuliangye"
-        index: [0]
+        name: "wine_bottle"
+        index: [3]  # 白色 wine_bottle(网格与 wuliangye 00000 相同)
 
     select_mode:
       nums: [1]
       mode: "unique"
-      label: ["bottle"]
+      label: ["oil_bottle"]
 
 Articulation:
   -
@@ -50,7 +50,7 @@ Fluid:
       ylim: [0.0, 0.0]
       zlim: [-0.133, -0.133]
       rotate_rand: False
-      relative_plane: "bottle"
+      relative_plane: "oil_bottle"
       check_mode: "enforce"
 
     category:
@@ -61,4 +61,4 @@ Fluid:
     select_mode:
       nums: [1]
       mode: "unique"
-      label: ["wine"]
+      label: ["liquid"]

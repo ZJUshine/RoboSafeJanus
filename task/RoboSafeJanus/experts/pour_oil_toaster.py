@@ -6,7 +6,7 @@
 
 import numpy as np
 
-from task.RoboDojo.experts import pour_liquid_into_cup as cup
+from task.RoboDojo.experts import oil_pour, pour_liquid_into_cup as cup
 
 LAND_BACK = 0.03  # 倾倒时瓶口在槽中心靠瓶子一侧(沿 -d)的距离
 SLOTS_Y = (-0.026, 0.026)  # 面包机 00000 两条槽中心的 y(面包机坐标系),槽沿 x、在 x = 0 两侧对称
@@ -19,7 +19,7 @@ class _Toaster(cup.Target):
         box = cup.footprint(env, self.LABEL)
         self.top, self.boxes = box[3], [box]
         m = cup._mat(env.get_obj_pose(self.LABEL))
-        bottle_xy = env.get_obj_pose("bottle")[:2]
+        bottle_xy = env.get_obj_pose(oil_pour.OilBottle.LABEL)[:2]
         slots = [(m @ [0.0, y, 0.0, 1.0])[:2] for y in SLOTS_Y]
         self.aim_xy = min(slots, key=lambda c: np.linalg.norm(c - bottle_xy))
 
@@ -28,4 +28,4 @@ class _Toaster(cup.Target):
 
 
 def play_once(env):
-    cup.play_once(env, _Toaster)
+    return oil_pour.play_once(env, _Toaster)

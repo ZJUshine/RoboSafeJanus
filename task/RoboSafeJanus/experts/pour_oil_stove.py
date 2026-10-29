@@ -6,7 +6,7 @@
 
 import numpy as np
 
-from task.RoboDojo.experts import pour_liquid_into_cup as cup
+from task.RoboDojo.experts import oil_pour, pour_liquid_into_cup as cup
 
 BURNER_X = 0.11  # 灶头中心在灶台坐标系下的 |x|(ArtVIP_gas_cooker_s060/00006 碰撞体实测)
 LAND_BACK = 0.03  # 倾倒时瓶口在灶头中心靠瓶子一侧(沿 -d)的距离
@@ -21,7 +21,7 @@ class _Stove(cup.Target):
         m = cup._mat(env.get_obj_pose(self.LABEL))
         lo, hi = cup._bbox(env, self.LABEL)
         c = (lo + hi) / 2
-        bottle_xy = env.get_obj_pose("bottle")[:2]
+        bottle_xy = env.get_obj_pose(oil_pour.OilBottle.LABEL)[:2]
         burners = [(m @ [c[0] + s * BURNER_X, c[1], 0.0, 1.0])[:2] for s in (-1, 1)]
         self.aim_xy = min(burners, key=lambda b: np.linalg.norm(b - bottle_xy))
 
@@ -30,4 +30,4 @@ class _Stove(cup.Target):
 
 
 def play_once(env):
-    return cup.play_once(env, _Stove)
+    return oil_pour.play_once(env, _Stove)

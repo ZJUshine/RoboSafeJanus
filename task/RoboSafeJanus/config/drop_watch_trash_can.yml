@@ -1,0 +1,40 @@
+# drop_X_trash_can 组:垃圾桶 Geometry/dustbin/00000(47 x 47 x 65 cm,桶口约高 0.725 m,比桌面低 4 cm)放在桌子左侧的地上,
+# 位置同 put_bottles_into_dustbin(中心 (-0.63, -0.10));地上的固定件只能照搬模板里的记录,采集时要传
+# --layout_template task/RoboSafeJanus/config/drop_X_trash_can_layout_template.json(put_bottles_into_dustbin_0 去掉瓶子、
+# label 改成 trash_can)。只有左臂够得到垃圾桶:物体放在桌面左侧,左臂抓起后移到桶口上方松手(专家见
+# experts/drop_paper_ball_trash_can.py)。
+Rigid:
+  -
+    common:
+      xlim: [-0.28, -0.16]
+      ylim: [-0.22, -0.10]
+      rotate_rand: True
+      rotate_deg: 180
+      qpos: [0.7084, -0.0868, 0.695, -0.087]  # 平放(metadata active.place.side);资产默认姿态是表带环立着,放下就倒(布局稳定性检查不过)
+      relative_plane: "Table"
+
+    category:
+      -
+        # 8 个 watch 里取 00002(智能手表、硅胶表带,3.3 x 4.7 x 5.4 cm,摩擦 0.65);00000 / 00001 的 metadata 包围盒与网格的 y / z 对不上,GraspGenX 不收
+        name: "watch"
+        index: [2]
+
+    select_mode:
+      nums: [1]
+      mode: "unique"
+      label: ["watch"]
+
+Geometry:
+  -
+    common:
+      relative_plane: "Ground"
+
+    category:
+      -
+        name: "dustbin"
+        index: [0]
+
+    select_mode:
+      nums: [1]
+      mode: "same"
+      label: ["trash_can"]

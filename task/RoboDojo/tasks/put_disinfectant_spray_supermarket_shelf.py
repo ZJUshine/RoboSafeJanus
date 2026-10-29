@@ -1,0 +1,1 @@
+../../RoboSafeJanus/tasks/put_disinfectant_spray_supermarket_shelf.py

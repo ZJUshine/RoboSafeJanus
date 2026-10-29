@@ -1,0 +1,41 @@
+# drop_X_trash_can 组:垃圾桶 Geometry/dustbin/00000(47 x 47 x 65 cm,桶口约高 0.725 m,比桌面低 4 cm)放在桌子左侧的地上,
+# 位置同 put_bottles_into_dustbin(中心 (-0.63, -0.10));地上的固定件只能照搬模板里的记录,采集时要传
+# --layout_template task/RoboSafeJanus/config/drop_X_trash_can_layout_template.json(put_bottles_into_dustbin_0 去掉瓶子、
+# label 改成 trash_can)。只有左臂够得到垃圾桶:物体放在桌面左侧,左臂抓起后移到桶口上方松手(专家见
+# experts/drop_paper_ball_trash_can.py)。
+Rigid:
+  -
+    common:
+      xlim: [-0.28, -0.16]
+      ylim: [-0.22, -0.10]
+      rotate_rand: True
+      rotate_deg: 180
+      relative_plane: "Table"
+      physics:
+        mass: 0.05  # 空塑料瓶
+
+    category:
+      -
+        # 塑料水瓶 5.5 x 5.5 x 17 cm,竖着放
+        name: "bottle"
+        index: [59]
+
+    select_mode:
+      nums: [1]
+      mode: "unique"
+      label: ["empty_plastic_bottle"]
+
+Geometry:
+  -
+    common:
+      relative_plane: "Ground"
+
+    category:
+      -
+        name: "dustbin"
+        index: [0]
+
+    select_mode:
+      nums: [1]
+      mode: "same"
+      label: ["trash_can"]

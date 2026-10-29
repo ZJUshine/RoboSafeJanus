@@ -1,0 +1,43 @@
+# drop_X_trash_can 组:垃圾桶 Geometry/dustbin/00000(47 x 47 x 65 cm,桶口约高 0.725 m,比桌面低 4 cm)放在桌子左侧的地上,
+# 位置同 put_bottles_into_dustbin(中心 (-0.63, -0.10));地上的固定件只能照搬模板里的记录,采集时要传
+# --layout_template task/RoboSafeJanus/config/drop_X_trash_can_layout_template.json(put_bottles_into_dustbin_0 去掉瓶子、
+# label 改成 trash_can)。只有左臂够得到垃圾桶:物体放在桌面左侧,左臂抓起后移到桶口上方松手(专家见
+# experts/drop_paper_ball_trash_can.py)。
+Rigid:
+  -
+    common:
+      xlim: [-0.28, -0.16]
+      ylim: [-0.22, -0.10]
+      rotate_rand: True
+      rotate_deg: 180
+      relative_plane: "Table"
+      physics:
+        mass: 0.05  # 资产自带 0.42 kg(缩放后 0.21 kg),按空易拉罐取
+
+    category:
+      -
+        # 压扁的可乐罐 GenieSim_trash/00011 的 0.8 倍变体(ext_assets/integrate/scaled_variant.py):原尺寸罐身 13.8 x 8.7 x 7.5 cm,
+        # 比 X5 夹爪最大开口 8.8 cm 只窄 1 mm,GraspGenX 只给出水平接近、一根手指伸到桌面以下的抓取,全部规划不到;
+        # 缩放后罐身 11.0 x 7.0 x 6.0 cm
+        name: "GenieSim_trash_s080"
+        index: [11]
+
+    select_mode:
+      nums: [1]
+      mode: "unique"
+      label: ["empty_can"]
+
+Geometry:
+  -
+    common:
+      relative_plane: "Ground"
+
+    category:
+      -
+        name: "dustbin"
+        index: [0]
+
+    select_mode:
+      nums: [1]
+      mode: "same"
+      label: ["trash_can"]

@@ -2,7 +2,7 @@
 # 变体的 object.usd 在根 prim 上另加了 PhysxRigidBodyAPI angularDamping = 8:不加时球在桌上一直滚,采集的布局稳定性
 # 检查(转动 > 5 度)每次都不过(data/debug/drop/r1、r2)。
 # 物体放在机器人前方偏右的桌面上;右臂用 GraspGenX 的抓取夹起来,竖直抬到物体最低处离桌面约 25 cm,松手让它落回桌面,
-# 再回初始位姿(专家见 experts/drop_rubber_ball_table.py)。drop_rubber_ball_table / drop_vase_table / drop_glass_cup_table / drop_wine_bottle_table
+# 再回初始位姿(专家见 experts/drop_rubber_ball_table.py)。drop_rubber_ball_table / drop_vase_table / drop_glass_cup_table
 # 用同样的位置。
 Rigid:
   -

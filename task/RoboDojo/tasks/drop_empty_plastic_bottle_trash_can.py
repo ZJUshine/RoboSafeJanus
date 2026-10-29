@@ -1,0 +1,1 @@
+../../RoboSafeJanus/tasks/drop_empty_plastic_bottle_trash_can.py

@@ -1,7 +1,7 @@
 # 花瓶:Geometry/vase/00001(青绿色,10 x 7.7 x 14.8 cm,瓶颈 5.8 x 4.4 cm)。Geometry 段加载时刚体被关掉、夹不起来,用
 # Rigid 变体 Rigid/vase_s100(scaled_variant.py,比例 1.0)。之前用的黑色 00003 也能过(data/debug/drop/r6 7/8),用户要换颜色。
 # 物体放在机器人前方偏右的桌面上;右臂用 GraspGenX 的抓取夹起来,竖直抬到物体最低处离桌面约 25 cm,松手让它落回桌面,
-# 再回初始位姿(专家见 experts/drop_rubber_ball_table.py)。drop_rubber_ball_table / drop_vase_table / drop_glass_cup_table / drop_wine_bottle_table
+# 再回初始位姿(专家见 experts/drop_rubber_ball_table.py)。drop_rubber_ball_table / drop_vase_table / drop_glass_cup_table
 # 用同样的位置。
 Rigid:
   -

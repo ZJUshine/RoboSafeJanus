@@ -1,0 +1,67 @@
+# 油瓶把油倒进平底锅。Fluid 跟随油瓶,模板布局里要有瓶中的油,采集时要传
+# --layout_template task/RoboSafeJanus/config/pour_oil_layout_template.json。
+Rigid:
+  -
+    common:
+      # 平底锅(含两个把手)外接圆半径约 0.155,瓶子放在锅左右两侧、锅口前方
+      xlim: [[-0.30, -0.24], [0.24, 0.30]]
+      ylim: [-0.20, -0.12]
+      rotate_rand: False
+      rotate_deg: 0
+      relative_plane: "Table"
+      qpos: [1, 0, 0, 0]
+      margin: 0.01
+
+    category:
+      -
+        name: "wine_bottle"
+        index: [3]  # 白色 wine_bottle(网格与 wuliangye 00000 相同)
+
+    select_mode:
+      nums: [1]
+      mode: "unique"
+      label: ["oil_bottle"]
+
+  -
+    common:
+      # 锅口很宽(半径约 0.08),锅沿只有 3.3 cm 高;把手沿 y 方向
+      xlim: [-0.02, 0.02]
+      ylim: [-0.05, -0.01]
+      rotate_rand: True
+      rotate_deg: [-10, 10]
+      relative_plane: "Table"
+      qpos: [1, 0, 0, 0]
+      margin: 0.01
+      # RoboTwin 的平底锅 0.41 kg,倒油时油流离锅很近;按真实铸铁平底锅取 1 kg,避免被推走
+      physics:
+        mass: 1.0
+
+    category:
+      -
+        name: "RoboTwin_106_skillet"
+        index: [0]
+
+    select_mode:
+      nums: [1]
+      mode: "unique"
+      label: ["skillet"]
+
+Fluid:
+  -
+    common:
+      xlim: [0.0, 0.0]
+      ylim: [0.0, 0.0]
+      zlim: [-0.133, -0.133]
+      rotate_rand: False
+      relative_plane: "oil_bottle"
+      check_mode: "enforce"
+
+    category:
+      -
+        name: "oil"
+        index: [0]
+
+    select_mode:
+      nums: [1]
+      mode: "unique"
+      label: ["liquid"]
