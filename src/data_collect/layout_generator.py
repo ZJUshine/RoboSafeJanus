@@ -9,7 +9,9 @@
 以及 ``select_mode.mode`` 为 ``same`` / ``unique`` / ``category_unique`` / ``allow_duplicate``;``select_mode.nums``
 可以是整数、``[n]`` 或闭区间 ``[min, max]``(每个布局随机取一个数)。Rigid 组也可以放在
 已采样固定件的支撑面上(``relative_plane: <固定件 label>/<support tag>``,例如面包放在
-``bread_shelf/bread_shelf/0``)。``common.physics`` 覆盖资产自带的物理参数(如摩擦)。
+``bread_shelf/bread_shelf/0``)。支撑面上的组可以设 ``common.mirror: <名字>``:每个布局对每个名字抛一次硬币,
+同名的组一起把支撑面坐标系里的 y 偏移取反(整组左右对调,例如货架上的两个商品区)。
+``common.physics`` 覆盖资产自带的物理参数(如摩擦)。
 放在 Table 上的 ``Geometry`` / ``Articulation`` 组用同样方式采样(其 ``zlim`` 是相对桌面的高度);
 其他固定件(如场景里的相机支架)直接从模板复制。``Fluid`` 组跟随其父 Rigid label,
 保持模板中相对父物体的偏移。其余写法一律抛 ``UnsupportedLayoutError``,
@@ -231,11 +233,11 @@ class LayoutGenerator:
         ori = t3d.quaternions.qmult(yaw, qpos)
         return self._record(cat, idx, label, "Table", [x, y, z], ori, self._physics(obj_type, meta, group))
 
-    def _place_on_support(self, group, cat, idx, label, meta, records):
+    def _place_on_support(self, group, cat, idx, label, meta, records, mirror=False):
         """把 ``label`` 放到某个已采样固定件的支撑面上,例如把面包放进 bread_shelf 的槽位。
 
         与场景加载器的做法一致:物体的 ``qpos`` 在支撑面坐标系中生效,``xlim`` / ``ylim``
-        (取第一个值)是该坐标系内的偏移,物体底面贴在支撑面上。
+        (取第一个值)是该坐标系内的偏移,物体底面贴在支撑面上。``mirror`` 为真时 y 偏移取反(``common.mirror``)。
         """
         common = group.get("common", {})
         parent_label, tag = str(common["relative_plane"]).split("/", 1)
@@ -249,7 +251,8 @@ class LayoutGenerator:
         scale = [float(v) for v in common.get("scale", [1.0, 1.0, 1.0])]
         verts = np.asarray(meta["geometry"]["aligned_bbox"]["vertices"], dtype=float) * scale
         rest = -float((verts @ t3d.quaternions.quat2mat(qpos).T)[:, 2].min())
-        offset = [float(np.ravel(common.get("xlim", [0.0]))[0]), float(np.ravel(common.get("ylim", [0.0]))[0]), rest]
+        y = float(np.ravel(common.get("ylim", [0.0]))[0])
+        offset = [float(np.ravel(common.get("xlim", [0.0]))[0]), -y if mirror else y, rest]
         R_parent = t3d.quaternions.quat2mat(parent_rec["default_ori"])
         local = center[:3] + t3d.quaternions.quat2mat(center[3:]) @ np.asarray(offset)
         pos = np.asarray(parent_rec["default_pos"]) + R_parent @ local
@@ -274,6 +277,7 @@ class LayoutGenerator:
         layout = deepcopy(self.base)
         placed = []  # 已放物体的 (x, y, 半径)
         records = {}  # label -> (对象类型, 记录)
+        mirrors = {}  # common.mirror 名字 -> 本布局是否左右对调
         for obj_type in (*self.SAMPLED_FIXTURES, "Rigid"):
             out = {}
             for group in self._groups(obj_type):
@@ -288,7 +292,10 @@ class LayoutGenerator:
                 for (cat, idx), label in self._pick_models(group, rng):
                     meta = self._metadata(cat, idx, obj_type)
                     if obj_type == "Rigid" and "/" in plane:
-                        rec = self._place_on_support(group, cat, idx, label, meta, records)
+                        name = group.get("common", {}).get("mirror")
+                        if name is not None and name not in mirrors:
+                            mirrors[name] = rng.random() < 0.5
+                        rec = self._place_on_support(group, cat, idx, label, meta, records, mirrors.get(name, False))
                     else:
                         rec = self._place_on_table(obj_type, group, cat, idx, label, meta, rng, placed, max_tries)
                     out.setdefault(cat, []).append(rec)
