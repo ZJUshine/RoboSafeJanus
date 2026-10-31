@@ -13,6 +13,10 @@
 ``modelscope login --token <token>`` 或设 ``MODELSCOPE_API_TOKEN``
 (token 在 https://www.modelscope.cn/my/myaccesstoken 生成)。
 
+默认强制走 IPv4(``--ipv6`` 关闭):文件 CDN ``cdn-lfs-cn-1.modelscope.cn`` 同时有 A/AAAA
+记录,解析时优先 IPv6,但本机到该 CDN 的 IPv6 路由丢包严重(实测 47%,吞吐
+0.1–0.2 MB/s),IPv4 0% 丢包、单流 8–10 MB/s。API 域名只有 IPv4,所以 ``--list`` 看起来正常。
+
 用法:
     python scripts/download_models_from_modelscope.py --list                       # 只列出远端有哪些 run
     python scripts/download_models_from_modelscope.py --policy Pi_05 --task heat_sandwich_microwave
@@ -46,9 +50,20 @@ parser.add_argument("--revision", type=str, default=None)
 parser.add_argument("--endpoint", type=str, default=None,
                     help="默认用 SDK 配置(MODELSCOPE_ENDPOINT,否则 https://www.modelscope.cn)")
 parser.add_argument("--num_workers", type=int, default=8, help="下载线程数")
+parser.add_argument("--ipv6", action="store_true",
+                    help="用系统默认地址族(通常优先 IPv6);默认强制 IPv4,见文件头说明")
 parser.add_argument("--no_link", action="store_true", help="不在 XPolicyLab/policy/<POLICY>/checkpoints/ 下建软链接")
 parser.add_argument("--list", action="store_true", help="只列出匹配的 run / step 和大小,不下载")
 args = parser.parse_args()
+
+if not args.ipv6:
+    # modelscope_hub 用 requests/urllib3,而 urllib3 默认按 getaddrinfo 顺序(IPv6 优先)建连;
+    # 这里限制成 AF_INET,避免走丢包严重的 IPv6 路由。
+    import socket
+
+    import urllib3.util.connection as urllib3_connection
+
+    urllib3_connection.allowed_gai_family = lambda: socket.AF_INET
 
 
 def matches(name, patterns):
