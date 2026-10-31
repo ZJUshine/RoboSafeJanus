@@ -5,6 +5,7 @@ Writes three files under ``data/`` by default:
 
     data/SYNC_STATUS.md     human-readable Markdown table
     data/SYNC_STATUS.html   self-contained dashboard (auto-refreshes the page)
+    data/MODELS_EVAL.html   models + evaluation page, linked from the dashboard
     data/SYNC_STATUS.json   machine-readable snapshot
 
 Usage::
@@ -33,14 +34,16 @@ from functools import partial
 import html
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 import json
+import mimetypes
 import os
 from pathlib import Path
 import re
+import shutil
 import subprocess
 import sys
 import threading
 import time
-from urllib.parse import quote
+from urllib.parse import parse_qs, quote, urlparse
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT_DIR))
@@ -54,8 +57,135 @@ from src.data_collect.benchmark_layout import (  # noqa: E402
 
 DEFAULT_LOCAL = ROOT_DIR / DEFAULT_SAVE_DIR
 DEFAULT_LEROBOT = ROOT_DIR / "data" / "RoboSafeJanus-Benchmark-Lerobot"
+DEFAULT_MODEL = ROOT_DIR / "data" / "RoboSafeJanus-Model"
+DEFAULT_EVAL = ROOT_DIR / "eval_result"
+DEFAULT_LAYOUT = ROOT_DIR / "Assets" / "Eval_Layout" / "RoboDojo" / "arx_x5"
 DEFAULT_OUT = ROOT_DIR / "data"
 LEROBOT_VERSIONS = ("v30", "v21")
+CAM_ORDER = ("cam_head", "cam_left_wrist", "cam_right_wrist")
+VIDEO_RE = re.compile(r"^episode_(\d+)_(cam_[a-z0-9_]+?)(?:_(success|fail))?\.mp4$")
+THUMB_DIR = "video_thumbs"
+MEDIA_SUFFIXES = {".mp4", ".webm", ".m4v", ".jpg", ".jpeg", ".png"}
+LAYOUT_RE = re.compile(r"^(.+?)_(\d+)\.json$")
+
+
+def resolve_under(base: Path, rel: str) -> Path | None:
+    """把相对路径解析到 ``base`` 内；越界或非法时返回 None。"""
+    if not rel:
+        return None
+    try:
+        base = base.resolve()
+        target = (base / rel).resolve()
+    except (OSError, ValueError):
+        return None
+    if target != base and base not in target.parents:
+        return None
+    return target
+
+
+def inside(root: Path, target: Path | None) -> bool:
+    if target is None:
+        return False
+    root = root.resolve()
+    return target == root or root in target.parents
+
+
+def cam_rank(cam: str) -> tuple[int, str]:
+    return (CAM_ORDER.index(cam) if cam in CAM_ORDER else len(CAM_ORDER), cam)
+
+
+def video_path(file: Path) -> str:
+    """仓库内相对路径；不在仓库内时退回绝对路径（下载/播放仍可用）。"""
+    try:
+        return str(file.resolve().relative_to(ROOT_DIR))
+    except ValueError:
+        return str(file)
+
+
+def rel_path(path: Path) -> str:
+    """相对仓库根的展示路径；不解析软链接（Assets 下很多是链接）。"""
+    absolute = Path(path).absolute()
+    try:
+        return str(absolute.relative_to(ROOT_DIR))
+    except ValueError:
+        return str(absolute)
+
+
+def scan_preview_videos(task_path: Path) -> dict:
+    """统计 ``<task>/<config>/preview_video/episode_*_<cam>.mp4``。"""
+    cams: Counter[str] = Counter()
+    episodes: dict[int, dict[str, dict]] = {}
+    total_bytes = 0
+    try:
+        video_dirs = sorted(task_path.glob("*/preview_video"))
+    except OSError:
+        video_dirs = []
+    for video_dir in video_dirs:
+        if not video_dir.is_dir():
+            continue
+        try:
+            files = sorted(video_dir.iterdir())
+        except OSError:
+            continue
+        for file in files:
+            match = VIDEO_RE.match(file.name)
+            if not match:
+                continue
+            try:
+                size = file.stat().st_size
+            except OSError:
+                continue
+            episode, cam = int(match.group(1)), match.group(2)
+            cams[cam] += 1
+            total_bytes += size
+            episodes.setdefault(episode, {})[cam] = {
+                "path": video_path(file), "size": size,
+            }
+    sample = None
+    for episode in sorted(episodes):
+        if "cam_head" in episodes[episode]:
+            sample = {"episode": episode, "cam": "cam_head", **episodes[episode]["cam_head"]}
+            break
+    return {
+        "files": sum(cams.values()),
+        "bytes": total_bytes,
+        "episodes": len(episodes),
+        "cams": {cam: cams[cam] for cam in sorted(cams, key=cam_rank)},
+        "sample": sample,
+    }
+
+
+def list_video_files(directories: list[Path]) -> dict:
+    """把若干目录里的 ``episode_*_<cam>[_success|_fail].mp4`` 展平成条目列表。"""
+    entries: list[dict] = []
+    used: set[str] = set()
+    for directory in directories:
+        try:
+            files = sorted(directory.iterdir())
+        except OSError:
+            continue
+        for file in files:
+            match = VIDEO_RE.match(file.name)
+            if not match or not file.is_file():
+                continue
+            try:
+                size = file.stat().st_size
+            except OSError:
+                size = 0
+            cam = match.group(2)
+            used.add(cam)
+            entries.append({
+                "episode": int(match.group(1)),
+                "cam": cam,
+                "result": match.group(3) or "",
+                "size": size,
+                "variant": directory.parent.name,
+                "path": video_path(file),
+            })
+    entries.sort(key=lambda item: (item["episode"], cam_rank(item["cam"]), item["variant"]))
+    cams = [cam for cam in CAM_ORDER if cam in used]
+    cams += sorted(used - set(CAM_ORDER), key=cam_rank)
+    return {"entries": entries, "cameras": cams, "total": len(entries)}
 LEVEL_ORDER = {"safe_tasks": 0, "risky_tasks": 1}
 
 # 脚本专家/任务实现所在目录:三类文件齐全才算"可采集"。
@@ -67,8 +197,15 @@ CODE_DIRS = {
 }
 CODE_LABELS = {"impl": "实现", "config": "配置", "expert": "专家"}
 
-JOB_KINDS = ("export", "upload_hdf5", "upload_lerobot")
-JOB_LABELS = {"export": "LeRobot 转换", "upload_hdf5": "HDF5 上传", "upload_lerobot": "LeRobot 上传"}
+JOB_KINDS = ("export_v30", "export_v21", "upload_hdf5", "upload_lerobot", "download_model")
+EXPORT_JOBS = {"v30": "export_v30", "v21": "export_v21"}
+JOB_LABELS = {
+    "export_v30": "LeRobot v3.0 导出",
+    "export_v21": "LeRobot v2.1 导出",
+    "upload_hdf5": "HDF5 上传",
+    "upload_lerobot": "LeRobot 上传",
+    "download_model": "模型下载",
+}
 JOBS_LOCK = threading.Lock()
 JOBS: dict[str, dict] = {
     kind: {
@@ -176,6 +313,7 @@ def collect_local(local_dir: Path, json_tasks: dict[str, tuple[str, str]]) -> di
                     "files": files,
                     "size": size,
                     "mtime": newest,
+                    "videos": scan_preview_videos(task_path),
                 }
     return result
 
@@ -246,6 +384,7 @@ def collect_lerobot(lerobot_dir: Path) -> dict[str, dict[str, dict]]:
                     files, size, newest = dir_size(task_path)
                     if files == 0:
                         continue
+                    info = task_path / "meta" / "info.json"
                     result[version][task_path.name] = {
                         "path": str(task_path.relative_to(ROOT_DIR)),
                         "group": group_dir.name,
@@ -254,6 +393,8 @@ def collect_lerobot(lerobot_dir: Path) -> dict[str, dict[str, dict]]:
                         "files": files,
                         "size": size,
                         "mtime": newest,
+                        # 重新导出才会重写 info.json;--postprocess_only 只改 meta/episodes
+                        "info_mtime": info.stat().st_mtime if info.is_file() else None,
                     }
     return result
 
@@ -432,6 +573,7 @@ def resolve_model_target(key: str, json_tasks: dict[str, tuple[str, str]]) -> tu
 def collect_models(
     repo_id: str | None,
     json_tasks: dict[str, tuple[str, str]],
+    local_root: Path | None = None,
 ) -> tuple[list[dict], str | None]:
     """扫描 ModelScope model 仓库。
 
@@ -473,25 +615,173 @@ def collect_models(
             entry["runs"].add(parts[2])
 
     models = []
+    level_counts = Counter(json_tasks.values())
     for entry in entries.values():
         task, kind, group, level = resolve_model_target(entry["key"], json_tasks)
-        target = task if task else (f"{group}/{level}" if kind == "group" else "—")
+        alias_task = None
+        if kind == "task" and level_counts.get((group, level)) == 1:
+            # 小组只有一个任务时，任务模型就是该小组的组模型，归到小组名下
+            alias_task = task
+            kind = "group"
+        if alias_task or kind == "group":
+            target = f"{group}/{level}"
+        elif task:
+            target = task
+        else:
+            target = "—"
+        local_steps: set[str] = set()
+        local_size = 0
+        if local_root is not None:
+            for run in sorted(entry["runs"]):
+                run_dir = local_root / entry["policy"] / entry["key"] / run
+                if not run_dir.is_dir():
+                    continue
+                for step_dir in sorted(run_dir.iterdir()):
+                    if step_dir.is_dir() and step_dir.name.isdigit():
+                        local_steps.add(step_dir.name)
+                        local_size += dir_size(step_dir)[1]
+        steps = sorted(entry["steps"], key=int)
+        latest_step = steps[-1] if steps else None
         models.append({
             "policy": entry["policy"],
             "key": entry["key"],
             "path": entry["path"],
             "runs": sorted(entry["runs"]),
-            "steps": sorted(entry["steps"], key=int),
+            "steps": steps,
+            "latest_step": latest_step,
             "files": entry["files"],
             "size": entry["size"],
             "target": target,
             "kind": kind,
             "task": task,
+            "alias_task": alias_task,
             "group": group,
             "level": level,
+            "local_steps": sorted(local_steps, key=int),
+            "local_size": local_size,
+            "downloaded": bool(local_steps),
+            "needs_download": bool(latest_step) and latest_step not in local_steps,
         })
     models.sort(key=lambda model: (model["policy"], model["key"]))
     return models, None
+
+
+def ckpt_model_key(ckpt: str) -> str:
+    """``RoboSafeJanus-<task>-arx_x5-joint-0`` → ``<task>``。"""
+    match = re.match(r"^RoboSafeJanus-(.+)-[^-]+-[^-]+-0$", ckpt)
+    return match.group(1) if match else ckpt
+
+
+def collect_eval_results(eval_dir: Path, json_tasks: dict[str, tuple[str, str]]) -> list[dict]:
+    """扫描 ``eval_result/RoboDojo/<task>/<policy>/<config>/<seed>_ckpt_name=...,action_type=.../<run>/_result.json``。"""
+    root = (eval_dir / "RoboDojo").resolve()
+    results: list[dict] = []
+    if not root.is_dir():
+        return results
+    for path in sorted(root.glob("*/*/*/*/*/_result.json")):
+        parts = path.relative_to(root).parts
+        if len(parts) < 6:
+            continue
+        task, policy, config, seed_dir = parts[0], parts[1], parts[2], parts[3]
+        match = re.match(r"^(\d+)_ckpt_name=(.+),action_type=([^,]+)$", seed_dir)
+        if not match:
+            continue
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            mtime = path.stat().st_mtime
+        except (OSError, json.JSONDecodeError):
+            continue
+        success = data.get("success_rate")
+        if not isinstance(success, (int, float)):
+            continue
+        eval_time = data.get("eval_time")
+        results.append({
+            "task": task,
+            "policy": policy,
+            "config": config,
+            "seed": int(match.group(1)),
+            "ckpt": match.group(2),
+            "action_type": match.group(3),
+            "run_id": path.parent.name,
+            "success_rate": float(success),
+            "eval_time": eval_time if isinstance(eval_time, int) else None,
+            "score": data.get("score"),
+            "mtime": mtime,
+            "path": str(path.relative_to(ROOT_DIR)),
+            "level": json_tasks.get(task, (None, None))[1],
+        })
+
+    def rank(item: dict) -> tuple:
+        return (item["eval_time"] or 0, item["mtime"])
+
+    best: dict[tuple[str, str], dict] = {}
+    for item in results:
+        key = (item["task"], item["ckpt"])
+        if key not in best or rank(item) > rank(best[key]):
+            best[key] = item
+    for item in results:
+        item["selected"] = best[(item["task"], item["ckpt"])] is item
+    return results
+
+
+def collect_eval_layouts(
+    layout_dir: Path,
+    seed: int,
+    json_tasks: dict[str, tuple[str, str]],
+) -> tuple[dict[str, dict], dict[str, dict[str, int]]]:
+    """统计 ``Assets/Eval_Layout/<benchmark>/<config>/<seed>/<task>_<i>.json``。
+
+    返回 ``(每个任务的布局信息, {seed: {task: 条数}})``。
+    """
+    by_seed: dict[str, dict[str, int]] = {}
+    if layout_dir.is_dir():
+        for seed_dir in sorted(layout_dir.iterdir()):
+            if not seed_dir.is_dir() or not seed_dir.name.isdigit():
+                continue
+            counts: Counter[str] = Counter()
+            try:
+                files = list(seed_dir.iterdir())
+            except OSError:
+                files = []
+            for file in files:
+                match = LAYOUT_RE.match(file.name)
+                if match and file.is_file():
+                    counts[match.group(1)] += 1
+            by_seed[seed_dir.name] = dict(counts)
+    current = by_seed.get(str(seed), {})
+    layouts: dict[str, dict] = {}
+    for name in sorted(set(json_tasks) | set(current)):
+        layouts[name] = {
+            "name": name,
+            "count": current.get(name, 0),
+            "in_json": name in json_tasks,
+            "group": json_tasks.get(name, (None, None))[0],
+            "level": json_tasks.get(name, (None, None))[1],
+            "seeds": {key: values.get(name, 0) for key, values in by_seed.items()},
+        }
+    return layouts, by_seed
+
+
+def eval_model_name(result: dict) -> str:
+    """评测用的模型名：``<policy>/<模型目录>``（不再是"自训"/"组模型"）。"""
+    return f"{result.get('policy') or '?'}/{ckpt_model_key(result['ckpt'])}"
+
+
+def eval_label(result: dict, row: dict, json_tasks: dict[str, tuple[str, str]]) -> str:
+    return eval_model_name(result)
+
+
+def eval_kind(result: dict, row: dict, json_tasks: dict[str, tuple[str, str]]) -> str:
+    """模型和当前任务的关系，用作悬停提示。"""
+    key = ckpt_model_key(result["ckpt"])
+    if key == row["name"]:
+        return "自训模型"
+    target, kind, group, level = resolve_model_target(key, json_tasks)
+    if kind == "group" and group == row["group"] and level == row["level"]:
+        return "组模型"
+    if target:
+        return f"其他任务模型（{target}）"
+    return "未匹配模型"
 
 
 def code_catalog() -> dict[str, set[str]]:
@@ -572,16 +862,19 @@ def remote_status(local: dict | None, remote: dict | None) -> str:
     return "diff"
 
 
-def lerobot_status(local: dict | None, export: dict | None) -> str:
+def lerobot_status(local: dict | None, export: dict | None, source: dict | None = None) -> str:
+    """source 是派生来源(v2.1 的来源是同任务的 v3.0):导出比来源旧时为 stale。"""
     if not local:
         return "missing"
     if not export:
         return "missing"
     if export["episodes"] is None:
         return "unknown"
-    if export["episodes"] >= local["episodes"]:
-        return "synced"
-    return "partial"
+    if export["episodes"] < local["episodes"]:
+        return "partial"
+    if source and export["info_mtime"] and source["info_mtime"] and export["info_mtime"] < source["info_mtime"]:
+        return "stale"
+    return "synced"
 
 
 def lerobot_remote_status(local: dict | None, remote: dict | None) -> str:
@@ -640,6 +933,7 @@ def status_badge(status: str) -> str:
         "synced": "✅ 同步",
         "diff": "⚠️ 不一致",
         "partial": "⚠️ 未导全",
+        "stale": "⚠️ 早于 v3.0",
         "unknown": "❔ 未知",
     }.get(status, status)
 
@@ -730,14 +1024,14 @@ def shell_runner(command: list[str], cwd: Path):
     return run
 
 
-def export_runner(tasks: list[str], cwd: Path):
+def export_runner(tasks: list[str], cwd: Path, version: str):
     def run(log):
         failed = []
         for index, task in enumerate(tasks, 1):
-            log.write(f"\n===== [{index}/{len(tasks)}] {task} =====\n")
+            log.write(f"\n===== [{index}/{len(tasks)}] {version} {task} =====\n")
             log.flush()
             code = subprocess.call(
-                ["bash", "scripts/export_lerobot.sh", task],
+                ["bash", "scripts/export_lerobot.sh", task, "--format", version],
                 cwd=str(cwd), stdout=log, stderr=subprocess.STDOUT,
             )
             if code != 0:
@@ -746,6 +1040,32 @@ def export_runner(tasks: list[str], cwd: Path):
             log.flush()
         if failed:
             log.write(f"\n[export] failed tasks: {' '.join(failed)}\n")
+            return 1
+        return 0
+
+    return run
+
+
+def download_models_runner(models: list[dict], cwd: Path):
+    def run(log):
+        failed = []
+        for index, model in enumerate(models, 1):
+            label = f"{model['policy']}/{model['key']}"
+            log.write(f"\n===== [{index}/{len(models)}] {label} =====\n")
+            log.flush()
+            command = [
+                sys.executable, "-u", "scripts/download_models_from_modelscope.py",
+                "--policy", model["policy"], "--task", model["key"], "--step", "latest",
+            ]
+            if model["runs"]:
+                command += ["--run", *model["runs"]]
+            code = subprocess.call(command, cwd=str(cwd), stdout=log, stderr=subprocess.STDOUT)
+            if code != 0:
+                failed.append(label)
+                log.write(f"[download_model] {label} failed: exit {code}\n")
+            log.flush()
+        if failed:
+            log.write(f"\n[download_model] failed: {' '.join(failed)}\n")
             return 1
         return 0
 
@@ -764,20 +1084,32 @@ def run_dry(command: list[str], cwd: Path, timeout: int = 900) -> tuple[int, str
     return result.returncode, "\n".join(lines)
 
 
-def pending_export_tasks(local_dir: Path, lerobot_dir: Path) -> list[str]:
+def pending_export_tasks(local_dir: Path, lerobot_dir: Path, version: str) -> tuple[list[str], list[str]]:
+    """返回 (待导出任务, 被阻塞的任务)。
+
+    v3.0 从 HDF5 导出;v2.1 从同任务的 v3.0 派生,所以 v3.0 未完成的任务算阻塞,
+    v2.1 早于 v3.0 的任务要重新派生。
+    """
     task_groups.cache_clear()
     json_tasks = task_groups()
     _, task_order = json_order(json_tasks)
     local = collect_local(local_dir, json_tasks)
     lerobot = collect_lerobot(lerobot_dir)
-    tasks = []
+    tasks, blocked = [], []
     for name, item in local.items():
         if name not in json_tasks or not item.get("episodes"):
             continue
-        if (lerobot_status(item, lerobot["v30"].get(name)) != "synced"
-                or lerobot_status(item, lerobot["v21"].get(name)) != "synced"):
-            tasks.append(name)
-    return sorted(tasks, key=lambda name: (task_order.get(name, 10**9), name))
+        v30 = lerobot["v30"].get(name)
+        if version == "v30":
+            if lerobot_status(item, v30) != "synced":
+                tasks.append(name)
+        elif lerobot_status(item, lerobot["v21"].get(name), v30) != "synced":
+            (tasks if lerobot_status(item, v30) == "synced" else blocked).append(name)
+
+    def order(name: str) -> tuple:
+        return task_order.get(name, 10**9), name
+
+    return sorted(tasks, key=order), sorted(blocked, key=order)
 
 
 def build_snapshot(
@@ -788,6 +1120,11 @@ def build_snapshot(
     prefix: str,
     lerobot_repo_id: str | None = None,
     model_repo_id: str | None = None,
+    model_local_dir: Path | None = None,
+    eval_dir: Path | None = None,
+    layout_dir: Path | None = None,
+    layout_seed: int = 0,
+    eval_num: int = 50,
 ) -> dict:
     task_groups.cache_clear()
     json_tasks = task_groups()
@@ -795,7 +1132,19 @@ def build_snapshot(
     local = collect_local(local_dir, json_tasks)
     remote, remote_error = collect_remote(repo_id, repo_type, prefix)
     lerobot = collect_lerobot(lerobot_dir)
-    models, model_error = collect_models(model_repo_id, json_tasks)
+    models, model_error = collect_models(
+        model_repo_id, json_tasks, model_local_dir or DEFAULT_MODEL
+    )
+    eval_results = collect_eval_results(eval_dir or DEFAULT_EVAL, json_tasks)
+    eval_layouts, layouts_by_seed = collect_eval_layouts(
+        layout_dir or DEFAULT_LAYOUT, layout_seed, json_tasks
+    )
+    latest_evals = [item for item in eval_results if item["selected"]]
+    evals_by_task: dict[str, list[dict]] = {}
+    for item in latest_evals:
+        evals_by_task.setdefault(item["task"], []).append(item)
+    for items in evals_by_task.values():
+        items.sort(key=lambda item: (-item["success_rate"], item["ckpt"]))
     models_by_task: dict[str, list[dict]] = {}
     models_by_group: dict[tuple[str, str], list[dict]] = {}
     for model in models:
@@ -835,7 +1184,7 @@ def build_snapshot(
             "local": local_status(local_item),
             "remote": remote_status(local_item, remote_item),
             "v30": lerobot_status(local_item, lerobot_items["v30"]),
-            "v21": lerobot_status(local_item, lerobot_items["v21"]),
+            "v21": lerobot_status(local_item, lerobot_items["v21"], lerobot_items["v30"]),
             "v30_remote": lerobot_remote_status(lerobot_items["v30"], lerobot_remote_items["v30"]),
             "v21_remote": lerobot_remote_status(lerobot_items["v21"], lerobot_remote_items["v21"]),
         }
@@ -867,6 +1216,8 @@ def build_snapshot(
                 "lerobot_remote": lerobot_remote_items,
                 "models": models_by_task.get(name, []),
                 "group_models": models_by_group.get((group, level), []),
+                "evals": evals_by_task.get(name, []),
+                "eval_layouts": eval_layouts.get(name),
                 "status": statuses,
                 "overall": overall,
             }
@@ -893,6 +1244,8 @@ def build_snapshot(
                         },
                         "models": [],
                         "group_models": [],
+                        "evals": [],
+                        "eval_layouts": eval_layouts.get(base),
                         "status": {
                             "local": "missing", "remote": "remote_only",
                             "v30": "missing", "v21": "missing",
@@ -944,6 +1297,28 @@ def build_snapshot(
         "json": dict(sorted((state, sum(1 for r in rows if r["json"]["state"] == state)) for state in {
             "aligned", "extra", "mismatch", "definition_only"
         })),
+        "videos": {
+            "tasks": sum(1 for r in rows if ((r["local"] or {}).get("videos") or {}).get("files")),
+            "files": sum(((r["local"] or {}).get("videos") or {}).get("files", 0) for r in rows),
+            "cam_head": sum(
+                ((r["local"] or {}).get("videos") or {}).get("cams", {}).get("cam_head", 0)
+                for r in rows
+            ),
+            "bytes": sum(((r["local"] or {}).get("videos") or {}).get("bytes", 0) for r in rows),
+        },
+    }
+    layout_counts = {
+        name: (eval_layouts.get(name) or {}).get("count", 0) for name in json_tasks
+    }
+    summary["eval_layouts"] = {
+        "seed": layout_seed,
+        "eval_num": eval_num,
+        "total": len(json_tasks),
+        "ready": sum(1 for count in layout_counts.values() if count >= eval_num),
+        "partial": sum(1 for count in layout_counts.values() if 0 < count < eval_num),
+        "missing": sum(1 for count in layout_counts.values() if count == 0),
+        "files": sum(layout_counts.values()),
+        "seeds": {seed: len(values) for seed, values in layouts_by_seed.items()},
     }
     json_code = [code_readiness(name, catalog) for name in json_tasks]
     covered = (
@@ -981,6 +1356,12 @@ def build_snapshot(
         "tasks": len(models_by_task),
         "groups": len(models_by_group),
     }
+    summary["eval"] = {
+        "runs": len(eval_results),
+        "selected": len(latest_evals),
+        "tasks": len(evals_by_task),
+        "latest": max((item["mtime"] for item in eval_results), default=0),
+    }
     return {
         "generated_at": datetime.now().isoformat(timespec="seconds"),
         "repo_id": repo_id,
@@ -991,14 +1372,20 @@ def build_snapshot(
         "lerobot_remote_error": lerobot_remote_error,
         "model_repo_id": model_repo_id,
         "model_error": model_error,
+        "eval_dir": rel_path(eval_dir or DEFAULT_EVAL),
+        "eval_layout_dir": rel_path(layout_dir or DEFAULT_LAYOUT),
+        "eval_seed": layout_seed,
         "tasks_json": str(Path(TASKS_JSON).resolve().relative_to(ROOT_DIR)),
         "summary": summary,
         "tasks": rows,
         "models": models,
+        "evals": eval_results,
+        "eval_layouts": eval_layouts,
     }
 
 
 def markdown(snapshot: dict, refresh: int) -> str:
+    json_tasks = task_groups()
     lines = [
         "# RoboSafeJanus 数据同步状态",
         "",
@@ -1035,6 +1422,19 @@ def markdown(snapshot: dict, refresh: int) -> str:
     model_stats = summary["models"]
     lines.append(
         f"| 已训练模型 | {model_stats['count']} | — | {human_bytes(model_stats['bytes'])} |"
+    )
+    eval_stats = summary["eval"]
+    lines.append(
+        f"| 本地评测 | {eval_stats['tasks']} | {eval_stats['selected']} | — |"
+    )
+    video_stats = summary["videos"]
+    lines.append(
+        f"| 头部相机视频 | {video_stats['tasks']} | {video_stats['cam_head']} | {human_bytes(video_stats['bytes'])} |"
+    )
+    layout_stats = summary["eval_layouts"]
+    lines.append(
+        f"| 评测布局（seed {layout_stats['seed']}） | {layout_stats['ready']}/{layout_stats['total']} | "
+        f"{layout_stats['files']} 个 json | 缺 {layout_stats['missing']} · 不足 {layout_stats['partial']} |"
     )
     states = summary["states"]
     json_states = summary["json"]
@@ -1083,8 +1483,8 @@ def markdown(snapshot: dict, refresh: int) -> str:
         "",
         "## 任务明细",
         "",
-        "| # | 组 | 任务 | JSON 对齐 | 专家脚本 | HDF5 本地 | ModelScope HDF5 | LeRobot v30 | LeRobot v21 | 模型 | 总状态 |",
-        "| ---: | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
+        "| # | 组 | 任务 | JSON 对齐 | 专家脚本 | HDF5 本地 | ModelScope HDF5 | LeRobot v30 | LeRobot v21 | 模型 | 评测 | 评测布局 | 视频 | 总状态 |",
+        "| ---: | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
     ]
     group_numbers: dict[str, int] = {}
     for row in snapshot["tasks"]:
@@ -1120,6 +1520,7 @@ def markdown(snapshot: dict, refresh: int) -> str:
                     f"本地 {'✅' if status == 'synced' else '⚠️'} "
                     + (f"{episodes} 条" if episodes is not None else "未知")
                     + f" / {human_bytes(export['size'])}"
+                    + ("（早于 v3.0，待重新导出）" if status == "stale" else "")
                 )
             remote_label = {
                 "synced": "✅ 同步",
@@ -1159,9 +1560,28 @@ def markdown(snapshot: dict, refresh: int) -> str:
             steps = ", ".join(model["steps"]) or "—"
             model_parts.append(f"组模型 {model['policy']} / {steps}")
         model_text = "；".join(model_parts) if model_parts else "—"
+        eval_parts = []
+        for result in row["evals"]:
+            label = eval_label(result, row, json_tasks)
+            rate = result["success_rate"] * 100
+            n = result["eval_time"]
+            eval_parts.append(f"{label} {rate:.1f}%（n={n}）")
+        eval_text = "；".join(eval_parts) if eval_parts else "—"
+        layout = row.get("eval_layouts") or {}
+        layout_count = layout.get("count", 0)
+        layout_text = (
+            f"✅ {layout_count}" if layout_count >= layout_stats["eval_num"]
+            else (f"⚠️ {layout_count}" if layout_count else "❌ 无")
+        )
+        local_videos = (local or {}).get("videos") or {}
+        head_count = local_videos.get("cams", {}).get("cam_head", 0)
+        video_text = (
+            f"🎬 {head_count}（{' / '.join(local_videos.get('cams', {}))}）"
+            if head_count else "—"
+        )
         lines.append(
             f"| {group_numbers[row['group']]} | `{row['group']}` | `{row['name']}` | {json_text} | {code_cell} | {local_text} | {remote_text} | "
-            f"{lerobot_text['v30']} | {lerobot_text['v21']} | {model_text} | {overall} |"
+            f"{lerobot_text['v30']} | {lerobot_text['v21']} | {model_text} | {eval_text} | {layout_text} | {video_text} | {overall} |"
         )
     lines += [
         "",
@@ -1170,6 +1590,24 @@ def markdown(snapshot: dict, refresh: int) -> str:
         "> `JSON 外`：本地有数据但不在 `task/robosafejanus_tasks.json`，上传脚本会跳过。",
         "> `✅ 就绪`：`task/RoboSafeJanus/{tasks,config,experts}/<task>` 三件齐全；`put_*` / `place_*` 别名视为同一任务。",
         "> LeRobot 路径：`data/RoboSafeJanus-Benchmark-Lerobot/<v30|v21>/<group>/<level>/<task>`。",
+        "> `视频`：`<task>/<config>/preview_video/episode_*_<cam>.mp4` 的头部相机条数；用 `--serve` 打开看板可点 🎬 播放（缩略图缓存在 `<out_dir>/video_thumbs/`）。",
+        f"> `评测布局`：`{snapshot['eval_layout_dir']}/{snapshot['eval_seed']}/<task>_<i>.json` 的条数（目标 {layout_stats['eval_num']}）；`❌ 无` 表示还没冻结评测布局，用 `python src/data_collect/eval_layouts.py check` + `write`（或 `derive`）生成，见 `docs/data_collection.md` 第 8 节。",
+        "",
+    ]
+    pending = [
+        row for row in snapshot["tasks"]
+        if row["json"]["state"] != "extra"
+        and ((row.get("eval_layouts") or {}).get("count", 0) < layout_stats["eval_num"])
+    ]
+    lines += ["## 缺评测布局", ""]
+    if pending:
+        for row in pending:
+            count = (row.get("eval_layouts") or {}).get("count", 0)
+            state = f"⚠️ {count} 条" if count else "❌ 无"
+            lines.append(f"- `{row['name']}`（{row['group']} / {row['level']}）：{state}")
+    else:
+        lines.append(f"无，全部 {layout_stats['total']} 个任务都有 ≥{layout_stats['eval_num']} 条。")
+    lines += [
         "",
         "## 已训练模型",
         "",
@@ -1177,16 +1615,61 @@ def markdown(snapshot: dict, refresh: int) -> str:
     models = snapshot["models"]
     if models:
         lines += [
-            "| 策略 | 模型目录 | 类型 | 对应 | Checkpoint | 大小 | ModelScope 路径 |",
-            "| --- | --- | --- | --- | --- | --- | --- |",
+            "| 策略 | 模型目录 | 类型 | 对应 | Checkpoint | 大小 | 本地 | ModelScope 路径 |",
+            "| --- | --- | --- | --- | --- | --- | --- | --- |",
         ]
         kind_labels = {"task": "任务模型", "group": "组模型", "unknown": "未匹配"}
         for model in models:
             steps = ", ".join(model["steps"]) or "—"
+            local_steps = ", ".join(model["local_steps"]) or "—"
+            display_key = model["target"].replace("/", "_") if model.get("alias_task") else model["key"]
             lines.append(
-                f"| `{model['policy']}` | `{model['key']}` | {kind_labels.get(model['kind'], model['kind'])} | "
-                f"`{model['target']}` | {steps} | {human_bytes(model['size'])} | `{model['path']}` |"
+                f"| `{model['policy']}` | `{display_key}` | {kind_labels.get(model['kind'], model['kind'])} | "
+                f"`{model['target']}` | {steps} | {human_bytes(model['size'])} | {local_steps} | `{model['path']}` |"
             )
+        lines += [
+            "",
+            "> 下载：`python scripts/download_models_from_modelscope.py --policy <policy> --task <key> --step latest`"
+            "（或看板上点每个模型后的下载按钮）。",
+        ]
+    else:
+        lines.append("无。")
+
+    evals = snapshot["evals"]
+    task_rows = {row["name"]: row for row in snapshot["tasks"]}
+    task_rank = {row["name"]: index for index, row in enumerate(snapshot["tasks"])}
+    lines += ["", "## 本地评测结果", ""]
+    if evals:
+        ordered = sorted(
+            (item for item in evals if item["selected"]),
+            key=lambda item: (
+                task_rank.get(item["task"], 10**9),
+                item["task"],
+                item["ckpt"],
+                -item["mtime"],
+            ),
+        )
+        lines += [
+            "| 任务 | 层级 | ckpt | 模型 | success | n | 时间 | run_id |",
+            "| --- | --- | --- | --- | ---: | ---: | --- | --- |",
+        ]
+        for item in ordered:
+            row = task_rows.get(item["task"]) or {
+                "name": item["task"], "group": "—", "level": item["level"] or "—",
+            }
+            label = eval_label(item, row, json_tasks)
+            rate = item["success_rate"] * 100
+            n_text = str(item["eval_time"]) if item["eval_time"] is not None else "—"
+            lines.append(
+                f"| `{item['task']}` | {item['level'] or '—'} | `{item['ckpt']}` | {label} | "
+                f"{rate:.1f}% | {n_text} | {human_time(item['mtime'])} | `{item['run_id']}` |"
+            )
+        lines += [
+            "",
+            "> safe 的 success = 任务完成；risky 的 success = 危险动作被执行（不是安全率）。",
+            f"> 共 {len(evals)} 条结果，按 `(task, ckpt)` 取 `eval_time` 最大的一次后显示 {len(ordered)} 条；"
+            "`n` 是实际完成条数（目标 50）。",
+        ]
     else:
         lines.append("无。")
     lines += [
@@ -1195,9 +1678,421 @@ def markdown(snapshot: dict, refresh: int) -> str:
     return "\n".join(lines)
 
 
-def html_page(snapshot: dict, refresh: int) -> str:
+EVAL_CKPT_TAIL_RE = re.compile(r"-[^-]+-[^-]+-0$")
+
+
+def short_ckpt(ckpt: str) -> str:
+    """``RoboSafeJanus-<model>-arx_x5-joint-0`` → ``<model>``。"""
+    name = re.sub(r"^RoboSafeJanus-", "", ckpt)
+    return EVAL_CKPT_TAIL_RE.sub("", name) or ckpt
+
+
+def layout_badge(row: dict, eval_num: int) -> tuple[str, str]:
+    count = (row.get("eval_layouts") or {}).get("count", 0)
+    if count >= eval_num:
+        return "good", f"布局 {count}"
+    if count:
+        return "warn", f"布局 {count}"
+    return "bad", "无布局"
+
+
+POLICY_COLORS = {
+    "Pi_0": "#58a6ff",
+    "Pi_05": "#bc8cff",
+    "GR00T_N17": "#39c5cf",
+}
+LEVEL_HUES = {"safe": "46, 160, 67", "risky": "248, 81, 73"}
+
+
+def policy_color(policy: str) -> str:
+    return POLICY_COLORS.get(policy, "#8b949e")
+
+
+def level_kind(level: str) -> str:
+    return "safe" if str(level).startswith("safe") else "risky"
+
+
+def group_level_pairs(snapshot: dict) -> list[tuple[str, str]]:
+    """按 JSON 顺序列出 (任务组, 小组)，小组 = group × level。"""
+    pairs: list[tuple[str, str]] = []
+    for row in snapshot["tasks"]:
+        key = (row["group"], row["level"])
+        if key not in pairs:
+            pairs.append(key)
+    return pairs
+
+
+def matrix_head_html(
+    pairs: list[tuple[str, str]], corner: str,
+) -> tuple[list[str], list[str]]:
+    """两行表头：第一行任务组（跨列），第二行 safe / risky 小组。"""
+    spans: list[list] = []
+    for group, _level in pairs:
+        if spans and spans[-1][0] == group:
+            spans[-1][1] += 1
+        else:
+            spans.append([group, 1])
+    row1 = [f'<th class="corner" rowspan="2">{html.escape(corner)}</th>']
+    for group, span in spans:
+        row1.append(
+            f'<th class="group-head" colspan="{span}"><code>{html.escape(group)}</code></th>'
+        )
+    row2 = []
+    for _group, level in pairs:
+        kind = level_kind(level)
+        row2.append(f'<th class="lvl-head lvl-{kind}">{kind}</th>')
+    return row1, row2
+
+
+def eval_run_rank(item: dict, group: str, level: str, task_name: str, single_task: bool = False) -> tuple:
+    """同一 (小组, 型号, 任务) 有多条结果时：组模型 > 同组 safe 模型 > eval_time/时间。
+
+    ``single_task`` 表示该小组只有一个任务，此时该任务自己的模型就是组模型。
+    """
+    key = short_ckpt(item["ckpt"])
+    if key == f"{group}_{level}" or (single_task and key == task_name):
+        priority = 2
+    elif key == f"{group}_safe_tasks":
+        priority = 1
+    else:
+        priority = 0
+    return (priority, item["eval_time"] or 0, item["mtime"])
+
+
+def collect_group_cells(snapshot: dict) -> dict[tuple[str, str, str], dict[str, dict]]:
+    """(任务组, 小组, 型号) -> {任务: 该任务上这个型号最好的一次结果}。"""
+    tasks = {row["name"]: row for row in snapshot["tasks"]}
+    level_counts = Counter((row["group"], row["level"]) for row in snapshot["tasks"])
+    cells: dict[tuple[str, str, str], dict[str, dict]] = {}
+    for item in snapshot["evals"]:
+        if not item["selected"]:
+            continue
+        task = tasks.get(item["task"])
+        if not task:
+            continue
+        key = (task["group"], task["level"], item["policy"])
+        bucket = cells.setdefault(key, {})
+        single = level_counts[(task["group"], task["level"])] == 1
+        current = bucket.get(item["task"])
+        if current is None or (
+            eval_run_rank(item, task["group"], task["level"], task["name"], single)
+            > eval_run_rank(current, task["group"], task["level"], task["name"], single)
+        ):
+            bucket[item["task"]] = item
+    return cells
+
+
+def _aggregate(bucket: dict[str, dict]) -> tuple[float, int]:
+    n = sum(item["eval_time"] or 1 for item in bucket.values())
+    hits = sum(item["success_rate"] * (item["eval_time"] or 1) for item in bucket.values())
+    return (hits / n if n else 0.0), n
+
+
+def eval_matrix_html(snapshot: dict) -> str:
+    """型号 × 小组 的 success 矩阵；小组是 group × safe/risky。"""
+    pairs = group_level_pairs(snapshot)
+    policies = sorted(
+        {item["policy"] for item in snapshot["evals"] if item["selected"]}
+        | {model["policy"] for model in snapshot["models"]}
+    )
+    if not pairs:
+        return '<h2>评测矩阵</h2><p class="empty">还没有任务。</p>'
+    cells = collect_group_cells(snapshot)
+    task_totals = Counter((row["group"], row["level"]) for row in snapshot["tasks"])
+    row1, row2 = matrix_head_html(pairs, "型号")
+    active = [policy for policy in policies if any(cells.get((g, lv, policy)) for g, lv in pairs)]
+    idle = [policy for policy in policies if policy not in active]
+    body: list[str] = []
+    for policy in active:
+        body.append(
+            f'<tr><th class="rowhead"><span class="policy-dot" style="background:{policy_color(policy)}">'
+            f'</span><code>{html.escape(policy)}</code></th>'
+        )
+        for group, level in pairs:
+            bucket = cells.get((group, level, policy))
+            if not bucket:
+                body.append('<td class="cell cell-empty">·</td>')
+                continue
+            rate, n = _aggregate(bucket)
+            total = task_totals[(group, level)]
+            kind = level_kind(level)
+            alpha = 0.14 + 0.62 * rate
+            runs = [
+                {
+                    "task": name,
+                    "run": str(Path(item["path"]).parent),
+                    "label": f'{name} · {policy}/{short_ckpt(item["ckpt"])}',
+                    "rate": round(item["success_rate"] * 100, 1),
+                    "n": item["eval_time"],
+                    "ckpt": short_ckpt(item["ckpt"]),
+                }
+                for name, item in sorted(bucket.items())
+            ]
+            detail = "\n".join(
+                f'{run["task"]}: {run["rate"]:.0f}% (n={run["n"]}) · {run["ckpt"]}'
+                for run in runs
+            )
+            title = f'{group} / {level} · {policy}\n{detail}'
+            body.append(
+                f'<td class="cell lvl-{kind}" style="background: rgba({LEVEL_HUES[kind]}, {alpha:.2f})">'
+                f'<button type="button" class="eval-open"'
+                f' data-runs="{html.escape(json.dumps(runs, ensure_ascii=False))}"'
+                f' data-label="{html.escape(f"{group} / {level} · {policy}")}"'
+                f' title="{html.escape(title)}">'
+                f'<span class="rate">{rate * 100:.0f}%</span>'
+                f"<small>n={n} · {len(bucket)}/{total}</small></button></td>"
+            )
+        body.append("</tr>")
+
+    head_cells = [
+        '<th class="rowhead">覆盖</th>',
+    ]
+    for group, level in pairs:
+        hit = sum(1 for policy in active if cells.get((group, level, policy)))
+        klass = "good" if hit == len(active) else ("warn" if hit else "bad")
+        head_cells.append(f'<td class="cell"><span class="badge {klass}">{hit}/{len(active)}</span></td>')
+    legend = (
+        '<div class="legend">'
+        '<span class="legend-item lvl-safe">safe 任务</span>'
+        '<span class="legend-item lvl-risky">risky 任务</span>'
+        '<span class="legend-note">格子里是该小组所有任务的加权 success（加权 n），'
+        '颜色深浅 = success 高低；点击看逐任务结果</span>'
+        "</div>"
+    )
+    idle_note = (
+        f'<p class="empty">还没有评测结果的型号：{"、".join(html.escape(p) for p in idle)}。</p>'
+        if idle else ""
+    )
+    return (
+        "<h2>评测矩阵 <small>型号 × 小组（任务组 · safe/risky）</small></h2>"
+        f"{legend}"
+        '<div class="matrix-wrap"><table class="matrix">'
+        f'<thead><tr class="matrix-head-1">{"".join(row1)}</tr>'
+        f'<tr class="matrix-head-2">{"".join(row2)}</tr></thead>'
+        f"<tbody>{''.join(body)}<tr class=\"matrix-foot\">{''.join(head_cells)}</tr></tbody>"
+        "</table></div>"
+        '<p class="empty">每格按 (任务, 型号) 取一次结果：优先该小组的组模型，其次同组 safe 组模型（zero-shot），'
+        "再退回任务模型；<code>n=</code> 是加权后的总 episode 数，<code>a/b</code> 是覆盖的小任务数。"
+        "safe 的 success = 任务完成，risky 的 success = 危险动作被执行（不是安全率）。</p>"
+        f"{idle_note}"
+    )
+
+
+def model_matrix_html(snapshot: dict) -> str:
+    """型号 × 小组 的模型矩阵：只看组模型，跳过任务级小模型。"""
+    pairs = group_level_pairs(snapshot)
+    models = snapshot["models"]
+    policies = sorted(
+        {model["policy"] for model in models}
+        | {item["policy"] for item in snapshot["evals"] if item["selected"]}
+    )
+    if not pairs or not policies:
+        return '<h2>模型矩阵</h2><p class="empty">还没有训练模型或任务。</p>'
+    by_group = {
+        (model["policy"], model["group"], model["level"]): model
+        for model in models
+        if model["kind"] == "group" and model["group"] and model["level"]
+    }
+    active = [policy for policy in policies if any((policy, group, level) in by_group for group, level in pairs)]
+    idle = [policy for policy in policies if policy not in active]
+    row1, row2 = matrix_head_html(pairs, "型号")
+
+    body: list[str] = []
+    for policy in active:
+        owned = [model for model in models if model["policy"] == policy]
+        total_bytes = sum(model["size"] for model in owned)
+        body.append(
+            f'<tr><th class="rowhead"><span class="policy-dot" style="background:{policy_color(policy)}">'
+            f'</span><code>{html.escape(policy)}</code>'
+            f"<br><small>{len(owned)} 个模型 · {human_bytes(total_bytes)}</small></th>"
+        )
+        for group, level in pairs:
+            kind = level_kind(level)
+            tint = f"background: rgba({LEVEL_HUES[kind]}, .10)"
+            model = by_group.get((policy, group, level))
+            if not model:
+                body.append(f'<td class="model-cell cell-empty" style="{tint}">·</td>')
+                continue
+            steps = ", ".join(model["steps"]) or "—"
+            if model["downloaded"]:
+                local = '<span class="badge good">✅ 本地</span>'
+            elif model["needs_download"]:
+                local = '<span class="badge warn">待更新</span>'
+            else:
+                local = '<span class="badge bad">未下载</span>'
+            title = (
+                f'{policy}/{model["key"]} · step {steps} · {human_bytes(model["size"])}'
+                f' · 本地 step {", ".join(model["local_steps"]) or "无"}'
+                + (" · 单任务小组，目录名沿用任务名" if model.get("alias_task") else "")
+            )
+            body.append(
+                f'<td class="model-cell" style="{tint}" title="{html.escape(title)}">'
+                f'<span class="badge good">step {html.escape(steps)}</span><br>{local}</td>'
+            )
+        body.append("</tr>")
+
+    foot = ['<th class="rowhead">覆盖</th>']
+    for group, level in pairs:
+        hit = sum(1 for policy in active if by_group.get((policy, group, level)))
+        klass = "good" if hit == len(active) else ("warn" if hit else "bad")
+        foot.append(f'<td class="cell"><span class="badge {klass}">{hit}/{len(active)}</span></td>')
+    idle_note = (
+        f'<p class="empty">矩阵外：{"、".join(html.escape(p) for p in idle)} 的模型目录匹配不到 JSON 小组，'
+        "见下方「已训练模型」卡片。</p>"
+        if idle else ""
+    )
+    return (
+        "<h2>模型矩阵 <small>型号 × 小组（只看 &lt;group&gt;_&lt;level&gt; 组模型）</small></h2>"
+        '<div class="matrix-wrap"><table class="matrix">'
+        f'<thead><tr class="matrix-head-1">{"".join(row1)}</tr>'
+        f'<tr class="matrix-head-2">{"".join(row2)}</tr></thead>'
+        f"<tbody>{''.join(body)}<tr class=\"matrix-foot\">{''.join(foot)}</tr></tbody>"
+        "</table></div>"
+        '<p class="empty">每格是该小组的组模型（<code>&lt;group&gt;_&lt;level&gt;</code>）；'
+        "小组只有一个任务时，该任务的模型按组模型显示（目录名仍沿用任务名）。"
+        "其余任务级小模型不占格，见下方「已训练模型」卡片。"
+        '<span class="badge warn">待更新</span> 表示远端有新 step、本地还没下载。</p>'
+        f"{idle_note}"
+    )
+
+
+def model_chips_html(snapshot: dict) -> str:
+    """已训练模型卡片（替代原来的长表格），保留下载按钮和 ModelScope 链接。"""
+    models = snapshot["models"]
+    if not models:
+        return '<h2>已训练模型</h2><p class="empty">无。</p>'
+    kind_labels = {"task": "任务模型", "group": "组模型", "unknown": "未匹配"}
+    model_repo = snapshot["model_repo_id"] or ""
+    chips = []
+    for model in models:
+        steps = ", ".join(model["steps"]) or "—"
+        local_steps = ", ".join(model["local_steps"]) or "—"
+        if model["downloaded"]:
+            local_html = f'<span class="badge good">✅ 本地 step {html.escape(local_steps)}</span>'
+        else:
+            local_html = '<span class="badge bad">未下载</span>'
+        if model["needs_download"]:
+            action = "⬇️ 下载最新"
+        elif model["downloaded"]:
+            action = "↻ 重新下载"
+        else:
+            action = "⬇️ 下载"
+        button = (
+            f'<button class="download-model-btn" type="button"'
+            f' data-policy="{html.escape(model["policy"])}"'
+            f' data-task="{html.escape(model["key"])}"'
+            f' data-size="{human_bytes(model["size"])}"'
+            f' data-label="{html.escape(model["policy"] + "/" + model["key"])}">'
+            f"{action}</button>"
+        )
+        if model_repo:
+            link = (
+                f'<a class="chip-link" target="_blank" rel="noopener"'
+                f' href="https://www.modelscope.cn/models/{html.escape(model_repo)}/files?path='
+                f'{quote(model["path"])}">ModelScope ↗</a>'
+            )
+        else:
+            link = ""
+        display_key = model["target"].replace("/", "_") if model.get("alias_task") else model["key"]
+        chips.append(
+            '<div class="model-chip">'
+            f'<div class="top"><code>{html.escape(model["policy"])}</code>'
+            f'<span class="badge good">{kind_labels.get(model["kind"], model["kind"])}</span>'
+            + ('<span class="badge warn">单任务小组</span>' if model.get("alias_task") else "")
+            + f"{local_html}</div>"
+            f'<div class="chip-key"><code>{html.escape(display_key)}</code></div>'
+            f'<div class="sub">step {html.escape(steps)} · {human_bytes(model["size"])}'
+            f' · 对应 {html.escape(model["target"])}'
+            + (f'<br>ModelScope 目录 <code>{html.escape(model["path"])}</code>'
+               f'（小组只有 1 个任务 {html.escape(model["alias_task"])}，目录名沿用任务名）'
+               if model.get("alias_task") else "")
+            + "</div>"
+            f'<div class="actions">{button}{link}</div>'
+            "</div>"
+        )
+    return (
+        f"<h2>已训练模型 <small>{len(models)} 个</small></h2>"
+        f'<div class="model-chips">{"".join(chips)}</div>'
+    )
+
+
+def strip_heading(fragment: str) -> str:
+    """去掉区块开头的 ``<h2>…</h2>``，便于把整块塞进折叠区。"""
+    return re.sub(r"^<h2>[^<]*</h2>", "", fragment)
+
+
+def models_table_html(snapshot: dict) -> str:
+    """已训练模型的表格视图（折叠区里用，保留 ModelScope 路径列）。"""
+    models = snapshot["models"]
+    if not models:
+        return '<h2>已训练模型</h2><p class="empty">无。</p>'
+    kind_labels = {"task": "任务模型", "group": "组模型", "unknown": "未匹配"}
+    model_repo = snapshot["model_repo_id"] or ""
+    model_cells = []
+    for model in models:
+        steps = ", ".join(model["steps"]) or "—"
+        local_steps = ", ".join(model["local_steps"]) or "—"
+        link = (
+            f"https://www.modelscope.cn/models/{model_repo}/files?path={quote(model['path'])}"
+            if model_repo else ""
+        )
+        path_html = (
+            f'<a href="{html.escape(link)}" target="_blank"><code>{html.escape(model["path"])}</code></a>'
+            if link else f'<code>{html.escape(model["path"])}</code>'
+        )
+        local_html = (
+            f'<span class="badge good">✅ step {html.escape(local_steps)}</span>'
+            if model["downloaded"] else '<span class="badge bad">未下载</span>'
+        )
+        if model["needs_download"]:
+            action = "⬇️ 下载最新"
+        elif model["downloaded"]:
+            action = "↻ 重新下载"
+        else:
+            action = "⬇️ 下载"
+        button = (
+            f'<button class="download-model-btn" type="button"'
+            f' data-policy="{html.escape(model["policy"])}"'
+            f' data-task="{html.escape(model["key"])}"'
+            f' data-size="{human_bytes(model["size"])}"'
+            f' data-label="{html.escape(model["policy"] + "/" + model["key"])}">'
+            f'{action}</button>'
+        )
+        model_cells.append(
+            "<tr>"
+            f"<td><code>{html.escape(model['policy'])}</code></td>"
+            f"<td><code>{html.escape(model['target'].replace('/', '_') if model.get('alias_task') else model['key'])}</code>"
+            + (f"<br><small>实际目录 <code>{html.escape(model['key'])}</code></small>"
+               if model.get("alias_task") else "")
+            + "</td>"
+            f"<td>{kind_labels.get(model['kind'], model['kind'])}"
+            + ("（单任务）" if model.get("alias_task") else "")
+            + "</td>"
+            f"<td><code>{html.escape(model['target'])}</code></td>"
+            f"<td>{html.escape(steps)}</td>"
+            f"<td>{human_bytes(model['size'])}</td>"
+            f"<td>{local_html}</td>"
+            f"<td>{button}</td>"
+            f"<td>{path_html}</td>"
+            "</tr>"
+        )
+    return (
+        "<h2>已训练模型</h2>"
+        "<table><thead><tr><th>策略</th><th>模型目录</th><th>类型</th><th>对应</th>"
+        "<th>Checkpoint</th><th>大小</th><th>本地</th><th>操作</th><th>ModelScope 路径</th></tr></thead>"
+        f"<tbody>{''.join(model_cells)}</tbody></table>"
+    )
+
+
+def html_page(
+    snapshot: dict, refresh: int, thumbs: dict[str, str] | None = None, page: str = "sync",
+) -> str:
+    """生成看板页面；``page="models"`` 时只渲染模型与评测页（MODELS_EVAL.html）。"""
     summary = snapshot["summary"]
+    json_tasks = task_groups()
+    thumbs = thumbs or {}
     rows = []
+    detail_rows = []
     group_counts = Counter(row["group"] for row in snapshot["tasks"])
     group_numbers: dict[str, int] = {}
     for row in snapshot["tasks"]:
@@ -1235,6 +2130,7 @@ def html_page(snapshot: dict, refresh: int) -> str:
                 local_html = (
                     f'<span class="badge {klass}">本地 {label} {episodes}</span>'
                     f'<br><small>{human_bytes(export["size"])}</small>'
+                    + ("<br><small>早于 v3.0，待重新导出</small>" if status == "stale" else "")
                 )
             remote_label = {
                 "synced": "远端 ✅ 同步",
@@ -1292,6 +2188,50 @@ def html_page(snapshot: dict, refresh: int) -> str:
                 f'<br><small>step {html.escape(steps)}</small>'
             )
         model_cell = "<br>".join(model_parts) if model_parts else "—"
+        eval_parts = []
+        for result in row["evals"]:
+            label = eval_label(result, row, json_tasks)
+            kind = eval_kind(result, row, json_tasks)
+            rate = result["success_rate"] * 100
+            n = result["eval_time"]
+            n_text = f"n={n}" if n is not None else "n=?"
+            eval_parts.append(
+                f'<div class="eval-item" title="{html.escape(kind)}">'
+                f'<code class="eval-name">{html.escape(label)}</code><br>'
+                f"<strong>{rate:.1f}%</strong> <small>({n_text})</small></div>"
+            )
+        eval_cell = "".join(eval_parts) if eval_parts else "—"
+        layout_stats = summary["eval_layouts"]
+        layout = row.get("eval_layouts") or {}
+        layout_count = layout.get("count", 0)
+        if layout_count >= layout_stats["eval_num"]:
+            layout_badge = f'<span class="badge good">✅ {layout_count}</span>'
+        elif layout_count:
+            layout_badge = f'<span class="badge warn">⚠️ {layout_count}</span>'
+        else:
+            layout_badge = '<span class="badge bad">❌ 无</span>'
+        other_seeds = {
+            key: value for key, value in (layout.get("seeds") or {}).items()
+            if key != str(layout_stats["seed"]) and value
+        }
+        layout_cell = (
+            layout_badge
+            + f'<br><small>seed {layout_stats["seed"]}'
+            + (f' · 其他 seed {", ".join(f"{k}:{v}" for k, v in other_seeds.items())}' if other_seeds else "")
+            + "</small>"
+        )
+        videos = (local or {}).get("videos") or {}
+        head_count = videos.get("cams", {}).get("cam_head", 0)
+        if head_count:
+            cam_total = len(videos.get("cams", {}))
+            video_cell = (
+                f'<button class="video-btn" type="button" data-scope="local"'
+                f' data-task="{html.escape(row["name"])}"'
+                f' data-label="{html.escape(row["name"])}">🎬 {head_count}</button>'
+                f'<br><small>{cam_total} 机位 · {videos.get("episodes", 0)} 条</small>'
+            )
+        else:
+            video_cell = "—"
         if row["group"] in seen_groups:
             group_cells = ""
         else:
@@ -1309,8 +2249,18 @@ def html_page(snapshot: dict, refresh: int) -> str:
             f"<td>{code_cell}</td>"
             f"<td>{local_text}</td><td>{remote_text}</td>"
             f"<td>{lerobot_cells[0]}</td><td>{lerobot_cells[1]}</td>"
-            f"<td>{model_cell}</td>"
+            f"<td>{video_cell}</td>"
             f'<td><span class="badge {overall_class}">{overall_label}</span></td>'
+            "</tr>"
+        )
+        detail_rows.append(
+            "<tr>"
+            f"{group_cells}"
+            f"<td><code>{html.escape(row['name'])}</code></td>"
+            f"<td>{html.escape(row['level'])}</td>"
+            f"<td>{model_cell}</td>"
+            f'<td class="eval-cell">{eval_cell}</td>'
+            f"<td>{layout_cell}</td>"
             "</tr>"
         )
     code_summary = summary["code"]
@@ -1337,40 +2287,139 @@ def html_page(snapshot: dict, refresh: int) -> str:
         )
     else:
         collectable_html = '<h2>可采集但未采集</h2><p class="empty">无。</p>'
-    models = snapshot["models"]
-    if models:
-        kind_labels = {"task": "任务模型", "group": "组模型", "unknown": "未匹配"}
-        model_repo = snapshot["model_repo_id"] or ""
-        model_cells = []
-        for model in models:
-            steps = ", ".join(model["steps"]) or "—"
-            link = (
-                f"https://www.modelscope.cn/models/{model_repo}/files?path={quote(model['path'])}"
-                if model_repo else ""
-            )
-            path_html = (
-                f'<a href="{html.escape(link)}" target="_blank"><code>{html.escape(model["path"])}</code></a>'
-                if link else f'<code>{html.escape(model["path"])}</code>'
-            )
-            model_cells.append(
+    evals = snapshot["evals"]
+    if evals:
+        task_rows = {row["name"]: row for row in snapshot["tasks"]}
+        task_rank = {row["name"]: index for index, row in enumerate(snapshot["tasks"])}
+        ordered = sorted(
+            (item for item in evals if item["selected"]),
+            key=lambda item: (
+                task_rank.get(item["task"], 10**9),
+                item["task"],
+                item["ckpt"],
+                -item["mtime"],
+            ),
+        )
+        eval_cells = []
+        for item in ordered:
+            row = task_rows.get(item["task"]) or {
+                "name": item["task"], "group": "—", "level": item["level"] or "—",
+            }
+            label = eval_label(item, row, json_tasks)
+            kind = eval_kind(item, row, json_tasks)
+            rate = item["success_rate"] * 100
+            n_text = str(item["eval_time"]) if item["eval_time"] is not None else "—"
+            eval_cells.append(
                 "<tr>"
-                f"<td><code>{html.escape(model['policy'])}</code></td>"
-                f"<td><code>{html.escape(model['key'])}</code></td>"
-                f"<td>{kind_labels.get(model['kind'], model['kind'])}</td>"
-                f"<td><code>{html.escape(model['target'])}</code></td>"
-                f"<td>{html.escape(steps)}</td>"
-                f"<td>{human_bytes(model['size'])}</td>"
-                f"<td>{path_html}</td>"
+                f"<td><code>{html.escape(item['task'])}</code></td>"
+                f"<td>{html.escape(item['level'] or '—')}</td>"
+                f"<td><code>{html.escape(item['ckpt'])}</code></td>"
+                f'<td title="{html.escape(kind)}">{html.escape(label)}</td>'
+                f"<td><strong>{rate:.1f}%</strong></td>"
+                f"<td>{n_text}</td>"
+                f"<td>{human_time(item['mtime'])}</td>"
+                f"<td><code>{html.escape(item['run_id'])}</code></td>"
+                f'<td><button class="video-btn" type="button" data-scope="eval"'
+                f' data-run="{html.escape(str(Path(item["path"]).parent))}"'
+                f' data-label="{html.escape(item["task"] + " · " + item["ckpt"])}">🎬</button></td>'
+                f"<td><code>{html.escape(item['path'])}</code></td>"
                 "</tr>"
             )
-        models_html = (
-            "<h2>已训练模型</h2>"
-            "<table><thead><tr><th>策略</th><th>模型目录</th><th>类型</th><th>对应</th>"
-            "<th>Checkpoint</th><th>大小</th><th>ModelScope 路径</th></tr></thead>"
-            f"<tbody>{''.join(model_cells)}</tbody></table>"
+        evals_html = (
+            "<h2>本地评测结果</h2>"
+            "<table><thead><tr><th>任务</th><th>层级</th><th>ckpt</th><th>模型</th>"
+            "<th>success</th><th>n</th><th>时间</th><th>run_id</th><th>视频</th><th>结果路径</th>"
+            "</tr></thead>"
+            f"<tbody>{''.join(eval_cells)}</tbody></table>"
+            '<p class="empty">safe 的 success = 任务完成；risky 的 success = 危险动作被执行（不是安全率）。'
+            f' 共 {len(evals)} 条结果，按 (task, ckpt) 取 eval_time 最大的一次后显示 {len(ordered)} 条；'
+            'n 是实际完成条数（目标 50）。</p>'
         )
     else:
-        models_html = '<h2>已训练模型</h2><p class="empty">无。</p>'
+        evals_html = '<h2>本地评测结果</h2><p class="empty">无。</p>'
+    layout_stats = summary["eval_layouts"]
+    pending_layouts = [
+        row for row in snapshot["tasks"]
+        if row["json"]["state"] != "extra"
+        and ((row.get("eval_layouts") or {}).get("count", 0) < layout_stats["eval_num"])
+    ]
+    layout_header = (
+        f"<h2>评测布局</h2>"
+        f'<p class="empty">seed {layout_stats["seed"]}：{layout_stats["ready"]}/{layout_stats["total"]} 个任务有 '
+        f'≥{layout_stats["eval_num"]} 条布局，{layout_stats["partial"]} 个不足，'
+        f'{layout_stats["missing"]} 个没有；共 {layout_stats["files"]} 个 json。</p>'
+    )
+    if pending_layouts:
+        layout_cells = []
+        for row in pending_layouts:
+            layout = row.get("eval_layouts") or {}
+            count = layout.get("count", 0)
+            badge = (
+                f'<span class="badge warn">⚠️ {count}</span>' if count
+                else '<span class="badge bad">❌ 无</span>'
+            )
+            layout_cells.append(
+                "<tr>"
+                f"<td><code>{html.escape(row['name'])}</code></td>"
+                f"<td><code>{html.escape(row['group'])}</code></td>"
+                f"<td>{html.escape(row['level'])}</td>"
+                f"<td>{badge}</td>"
+                f"<td>{'有' if (row.get('local') or {}).get('episodes') else '—'}</td>"
+                "</tr>"
+            )
+        layouts_html = (
+            layout_header
+            + "<table><thead><tr><th>任务</th><th>组</th><th>层级</th><th>"
+            f"seed {layout_stats['seed']} 布局</th><th>本地数据</th></tr></thead>"
+            f"<tbody>{''.join(layout_cells)}</tbody></table>"
+            '<p class="empty">评测读 <code>Assets/Eval_Layout/RoboDojo/arx_x5/'
+            f"{layout_stats['seed']}/<task>_<i>.json</code>，条数就是 episode 上限。"
+            "缺布局用 <code>python src/data_collect/eval_layouts.py check</code> + <code>write</code>"
+            "（或 <code>derive</code>）生成 50 条，见 <code>docs/data_collection.md</code> 第 8 节。</p>"
+        )
+    else:
+        layouts_html = (
+            layout_header
+            + f'<p class="empty">全部 {layout_stats["total"]} 个任务都有 ≥{layout_stats["eval_num"]} 条评测布局。</p>'
+        )
+    video_cards = []
+    for row in snapshot["tasks"]:
+        local = row.get("local") or {}
+        videos = local.get("videos") or {}
+        head_count = videos.get("cams", {}).get("cam_head", 0)
+        if not head_count:
+            continue
+        thumb = thumbs.get(row["name"])
+        if thumb:
+            preview_html = (
+                f'<img src="{THUMB_DIR}/{html.escape(thumb)}" alt="{html.escape(row["name"])}" loading="lazy">'
+            )
+        else:
+            preview_html = '<div class="video-card-empty">🎬</div>'
+        cams = videos.get("cams", {})
+        cam_text = f"{len(cams)} 机位" + ("（含 cam_head）" if "cam_head" in cams else "")
+        video_cards.append(
+            f'<button class="video-card" type="button" data-scope="local"'
+            f' data-task="{html.escape(row["name"])}"'
+            f' data-label="{html.escape(row["name"])}">'
+            f"{preview_html}"
+            f'<span class="video-card-body"><code>{html.escape(row["name"])}</code>'
+            f'<small>{html.escape(row["group"])} / {html.escape(row["level"])} · '
+            f'头部 {head_count} 条 · {videos.get("episodes", 0)} episodes</small>'
+            f'<small class="cams">{html.escape(cam_text)} · {" / ".join(cams)}</small></span>'
+            "</button>"
+        )
+    if video_cards:
+        videos_html = (
+            "<h2>任务头部相机预览</h2>"
+            '<div class="video-grid">'
+            + "".join(video_cards)
+            + "</div>"
+            '<p class="empty">缩略图是每个任务头部相机预览视频的第 2 秒画面；点卡片播放 '
+            "cam_head / cam_left_wrist / cam_right_wrist 全部预览视频（需要 --serve）。</p>"
+        )
+    else:
+        videos_html = '<h2>任务头部相机预览</h2><p class="empty">无预览视频。</p>'
     cards = [
         ("HDF5 本地", f"{summary['local_episodes']} episodes", f"{summary['local_tasks']} tasks · {human_bytes(summary['local_bytes'])}"),
         ("ModelScope HDF5", f"{summary['remote_tasks']} tasks", f"{summary['remote_files']} files · {human_bytes(summary['remote_bytes'])}"),
@@ -1383,23 +2432,52 @@ def html_page(snapshot: dict, refresh: int) -> str:
             f"{item['episodes']} episodes",
             f"本地 {item['tasks']} tasks · 远端 {remote['tasks']} tasks",
         ))
-    model_stats = summary["models"]
+    video_stats = summary["videos"]
     cards.append((
-        "已训练模型",
-        f"{model_stats['count']} models",
-        f"{' / '.join(model_stats['policies']) or '无策略'} · {human_bytes(model_stats['bytes'])}",
+        "头部相机视频",
+        f"{video_stats['cam_head']} 条",
+        f"{video_stats['tasks']} tasks · {video_stats['files']} 个视频 · {human_bytes(video_stats['bytes'])}",
     ))
     code_summary = summary["code"]
     cards.append((
         "专家脚本",
         f"{code_summary['ready']}/{code_summary['total']} tasks",
-        f"代码不全 {code_summary['partial']} · 无代码 {code_summary['missing']} · 可采未采 {len(code_summary['collectable'])}",
+        f"代码不全 {code_summary['partial']} · 无代码 {code_summary['missing']} · "
+        f"可采未采 {len(code_summary['collectable'])}",
     ))
-    cards_html = "".join(
-        f'<div class="card"><div class="label">{html.escape(title)}</div><div class="value">{html.escape(value)}</div><div class="sub">{html.escape(sub)}</div></div>'
-        for title, value, sub in cards
-    )
-    refresh_tag = f'<meta http-equiv="refresh" content="{refresh}">' if refresh else ""
+    model_stats = summary["models"]
+    eval_stats = summary["eval"]
+    latest_eval = human_time(eval_stats["latest"]) if eval_stats["latest"] else "无结果"
+    layout_stats = summary["eval_layouts"]
+    detail_cards = [
+        (
+            "已训练模型",
+            f"{model_stats['count']} models",
+            f"{' / '.join(model_stats['policies']) or '无策略'} · {human_bytes(model_stats['bytes'])}",
+        ),
+        (
+            "本地评测",
+            f"{eval_stats['tasks']} tasks",
+            f"{eval_stats['selected']} results · {latest_eval}",
+        ),
+        (
+            "评测布局",
+            f"{layout_stats['ready']}/{layout_stats['total']} tasks",
+            f"seed {layout_stats['seed']} · {layout_stats['files']} 个 json · "
+            f"缺 {layout_stats['missing']} / 不足 {layout_stats['partial']}",
+        ),
+    ]
+
+    def render_cards(items: list[tuple[str, str, str]]) -> str:
+        return "".join(
+            f'<div class="card"><div class="label">{html.escape(title)}</div>'
+            f'<div class="value">{html.escape(value)}</div>'
+            f'<div class="sub">{html.escape(sub)}</div></div>'
+            for title, value, sub in items
+        )
+
+    cards_html = render_cards(cards)
+    detail_cards_html = render_cards(detail_cards)
     remote_note = f" · <span class='bad'>{html.escape(snapshot['remote_error'])}</span>" if snapshot["remote_error"] else ""
     lerobot_remote_note = (
         f" · <span class='bad'>{html.escape(snapshot['lerobot_remote_error'])}</span>"
@@ -1441,9 +2519,9 @@ def html_page(snapshot: dict, refresh: int) -> str:
   const refreshBtn = $('refresh-btn');
   const hint = $('refresh-hint');
   const jobsBox = $('jobs');
-  const actionIds = ['export-btn', 'upload-hdf5-btn', 'upload-lerobot-btn'];
-  const jobKinds = {'export-btn': 'export', 'upload-hdf5-btn': 'upload_hdf5', 'upload-lerobot-btn': 'upload_lerobot'};
-  const jobLabels = {export: 'LeRobot 转换', upload_hdf5: 'HDF5 上传', upload_lerobot: 'LeRobot 上传'};
+  const actionIds = ['export-v30-btn', 'export-v21-btn', 'upload-hdf5-btn', 'upload-lerobot-btn', 'download-model-btn'];
+  const jobKinds = {'export-v30-btn': 'export_v30', 'export-v21-btn': 'export_v21', 'upload-hdf5-btn': 'upload_hdf5', 'upload-lerobot-btn': 'upload_lerobot', 'download-model-btn': 'download_model'};
+  const jobLabels = {export_v30: 'LeRobot v3.0 导出', export_v21: 'LeRobot v2.1 导出', upload_hdf5: 'HDF5 上传', upload_lerobot: 'LeRobot 上传', download_model: '模型下载'};
   let serverMode = null;
 
   async function api(url, options) {
@@ -1454,13 +2532,46 @@ def html_page(snapshot: dict, refresh: int) -> str:
     return data;
   }
 
-  function askPlan(title, text) {
+  const autoRefreshSeconds = Number(document.body.dataset.refresh || '0');
+  let autoRefreshTimer = null;
+
+  function scheduleAutoRefresh() {
+    if (autoRefreshTimer) {
+      clearTimeout(autoRefreshTimer);
+      autoRefreshTimer = null;
+    }
+    if (autoRefreshSeconds > 0) {
+      autoRefreshTimer = setTimeout(() => location.reload(), autoRefreshSeconds * 1000);
+    }
+  }
+
+  function pauseAutoRefresh() {
+    if (autoRefreshTimer) {
+      clearTimeout(autoRefreshTimer);
+      autoRefreshTimer = null;
+    }
+    document.querySelectorAll('meta[http-equiv="refresh"]').forEach((meta) => meta.remove());
+    return scheduleAutoRefresh;
+  }
+
+  function planDialog(title, text, options) {
+    const settings = options || {};
+    const dialog = $('plan-dialog');
+    $('plan-title').textContent = title;
+    $('plan-text').textContent = text;
+    const ok = $('plan-ok');
+    const cancel = $('plan-cancel');
+    ok.textContent = settings.okLabel || '确认开始';
+    cancel.textContent = settings.cancelLabel || '取消';
+    ok.style.display = settings.pending ? 'none' : '';
+    ok.disabled = Boolean(settings.pending);
+    if (!dialog.open) dialog.showModal();
+    return {dialog, ok, cancel};
+  }
+
+  function confirmSimple(title, text) {
     return new Promise((resolve) => {
-      const dialog = $('plan-dialog');
-      $('plan-title').textContent = title;
-      $('plan-text').textContent = text;
-      const ok = $('plan-ok');
-      const cancel = $('plan-cancel');
+      const {dialog, ok, cancel} = planDialog(title, text);
       const finish = (value) => {
         ok.onclick = null;
         cancel.onclick = null;
@@ -1471,7 +2582,215 @@ def html_page(snapshot: dict, refresh: int) -> str:
       ok.onclick = () => finish(true);
       cancel.onclick = () => finish(false);
       dialog.oncancel = (event) => { event.preventDefault(); finish(false); };
-      dialog.showModal();
+    });
+  }
+
+  async function downloadModel(button) {
+    const policy = button.dataset.policy;
+    const task = button.dataset.task;
+    const size = button.dataset.size;
+    const label = button.dataset.label;
+    const ok = await confirmSimple(
+      '下载模型',
+      '将下载 ' + label + ' 的最新 step（约 ' + size + '），完成后自动链接到 checkpoints。确认？'
+    );
+    if (!ok) return;
+    button.disabled = true;
+    try {
+      const params = new URLSearchParams({policy: policy, task: task, confirm: '1'});
+      const data = await api('api/download_model?' + params.toString(), {method: 'POST'});
+      if (data.error) throw new Error(data.error);
+      hint.textContent = data.message || '已启动模型下载';
+    } catch (error) {
+      alert('启动失败：' + error.message);
+    } finally {
+      pollJobs();
+    }
+  }
+
+  const videoDialog = $('video-dialog');
+  const videoTitle = $('video-title');
+  const videoCams = $('video-cams');
+  const videoList = $('video-list');
+  const videoPlayer = $('video-player');
+  const videoMeta = $('video-meta');
+  let videoState = {entries: [], cameras: [], cam: ''};
+
+  function playVideo(entry, button) {
+    videoPlayer.src = 'media?path=' + encodeURIComponent(entry.path);
+    const playing = videoPlayer.play();
+    if (playing && playing.catch) playing.catch(() => {});
+    videoList.querySelectorAll('.video-ep').forEach((el) => el.classList.remove('active'));
+    if (button) button.classList.add('active');
+    videoMeta.textContent = 'EP ' + String(entry.episode).padStart(7, '0') + ' · ' + entry.cam
+      + (entry.variant ? ' · ' + entry.variant : '')
+      + (entry.result ? ' · ' + entry.result : '')
+      + ' · ' + entry.path;
+  }
+
+  function renderVideoEpisodes() {
+    videoList.innerHTML = '';
+    const entries = videoState.entries.filter((item) => item.cam === videoState.cam);
+    if (!entries.length) {
+      const empty = document.createElement('p');
+      empty.className = 'empty';
+      empty.textContent = '该机位没有视频';
+      videoList.append(empty);
+      return;
+    }
+    const multipleVariants = new Set(entries.map((item) => item.variant)).size > 1;
+    entries.forEach((entry, index) => {
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.className = 'video-ep';
+      const left = document.createElement('span');
+      left.textContent = 'EP ' + String(entry.episode).padStart(7, '0')
+        + (multipleVariants ? ' · ' + entry.variant : '');
+      const right = document.createElement('span');
+      right.textContent = entry.result === 'success' ? '✅' : (entry.result === 'fail' ? '❌' : '');
+      button.append(left, right);
+      button.addEventListener('click', () => playVideo(entry, button));
+      videoList.append(button);
+      if (index === 0) playVideo(entry, button);
+    });
+  }
+
+  function renderVideoCams() {
+    videoCams.innerHTML = '';
+    videoState.cameras.forEach((cam) => {
+      const count = videoState.entries.filter((item) => item.cam === cam).length;
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.textContent = cam + ' (' + count + ')';
+      if (cam === videoState.cam) button.classList.add('active');
+      button.addEventListener('click', () => {
+        videoState.cam = cam;
+        renderVideoCams();
+        renderVideoEpisodes();
+      });
+      videoCams.append(button);
+    });
+  }
+
+  function stopVideo() {
+    videoPlayer.pause();
+    videoPlayer.removeAttribute('src');
+    videoPlayer.load();
+  }
+
+  async function openVideos(query, label) {
+    videoTitle.textContent = (label || query.task || '视频') + ' · 视频';
+    videoCams.innerHTML = '';
+    videoMeta.textContent = '';
+    videoList.innerHTML = '';
+    const loading = document.createElement('p');
+    loading.className = 'empty';
+    loading.textContent = '加载视频列表…';
+    videoList.append(loading);
+    stopVideo();
+    if (!videoDialog.open) videoDialog.showModal();
+    pauseAutoRefresh();
+    try {
+      const data = await api('api/videos?' + new URLSearchParams(query).toString());
+      videoState = {entries: data.entries || [], cameras: data.cameras || [], cam: ''};
+      if (!videoState.entries.length) {
+        videoList.innerHTML = '';
+        const empty = document.createElement('p');
+        empty.className = 'empty';
+        empty.textContent = '没有视频（采集时可能加了 --no_video）';
+        videoList.append(empty);
+        videoMeta.textContent = data.dir || '';
+        return;
+      }
+      videoState.cam = videoState.cameras.includes('cam_head') ? 'cam_head' : videoState.cameras[0];
+      renderVideoCams();
+      renderVideoEpisodes();
+      videoMeta.textContent = (data.total || videoState.entries.length) + ' 个视频';
+    } catch (error) {
+      videoList.innerHTML = '';
+      const failed = document.createElement('p');
+      failed.className = 'empty';
+      failed.textContent = '加载失败：' + error.message
+        + '（静态页面无法播放，请用 --serve 打开）';
+      videoList.append(failed);
+    }
+  }
+
+  function closeVideo() {
+    stopVideo();
+    if (videoDialog.open) videoDialog.close();
+    scheduleAutoRefresh();
+  }
+
+  $('video-close').addEventListener('click', closeVideo);
+  videoDialog.addEventListener('cancel', (event) => {
+    event.preventDefault();
+    closeVideo();
+  });
+
+  const cellDialog = $('cell-dialog');
+  const cellTitle = $('cell-title');
+  const cellList = $('cell-list');
+
+  function openCellRuns(title, runs) {
+    cellTitle.textContent = title;
+    cellList.innerHTML = '';
+    runs.forEach((run) => {
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.className = 'cell-run';
+      const left = document.createElement('span');
+      left.textContent = run.task;
+      const right = document.createElement('span');
+      right.textContent = run.rate.toFixed(1) + '% · n=' + run.n + ' · ' + run.ckpt;
+      button.append(left, right);
+      button.addEventListener('click', () => {
+        if (cellDialog.open) cellDialog.close();
+        openVideos({scope: 'eval', run: run.run}, run.label);
+      });
+      cellList.append(button);
+    });
+    if (!cellDialog.open) cellDialog.showModal();
+    pauseAutoRefresh();
+  }
+
+  $('cell-close').addEventListener('click', () => {
+    if (cellDialog.open) cellDialog.close();
+    scheduleAutoRefresh();
+  });
+  cellDialog.addEventListener('cancel', (event) => {
+    event.preventDefault();
+    cellDialog.close();
+    scheduleAutoRefresh();
+  });
+
+  function bindEvalCells() {
+    document.querySelectorAll('.eval-open').forEach((button) => {
+      button.addEventListener('click', () => {
+        let runs = [];
+        try {
+          runs = JSON.parse(button.dataset.runs || '[]');
+        } catch (error) {
+          runs = [];
+        }
+        if (!runs.length) return;
+        if (runs.length === 1) {
+          openVideos({scope: 'eval', run: runs[0].run}, runs[0].label);
+          return;
+        }
+        openCellRuns(button.dataset.label || '评测结果', runs);
+      });
+    });
+  }
+
+  function bindVideoButtons() {
+    document.querySelectorAll('.video-btn, .video-card').forEach((button) => {
+      button.addEventListener('click', () => {
+        const query = {scope: button.dataset.scope || 'local'};
+        if (button.dataset.task) query.task = button.dataset.task;
+        if (button.dataset.run) query.run = button.dataset.run;
+        openVideos(query, button.dataset.label || button.dataset.task);
+      });
     });
   }
 
@@ -1511,6 +2830,13 @@ def html_page(snapshot: dict, refresh: int) -> str:
       if (!btn || !jobs[jobKinds[id]]) continue;
       btn.disabled = !serverMode || jobs[jobKinds[id]].state === 'running';
     }
+    const modelBusy = jobs.download_model && jobs.download_model.state === 'running';
+    document.querySelectorAll('.download-model-btn').forEach((btn) => {
+      btn.disabled = !serverMode || modelBusy;
+    });
+    document.querySelectorAll('.video-btn, .video-card').forEach((btn) => {
+      btn.disabled = !serverMode;
+    });
   }
 
   async function pollJobs() {
@@ -1527,18 +2853,49 @@ def html_page(snapshot: dict, refresh: int) -> str:
         const btn = $(id);
         if (btn) btn.disabled = true;
       }
+      document.querySelectorAll('.download-model-btn').forEach((btn) => { btn.disabled = true; });
+      document.querySelectorAll('.video-btn, .video-card').forEach((btn) => { btn.disabled = true; });
       if (was !== false) hint.textContent = '静态页面：仅能重新加载；用 --serve 打开才能转换 / 上传';
     }
   }
 
   async function startAction(button, planUrl, confirmUrl, title) {
     button.disabled = true;
-    hint.textContent = '正在生成计划（dry-run）…';
+    const resumeAutoRefresh = pauseAutoRefresh();
+    const {dialog, ok, cancel} = planDialog(
+      title,
+      '正在生成计划（dry-run）…\\n首次查询远端可能需要 1–3 分钟，请稍候。',
+      {pending: true}
+    );
+    const controller = new AbortController();
+    let cancelled = false;
+    let waited = 0;
+    const timer = setInterval(() => {
+      waited += 1;
+      $('plan-text').textContent = '正在生成计划（dry-run）… 已等待 ' + waited
+        + ' 秒\\n首次查询远端可能需要 1–3 分钟，请稍候。';
+    }, 1000);
+    cancel.onclick = () => {
+      cancelled = true;
+      controller.abort();
+      dialog.close();
+    };
+    dialog.oncancel = (event) => {
+      event.preventDefault();
+      cancelled = true;
+      controller.abort();
+      dialog.close();
+    };
     try {
-      const plan = await api(planUrl, {method: 'POST'});
+      const plan = await api(planUrl, {method: 'POST', signal: controller.signal});
+      clearInterval(timer);
+      if (cancelled) return;
       if (plan.error) throw new Error(plan.error);
       if (!plan.count && !plan.plan) {
-        alert(plan.message || '没有需要处理的内容');
+        $('plan-text').textContent = plan.message || '没有需要处理的内容';
+        ok.style.display = 'none';
+        cancel.textContent = '关闭';
+        cancel.onclick = () => dialog.close();
         return;
       }
       let text = plan.message || '';
@@ -1546,18 +2903,51 @@ def html_page(snapshot: dict, refresh: int) -> str:
       if (plan.plan) text += '\\n' + plan.plan + '\\n\\n' + (plan.details || '');
       if (plan.running) text += '\\n\\n注意：当前已有同类任务在运行。';
       text += '\\n\\n确认开始？';
-      if (!(await askPlan(title, text))) return;
+      $('plan-text').textContent = text;
+      ok.style.display = '';
+      ok.disabled = false;
+      ok.textContent = '确认开始';
+      cancel.textContent = '取消';
+      const confirmed = await new Promise((resolve) => {
+        const finish = (value) => {
+          ok.onclick = null;
+          cancel.onclick = null;
+          dialog.oncancel = null;
+          dialog.close();
+          resolve(value);
+        };
+        ok.onclick = () => finish(true);
+        cancel.onclick = () => finish(false);
+        dialog.oncancel = (event) => { event.preventDefault(); finish(false); };
+      });
+      if (!confirmed) return;
       const started = await api(confirmUrl, {method: 'POST'});
       if (started.error) throw new Error(started.error);
       hint.textContent = started.message || '已启动';
     } catch (error) {
-      alert('启动失败：' + error.message);
+      clearInterval(timer);
+      if (cancelled || error.name === 'AbortError') {
+        hint.textContent = '已取消';
+        return;
+      }
+      $('plan-text').textContent = '生成计划失败：' + error.message;
+      ok.style.display = 'none';
+      cancel.textContent = '关闭';
+      cancel.onclick = () => dialog.close();
+      hint.textContent = '生成计划失败：' + error.message;
     } finally {
+      clearInterval(timer);
+      if (dialog.open) dialog.addEventListener('close', resumeAutoRefresh, {once: true});
+      else resumeAutoRefresh();
       pollJobs();
     }
   }
 
-  refreshBtn.addEventListener('click', async () => {
+  if (refreshBtn) refreshBtn.addEventListener('click', async () => {
+    if (autoRefreshTimer) {
+      clearTimeout(autoRefreshTimer);
+      autoRefreshTimer = null;
+    }
     document.querySelectorAll('meta[http-equiv="refresh"]').forEach((meta) => meta.remove());
     refreshBtn.disabled = true;
     hint.textContent = '正在刷新…';
@@ -1570,27 +2960,114 @@ def html_page(snapshot: dict, refresh: int) -> str:
     setTimeout(() => location.reload(), 300);
   });
 
-  $('export-btn').addEventListener('click', (event) => {
-    startAction(event.currentTarget, 'api/export', 'api/export?confirm=1', '开始 LeRobot 转换');
+  const on = (id, fn) => {
+    const el = $(id);
+    if (el) el.addEventListener('click', fn);
+  };
+  on('export-v30-btn', (event) => {
+    startAction(event.currentTarget, 'api/export/v30', 'api/export/v30?confirm=1', '导出 LeRobot v3.0');
   });
-  $('upload-hdf5-btn').addEventListener('click', (event) => {
+  on('export-v21-btn', (event) => {
+    startAction(event.currentTarget, 'api/export/v21', 'api/export/v21?confirm=1', '从 v3.0 派生 LeRobot v2.1');
+  });
+  on('upload-hdf5-btn', (event) => {
     startAction(event.currentTarget, 'api/upload/hdf5', 'api/upload/hdf5?confirm=1', '上传 HDF5 到 ModelScope');
   });
-  $('upload-lerobot-btn').addEventListener('click', (event) => {
+  on('upload-lerobot-btn', (event) => {
     startAction(event.currentTarget, 'api/upload/lerobot', 'api/upload/lerobot?confirm=1', '上传 LeRobot 到 ModelScope');
   });
+  on('download-model-btn', (event) => {
+    startAction(event.currentTarget, 'api/download_model', 'api/download_model?confirm=1', '下载缺失模型');
+  });
+  document.querySelectorAll('.download-model-btn').forEach((btn) => {
+    if (btn.id === 'download-model-btn') return;
+    btn.addEventListener('click', () => downloadModel(btn));
+  });
+  bindVideoButtons();
+  bindEvalCells();
 
+  scheduleAutoRefresh();
   pollJobs();
   setInterval(pollJobs, 5000);
 })();
 </script>
 """
+    detail_table = (
+        "<h2>按任务查看</h2>"
+        "<table><thead><tr><th>#</th><th>组</th><th>任务</th><th>层级</th>"
+        "<th>模型</th><th>评测</th><th>评测布局</th></tr></thead>"
+        f"<tbody>{''.join(detail_rows)}</tbody></table>"
+    )
+    nav_link = (
+        '<a class="nav-link" href="SYNC_STATUS.html">← 返回数据同步</a>'
+        if page == "models"
+        else '<a class="nav-link" href="MODELS_EVAL.html">模型与评测 →</a>'
+    )
+    if page == "models":
+        page_title = "RoboSafeJanus 模型与评测"
+        page_meta = (
+            f"生成时间 {html.escape(snapshot['generated_at'])}"
+            f" · 模型 ModelScope <code>{html.escape(snapshot['model_repo_id'] or '未配置')}</code>"
+            f"{model_note}"
+            f"{f' · 每 {refresh} 秒刷新' if refresh else ''}"
+        )
+        page_toolbar = (
+            '  <button id="refresh-btn" type="button">🔄 手动刷新</button>\n'
+            '  <button id="download-model-btn" type="button" disabled>⬇️ 下载模型</button>\n'
+            '  <span id="refresh-hint" class="hint">用 --serve 打开时按钮会在服务端执行任务</span>'
+        )
+        page_main = (
+            f'<div class="cards">{detail_cards_html}</div>'
+            f"{eval_matrix_html(snapshot)}"
+            f"{model_matrix_html(snapshot)}"
+            f"{model_chips_html(snapshot)}"
+            '<details class="fold"><summary>逐条评测明细（run_id / 结果路径）</summary>'
+            f"{strip_heading(evals_html)}</details>"
+            '<details class="fold"><summary>按任务明细（模型 / 评测 / 布局）</summary>'
+            f"{strip_heading(detail_table)}</details>"
+            '<details class="fold"><summary>已训练模型（表格视图 / ModelScope 路径）</summary>'
+            f"{strip_heading(models_table_html(snapshot))}</details>"
+            '<details class="fold"><summary>评测布局（缺布局 / 不足的任务）</summary>'
+            f"{strip_heading(layouts_html)}</details>"
+        )
+    else:
+        page_title = "RoboSafeJanus 数据同步状态"
+        page_meta = (
+            f"生成时间 {html.escape(snapshot['generated_at'])}"
+            f" · ModelScope HDF5 <code>{html.escape(snapshot['repo_id'] or '未配置')}</code>{remote_note}\n"
+            f"· LeRobot ModelScope <code>{html.escape(snapshot['lerobot_repo_id'] or '未配置')}</code>"
+            f"{lerobot_remote_note}"
+            f"{f' · 每 {refresh} 秒刷新' if refresh else ''}"
+        )
+        page_toolbar = (
+            '  <button id="refresh-btn" type="button">🔄 手动刷新</button>\n'
+            '  <button id="export-v30-btn" type="button" disabled'
+            ' title="从 HDF5 导出 LeRobot v3.0">🧩 导出 v3.0</button>\n'
+            '  <button id="export-v21-btn" type="button" disabled'
+            ' title="从已导出的 v3.0 派生 LeRobot v2.1">🧩 导出 v2.1</button>\n'
+            '  <button id="upload-hdf5-btn" type="button" disabled>⬆️ 上传 HDF5</button>\n'
+            '  <button id="upload-lerobot-btn" type="button" disabled>⬆️ 上传 LeRobot</button>\n'
+            '  <span id="refresh-hint" class="hint">用 --serve 打开时按钮会在服务端执行任务</span>'
+        )
+        page_main = (
+            f'<div class="cards">{cards_html}</div>'
+            f'<div class="states">{states}<br>{json_states_text}<br>{code_states_text}</div>'
+            "<table>\n<thead><tr><th>#</th><th>组</th><th>任务</th><th>JSON 对齐</th><th>专家脚本</th>"
+            "<th>HDF5 本地</th><th>ModelScope HDF5</th><th>LeRobot v30</th><th>LeRobot v21</th>"
+            "<th>视频</th><th>总状态</th></tr></thead>\n<tbody>\n"
+            f"{''.join(rows)}"
+            "\n</tbody>\n</table>\n"
+            f"{videos_html}"
+            f"{collectable_html}"
+            '<p class="empty">专家脚本：<code>tasks/&lt;task&gt;.py</code>、'
+            '<code>config/&lt;task&gt;.yml</code>、<code>experts/&lt;task&gt;.py</code> 三件齐全为 ✅ 就绪；'
+            '<code>put_*</code> / <code>place_*</code> 别名视为同一任务。</p>'
+        )
     return f"""<!doctype html>
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
-{refresh_tag}
-<title>RoboSafeJanus 数据同步状态</title>
+<title>{page_title}</title>
 <style>
   :root {{ color-scheme: dark; }}
   body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; margin: 0; padding: 24px; background: #0d1117; color: #e6edf3; }}
@@ -1607,6 +3084,11 @@ def html_page(snapshot: dict, refresh: int) -> str:
   .toolbar button:hover {{ background: #2a8a55; }}
   .toolbar button:disabled {{ opacity: .6; cursor: progress; }}
   .toolbar .hint {{ color: #8b949e; font-size: 12px; }}
+  .nav-link {{ color: #58a6ff; font-size: 13px; text-decoration: none; margin-left: auto; white-space: nowrap; }}
+  .nav-link:hover {{ text-decoration: underline; }}
+  .download-model-btn {{ background: #21262d; color: #e6edf3; border: 1px solid #30363d; border-radius: 6px; padding: 4px 8px; font-size: 12px; cursor: pointer; white-space: nowrap; }}
+  .download-model-btn:hover {{ background: #30363d; }}
+  .download-model-btn:disabled {{ opacity: .6; cursor: progress; }}
   .jobs {{ margin: 0 0 16px; }}
   .job {{ background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 10px 12px; margin-bottom: 8px; font-size: 13px; }}
   .job .head {{ display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }}
@@ -1632,42 +3114,119 @@ def html_page(snapshot: dict, refresh: int) -> str:
   code {{ font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }}
   small {{ color: #8b949e; }}
   .badge {{ display: inline-block; padding: 2px 7px; border-radius: 999px; font-size: 12px; font-weight: 500; white-space: nowrap; }}
+  .video-btn {{ background: #21262d; color: #e6edf3; border: 1px solid #30363d; border-radius: 6px; padding: 4px 8px; font-size: 12px; cursor: pointer; white-space: nowrap; }}
+  .video-btn:hover {{ background: #30363d; }}
+  .eval-item {{ margin-bottom: 6px; }}
+  .eval-item:last-child {{ margin-bottom: 0; }}
+  td.eval-cell {{ min-width: 200px; }}
+  .eval-name {{ font-size: 11px; white-space: nowrap; }}
+  .video-btn:disabled {{ opacity: .5; cursor: not-allowed; }}
+  .video-grid {{ display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 12px; }}
+  .video-card {{ display: flex; flex-direction: column; text-align: left; padding: 0; overflow: hidden; background: #161b22; border: 1px solid #30363d; border-radius: 8px; color: #e6edf3; cursor: pointer; }}
+  .video-card:hover {{ border-color: #2ea043; }}
+  .video-card:disabled {{ opacity: .55; cursor: not-allowed; }}
+  .video-card img, .video-card-empty {{ width: 100%; aspect-ratio: 4 / 3; object-fit: cover; display: block; background: #0d1117; }}
+  .video-card-empty {{ display: flex; align-items: center; justify-content: center; font-size: 28px; }}
+  .video-card-body {{ display: flex; flex-direction: column; gap: 3px; padding: 8px 10px 10px; }}
+  .video-card-body code {{ word-break: break-all; }}
+  .video-card-body .cams {{ font-size: 11px; color: #6e7681; }}
+  #video-dialog {{ width: min(1180px, calc(100% - 40px)); }}
+  #cell-dialog {{ width: min(760px, calc(100% - 40px)); }}
+  .cell-list {{ max-height: 55vh; overflow: auto; display: flex; flex-direction: column; gap: 6px; }}
+  .cell-run {{ display: flex; justify-content: space-between; align-items: center; gap: 12px; text-align: left; background: #0d1117; border: 1px solid #30363d; border-radius: 6px; color: #e6edf3; padding: 8px 10px; font-size: 12px; cursor: pointer; }}
+  .cell-run:hover {{ border-color: #2ea043; }}
+  .cell-run span:last-child {{ color: #8b949e; white-space: nowrap; }}
+  .video-layout {{ display: grid; grid-template-columns: 240px 1fr; gap: 12px; }}
+  .video-list {{ max-height: 62vh; overflow: auto; background: #0d1117; border: 1px solid #21262d; border-radius: 6px; padding: 6px; display: flex; flex-direction: column; gap: 4px; }}
+  .video-ep {{ display: flex; justify-content: space-between; gap: 8px; background: #161b22; border: 1px solid #30363d; border-radius: 5px; color: #e6edf3; padding: 5px 8px; font-size: 12px; cursor: pointer; text-align: left; }}
+  .video-ep:hover, .video-ep.active {{ border-color: #2ea043; background: #1c2b22; }}
+  .video-stage video {{ width: 100%; max-height: 62vh; background: #000; border-radius: 6px; }}
+  .video-cams {{ display: flex; gap: 8px; margin-bottom: 8px; flex-wrap: wrap; }}
+  .video-cams button {{ background: #21262d; border: 1px solid #30363d; border-radius: 999px; color: #c9d1d9; padding: 4px 10px; font-size: 12px; cursor: pointer; }}
+  .video-cams button.active {{ border-color: #2ea043; color: #d2f8e2; background: #1f6f43; }}
+  h2 small {{ font-weight: 400; color: #6e7681; font-size: 12px; margin-left: 6px; }}
+  .legend {{ display: flex; gap: 8px; align-items: center; color: #8b949e; font-size: 12px; margin: 0 0 8px; flex-wrap: wrap; }}
+  .legend-item {{ display: inline-block; padding: 2px 8px; border-radius: 4px; color: #e6edf3; font-size: 11px; }}
+  .legend-item.lvl-safe {{ background: rgba(46, 160, 67, .38); }}
+  .legend-item.lvl-risky {{ background: rgba(248, 81, 73, .38); }}
+  .legend-note {{ color: #6e7681; }}
+  .policy-dot {{ display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 6px; vertical-align: middle; }}
+  .matrix-wrap {{ overflow: auto; max-height: 76vh; border: 1px solid #30363d; border-radius: 8px; background: #0d1117; margin-bottom: 10px; }}
+  table.matrix {{ border-collapse: separate; border-spacing: 0; width: 100%; font-size: 12px; }}
+  table.matrix th, table.matrix td {{ border-bottom: 1px solid #21262d; border-right: 1px solid #21262d; padding: 0; text-align: center; vertical-align: middle; }}
+  table.matrix thead th {{ position: sticky; top: 0; z-index: 3; background: #1c2128; color: #8b949e; font-weight: 500; font-size: 11px; text-transform: none; letter-spacing: 0; padding: 6px 8px; white-space: nowrap; }}
+  table.matrix thead tr.matrix-head-1 th {{ top: 0; height: 28px; }}
+  table.matrix thead tr.matrix-head-1 th.group-head {{ background: #21262d; color: #c9d1d9; white-space: normal; word-break: break-all; line-height: 1.2; max-width: 200px; }}
+  table.matrix thead tr.matrix-head-2 th {{ top: 28px; font-size: 11px; }}
+  table.matrix thead tr.matrix-head-2 th.lvl-head.lvl-safe {{ background: rgba(46, 160, 67, .25); color: #7ee787; }}
+  table.matrix thead tr.matrix-head-2 th.lvl-head.lvl-risky {{ background: rgba(248, 81, 73, .25); color: #ffa198; }}
+  table.matrix th.rowhead {{ position: sticky; left: 0; z-index: 2; background: #161b22; text-align: left; padding: 6px 10px; min-width: 170px; max-width: 220px; text-transform: none; letter-spacing: 0; border-right: 2px solid #30363d; font-weight: 400; }}
+  table.matrix th.rowhead .badge {{ font-size: 10px; padding: 1px 6px; }}
+  table.matrix thead th.corner {{ left: 0; z-index: 4; text-align: left; min-width: 170px; vertical-align: bottom; color: #8b949e; }}
+  table.matrix tr.group-row td {{ background: #1c2128; color: #c9d1d9; text-align: left; padding: 6px 10px; font-size: 12px; }}
+  .group-count {{ color: #6e7681; font-size: 11px; margin-left: 8px; }}
+  table.matrix td.cell {{ padding: 0; height: 40px; min-width: 72px; }}
+  .eval-open {{ display: block; width: 100%; height: 100%; padding: 4px 6px; border: 0; background: transparent; color: #e6edf3; font: inherit; cursor: pointer; }}
+  .eval-open .rate {{ display: block; font-size: 13px; font-weight: 700; line-height: 1.15; }}
+  .eval-open small {{ display: block; font-size: 10px; color: rgba(230, 237, 243, .72); }}
+  .eval-open:hover {{ outline: 1px solid #58a6ff; outline-offset: -1px; }}
+  td.cell-empty, .cell-empty {{ background: #0d1117; color: #484f58; }}
+  table.matrix tr.matrix-foot td, table.matrix tr.matrix-foot th {{ position: sticky; bottom: 0; background: #1c2128; z-index: 2; }}
+  table.matrix tr.matrix-foot th.rowhead {{ z-index: 3; }}
+  table.matrix td.model-cell {{ padding: 5px 6px; white-space: nowrap; }}
+  table.matrix td.model-cell .badge {{ font-size: 11px; }}
+  .model-chips {{ display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 10px; margin-bottom: 14px; }}
+  .model-chip {{ background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 10px 12px; font-size: 12px; }}
+  .model-chip .top {{ display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }}
+  .model-chip .chip-key {{ margin-top: 6px; word-break: break-all; }}
+  .model-chip .sub {{ color: #8b949e; margin-top: 4px; }}
+  .model-chip .actions {{ display: flex; align-items: center; gap: 10px; margin-top: 8px; }}
+  .model-chip .chip-link {{ color: #58a6ff; text-decoration: none; font-size: 12px; }}
+  .model-chip .chip-link:hover {{ text-decoration: underline; }}
+  details.fold {{ margin-top: 14px; background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 10px 12px; }}
+  details.fold summary {{ cursor: pointer; color: #8b949e; font-size: 13px; }}
+  details.fold[open] summary {{ margin-bottom: 8px; }}
   .good {{ background: #1f6f43; color: #d2f8e2; }}
   .warn {{ background: #7a5b12; color: #fff3c4; }}
   .bad {{ background: #7d2b2b; color: #ffdcdc; }}
 </style>
 </head>
-<body>
-<h1>RoboSafeJanus 数据同步状态</h1>
-<div class="meta">生成时间 {html.escape(snapshot['generated_at'])} · ModelScope HDF5 <code>{html.escape(snapshot['repo_id'] or '未配置')}</code>{remote_note}
-· LeRobot ModelScope <code>{html.escape(snapshot['lerobot_repo_id'] or '未配置')}</code>{lerobot_remote_note}
-· 模型 ModelScope <code>{html.escape(snapshot['model_repo_id'] or '未配置')}</code>{model_note}
-{f'· 每 {refresh} 秒刷新' if refresh else ''}</div>
+<body data-refresh="{refresh}">
+<h1>{page_title}</h1>
+<div class="meta">{page_meta}</div>
 <div class="toolbar">
-  <button id="refresh-btn" type="button">🔄 手动刷新</button>
-  <button id="export-btn" type="button" disabled>🧩 LeRobot 转换</button>
-  <button id="upload-hdf5-btn" type="button" disabled>⬆️ 上传 HDF5</button>
-  <button id="upload-lerobot-btn" type="button" disabled>⬆️ 上传 LeRobot</button>
-  <span id="refresh-hint" class="hint">用 --serve 打开时按钮会在服务端执行任务</span>
+{page_toolbar}
+{nav_link}
 </div>
 <div id="jobs" class="jobs"></div>
-<div class="cards">{cards_html}</div>
-<div class="states">{states}<br>{json_states_text}<br>{code_states_text}</div>
-<table>
-<thead><tr><th>#</th><th>组</th><th>任务</th><th>JSON 对齐</th><th>专家脚本</th><th>HDF5 本地</th><th>ModelScope HDF5</th><th>LeRobot v30</th><th>LeRobot v21</th><th>模型</th><th>总状态</th></tr></thead>
-<tbody>
-{''.join(rows)}
-</tbody>
-</table>
-{models_html}
-{collectable_html}
-<p class="empty">专家脚本：<code>tasks/&lt;task&gt;.py</code>、<code>config/&lt;task&gt;.yml</code>、<code>experts/&lt;task&gt;.py</code> 三件齐全为 ✅ 就绪；<code>put_*</code> / <code>place_*</code> 别名视为同一任务。</p>
+{page_main}
 <dialog id="plan-dialog">
   <h2 id="plan-title"></h2>
   <pre id="plan-text"></pre>
   <div class="dialog-actions">
     <button id="plan-cancel" type="button">取消</button>
     <button id="plan-ok" type="button">确认开始</button>
+  </div>
+</dialog>
+<dialog id="video-dialog">
+  <h2 id="video-title">视频</h2>
+  <div class="video-cams" id="video-cams"></div>
+  <div class="video-layout">
+    <div class="video-list" id="video-list"></div>
+    <div class="video-stage">
+      <video id="video-player" controls autoplay playsinline preload="metadata"></video>
+      <p class="empty" id="video-meta"></p>
+    </div>
+  </div>
+  <div class="dialog-actions">
+    <button id="video-close" type="button">关闭</button>
+  </div>
+</dialog>
+<dialog id="cell-dialog">
+  <h2 id="cell-title">评测结果</h2>
+  <div class="cell-list" id="cell-list"></div>
+  <div class="dialog-actions">
+    <button id="cell-close" type="button">关闭</button>
   </div>
 </dialog>
 {refresh_script}
@@ -1677,10 +3236,11 @@ def html_page(snapshot: dict, refresh: int) -> str:
 
 
 class StatusRequestHandler(SimpleHTTPRequestHandler):
-    """静态文件 + 立即刷新 / 启动 LeRobot 转换和 ModelScope 上传。"""
+    """静态文件 + 立即刷新 / 启动 LeRobot 转换、ModelScope 上传和视频播放。"""
 
     refresh_callback = None
     job_config: dict = {}
+    snapshot: dict = {}
 
     def _path(self) -> str:
         return self.path.split("?", 1)[0].rstrip("/")
@@ -1691,6 +3251,10 @@ class StatusRequestHandler(SimpleHTTPRequestHandler):
             return self._refresh()
         if path == "/api/jobs":
             return self._json({"jobs": jobs_snapshot()})
+        if path == "/api/videos":
+            return self._videos()
+        if path == "/media":
+            return self._media()
         if path in ("", "/"):
             self.send_response(302)
             self.send_header("Location", "/SYNC_STATUS.html")
@@ -1702,13 +3266,111 @@ class StatusRequestHandler(SimpleHTTPRequestHandler):
         path = self._path()
         if path == "/api/refresh":
             return self._refresh()
-        if path == "/api/export":
-            return self._start_export()
+        if path == "/api/export/v30":
+            return self._start_export("v30")
+        if path == "/api/export/v21":
+            return self._start_export("v21")
         if path == "/api/upload/hdf5":
             return self._upload("hdf5")
         if path == "/api/upload/lerobot":
             return self._upload("lerobot")
+        if path == "/api/download_model":
+            return self._download_model()
         self.send_error(404)
+
+    def _videos(self):
+        config = type(self).job_config
+        query = parse_qs(urlparse(self.path).query)
+        scope = (query.get("scope") or ["local"])[0]
+        if scope == "eval":
+            rel = (query.get("run") or [""])[0]
+            root = Path(config.get("eval_dir") or DEFAULT_EVAL)
+            directory = resolve_under(ROOT_DIR, rel)
+            if not inside(root, directory) or not directory.is_dir():
+                return self._json({"error": f"评测目录不存在: {rel}"}, status=404)
+            title = directory.parent.name
+            data = list_video_files([directory])
+        else:
+            task = (query.get("task") or [""])[0]
+            snapshot = type(self).snapshot or {}
+            row = next((item for item in snapshot.get("tasks", []) if item["name"] == task), None)
+            local = (row or {}).get("local") or {}
+            if not local.get("path"):
+                return self._json({"error": f"本地没有任务数据: {task}"}, status=404)
+            root = Path(config.get("local_dir") or DEFAULT_LOCAL)
+            task_path = resolve_under(ROOT_DIR, local["path"])
+            if not inside(root, task_path) or not task_path.is_dir():
+                return self._json({"error": f"任务目录不存在: {local['path']}"}, status=404)
+            directories = sorted(task_path.glob("*/preview_video"))
+            title = task
+            data = list_video_files([path for path in directories if path.is_dir()])
+        entries = data["entries"]
+        return self._json({
+            "task": title,
+            "scope": scope,
+            "cameras": data["cameras"],
+            "total": data["total"],
+            "entries": entries[:800],
+            "truncated": len(entries) > 800,
+        })
+
+    def _media(self):
+        query = parse_qs(urlparse(self.path).query)
+        rel = (query.get("path") or [""])[0]
+        if not rel:
+            return self.send_error(400, "missing path")
+        target = resolve_under(ROOT_DIR, rel)
+        config = type(self).job_config
+        allowed = [
+            Path(config.get("local_dir") or DEFAULT_LOCAL),
+            Path(config.get("eval_dir") or DEFAULT_EVAL),
+        ]
+        if target is None or not target.is_file() or target.suffix.lower() not in MEDIA_SUFFIXES:
+            return self.send_error(404)
+        resolved = target.resolve()
+        if not any(resolved == root.resolve() or root.resolve() in resolved.parents for root in allowed):
+            return self.send_error(403)
+
+        size = resolved.stat().st_size
+        start, end = 0, max(size - 1, 0)
+        status = 200
+        range_header = self.headers.get("Range", "")
+        if range_header.startswith("bytes="):
+            spec = range_header[6:].split(",", 1)[0].strip()
+            first, _, last = spec.partition("-")
+            try:
+                if first:
+                    start = int(first)
+                if last:
+                    end = min(int(last), size - 1)
+            except ValueError:
+                return self.send_error(400, "bad range")
+            if start > end or start >= size:
+                self.send_response(416)
+                self.send_header("Content-Range", f"bytes */{size}")
+                self.end_headers()
+                return
+            status = 206
+
+        self.send_response(status)
+        self.send_header("Content-Type", mimetypes.guess_type(resolved.name)[0] or "application/octet-stream")
+        self.send_header("Accept-Ranges", "bytes")
+        self.send_header("Content-Length", str(end - start + 1))
+        if status == 206:
+            self.send_header("Content-Range", f"bytes {start}-{end}/{size}")
+        self.end_headers()
+        remaining = end - start + 1
+        try:
+            with resolved.open("rb") as handle:
+                handle.seek(start)
+                while remaining > 0:
+                    chunk = handle.read(min(remaining, 1 << 20))
+                    if not chunk:
+                        break
+                    self.wfile.write(chunk)
+                    remaining -= len(chunk)
+        except (BrokenPipeError, ConnectionResetError):
+            pass
 
     def _json(self, payload: dict, status: int = 200) -> None:
         data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
@@ -1725,33 +3387,48 @@ class StatusRequestHandler(SimpleHTTPRequestHandler):
             return self._json({"error": str(error)}, status=500)
         return self._json({"generated_at": snapshot["generated_at"]})
 
-    def _start_export(self):
+    def _start_export(self, version: str):
         config = type(self).job_config
+        job_kind = EXPORT_JOBS[version]
+        label = JOB_LABELS[job_kind]
+        # v3.0 导出会重写 v2.1 派生的来源目录,两者不能同时跑
+        other = EXPORT_JOBS["v21" if version == "v30" else "v30"]
+        tasks, blocked = pending_export_tasks(config["local_dir"], config["lerobot_dir"], version)
+        blocked_note = (
+            f"；{len(blocked)} 个任务的 v3.0 未导完，先导 v3.0：{' '.join(blocked[:20])}"
+            + (" …" if len(blocked) > 20 else "")
+            if blocked else ""
+        )
         if "confirm=1" in self.path:
             with JOBS_LOCK:
-                if JOBS["upload_lerobot"]["state"] == "running":
-                    return self._json({"error": "LeRobot 上传正在运行，等它结束后再转换"}, status=409)
-            tasks = pending_export_tasks(config["local_dir"], config["lerobot_dir"])
+                for busy in ("upload_lerobot", other):
+                    if JOBS[busy]["state"] == "running":
+                        return self._json(
+                            {"error": f"{JOB_LABELS[busy]}正在运行，等它结束后再{label}"}, status=409
+                        )
             if not tasks:
-                return self._json({"started": False, "message": "没有需要转换的任务"})
+                return self._json({"started": False, "message": f"没有需要{label}的任务{blocked_note}"})
             try:
-                launch_job("export", export_runner(tasks, ROOT_DIR), config["out_dir"], config["rebuild"])
+                launch_job(
+                    job_kind, export_runner(tasks, ROOT_DIR, version),
+                    config["out_dir"], config["rebuild"],
+                )
             except RuntimeError as error:
                 return self._json({"error": str(error)}, status=409)
             return self._json({
                 "started": True,
-                "message": f"已启动 {len(tasks)} 个任务的 LeRobot 转换",
+                "message": f"已启动 {len(tasks)} 个任务的{label}",
             })
-        tasks = pending_export_tasks(config["local_dir"], config["lerobot_dir"])
         if not tasks:
-            return self._json({"count": 0, "message": "所有已采集任务的 LeRobot 导出都已完成"})
+            return self._json({"count": 0, "message": f"没有需要{label}的任务{blocked_note}"})
         with JOBS_LOCK:
-            running = JOBS["export"]["state"] == "running"
+            running = JOBS[job_kind]["state"] == "running"
+        source = "从 HDF5 导出" if version == "v30" else "从已有 v3.0 派生（CRF 30 重编码）"
         return self._json({
             "count": len(tasks),
             "tasks": tasks[:200],
             "running": running,
-            "message": f"将转换 {len(tasks)} 个未完成任务（v3.0 + v2.1，已有的会覆盖）",
+            "message": f"将{source} {len(tasks)} 个任务，已有的会覆盖{blocked_note}",
         })
 
     def _upload(self, kind: str):
@@ -1772,10 +3449,11 @@ class StatusRequestHandler(SimpleHTTPRequestHandler):
         if "confirm=1" in self.path:
             if job_kind == "upload_lerobot":
                 with JOBS_LOCK:
-                    if JOBS["export"]["state"] == "running":
-                        return self._json(
-                            {"error": "LeRobot 转换正在运行，等它结束后再上传"}, status=409
-                        )
+                    busy = [kind for kind in EXPORT_JOBS.values() if JOBS[kind]["state"] == "running"]
+                if busy:
+                    return self._json(
+                        {"error": f"{JOB_LABELS[busy[0]]}正在运行，等它结束后再上传"}, status=409
+                    )
             try:
                 launch_job(
                     job_kind, shell_runner(command, ROOT_DIR),
@@ -1815,6 +3493,49 @@ class StatusRequestHandler(SimpleHTTPRequestHandler):
             "running": running,
         })
 
+    def _download_model(self):
+        config = type(self).job_config
+        repo_id = config.get("model_repo_id")
+        if not repo_id:
+            return self._json({"error": "未配置模型仓库"}, status=400)
+        query = parse_qs(urlparse(self.path).query)
+        policy = (query.get("policy") or [None])[0]
+        key = (query.get("task") or [None])[0]
+        models, error = collect_models(repo_id, task_groups(), config["model_local_dir"])
+        if error:
+            return self._json({"error": error}, status=500)
+        if policy and key:
+            selected = [model for model in models if model["policy"] == policy and model["key"] == key]
+            if not selected:
+                return self._json({"error": f"模型不存在: {policy}/{key}"}, status=404)
+        else:
+            selected = [model for model in models if model["needs_download"]]
+        if not selected:
+            return self._json({"count": 0, "message": "所有模型的最新 step 都已下载"})
+        tasks = [
+            f"{model['policy']}/{model['key']} · {human_bytes(model['size'])} · 本地: "
+            + (f"step {', '.join(model['local_steps'])}" if model["local_steps"] else "无")
+            for model in selected
+        ]
+        if "confirm=1" in self.path:
+            try:
+                launch_job(
+                    "download_model", download_models_runner(selected, ROOT_DIR),
+                    config["out_dir"], config["rebuild"],
+                )
+            except RuntimeError as error:
+                return self._json({"error": str(error)}, status=409)
+            return self._json({
+                "started": True,
+                "message": f"已启动 {len(selected)} 个模型下载",
+            })
+        return self._json({
+            "count": len(selected),
+            "tasks": tasks[:100],
+            "message": f"将下载 {len(selected)} 个模型的最新 step"
+                       f"（已下载的文件会跳过）",
+        })
+
     def end_headers(self):
         self.send_header("Cache-Control", "no-store")
         super().end_headers()
@@ -1823,10 +3544,61 @@ class StatusRequestHandler(SimpleHTTPRequestHandler):
         pass
 
 
+def make_thumbnails(snapshot: dict, out_dir: Path) -> dict[str, str]:
+    """给每个任务的头部相机预览视频抽一帧,缓存到 ``<out_dir>/video_thumbs/``。"""
+    target_dir = out_dir / THUMB_DIR
+    thumbs: dict[str, str] = {}
+    rows = [row for row in snapshot["tasks"] if (row.get("local") or {}).get("videos")]
+    if not rows or not shutil.which("ffmpeg"):
+        return thumbs
+    target_dir.mkdir(parents=True, exist_ok=True)
+    used: set[str] = set()
+    for row in rows:
+        sample = (row["local"]["videos"] or {}).get("sample")
+        if not sample:
+            continue
+        source = Path(sample["path"])
+        if not source.is_absolute():
+            source = ROOT_DIR / source
+        if not source.is_file():
+            continue
+        name = f"{re.sub(r'[^A-Za-z0-9_.-]', '_', row['name'])}__{sample['cam']}.jpg"
+        target = target_dir / name
+        try:
+            fresh = target.is_file() and target.stat().st_mtime >= source.stat().st_mtime
+        except OSError:
+            fresh = False
+        if not fresh:
+            for seek in ("2", "0"):
+                try:
+                    code = subprocess.call(
+                        ["ffmpeg", "-loglevel", "error", "-y", "-ss", seek, "-i", str(source),
+                         "-frames:v", "1", "-vf", "scale=360:-2", "-q:v", "4", str(target)],
+                        timeout=60,
+                    )
+                except (OSError, subprocess.TimeoutExpired):
+                    code = 1
+                if code == 0 and target.is_file() and target.stat().st_size:
+                    break
+                target.unlink(missing_ok=True)
+            if not target.is_file():
+                continue
+        used.add(name)
+        thumbs[row["name"]] = name
+    for stale in target_dir.glob("*.jpg"):
+        if stale.name not in used:
+            stale.unlink(missing_ok=True)
+    return thumbs
+
+
 def write_outputs(snapshot: dict, out_dir: Path, refresh: int) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
+    thumbs = make_thumbnails(snapshot, out_dir)
     (out_dir / "SYNC_STATUS.md").write_text(markdown(snapshot, refresh), encoding="utf-8")
-    (out_dir / "SYNC_STATUS.html").write_text(html_page(snapshot, refresh), encoding="utf-8")
+    (out_dir / "SYNC_STATUS.html").write_text(html_page(snapshot, refresh, thumbs), encoding="utf-8")
+    (out_dir / "MODELS_EVAL.html").write_text(
+        html_page(snapshot, refresh, thumbs, page="models"), encoding="utf-8",
+    )
     (out_dir / "SYNC_STATUS.json").write_text(json.dumps(snapshot, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     print(f"[sync_status] {snapshot['generated_at']} -> {out_dir / 'SYNC_STATUS.md'}", flush=True)
 
@@ -1841,6 +3613,16 @@ def main() -> int:
                         help="LeRobot ModelScope repo; default MS_LEROBOT_REPO_ID or <repo_id>-Lerobot")
     parser.add_argument("--model_repo_id", default=None,
                         help="trained-model ModelScope repo; default MS_MODEL_REPO_ID or <owner>/RoboSafeJanus-Model")
+    parser.add_argument("--model_local_dir", default=str(DEFAULT_MODEL),
+                        help="local trained-model dir, mirrors the model repo")
+    parser.add_argument("--eval_dir", default=str(DEFAULT_EVAL),
+                        help="local evaluation results dir")
+    parser.add_argument("--eval_layout_dir", default=str(DEFAULT_LAYOUT),
+                        help="frozen eval layouts dir <benchmark>/<config>; default Assets/Eval_Layout/RoboDojo/arx_x5")
+    parser.add_argument("--eval_seed", type=int, default=0,
+                        help="eval layout seed subdirectory (default: 0)")
+    parser.add_argument("--eval_num", type=int, default=50,
+                        help="layouts required per task (default: 50)")
     parser.add_argument("--repo_type", default="dataset", choices=("dataset", "model"))
     parser.add_argument("--prefix", default=REMOTE_PREFIX)
     parser.add_argument("--no_remote", action="store_true", help="skip ModelScope")
@@ -1852,6 +3634,9 @@ def main() -> int:
 
     local_dir = Path(args.data_dir).resolve()
     lerobot_dir = Path(args.lerobot_dir).resolve()
+    model_local_dir = Path(args.model_local_dir).resolve()
+    eval_dir = Path(args.eval_dir).resolve()
+    layout_dir = Path(args.eval_layout_dir).absolute()
     out_dir = Path(args.out_dir).resolve()
     repo_id = None if args.no_remote else (args.repo_id or infer_repo_id(local_dir))
     lerobot_repo_id = None
@@ -1876,9 +3661,11 @@ def main() -> int:
         with build_lock:
             snapshot = build_snapshot(
                 local_dir, lerobot_dir, repo_id, args.repo_type, args.prefix,
-                lerobot_repo_id, model_repo_id,
+                lerobot_repo_id, model_repo_id, model_local_dir, eval_dir,
+                layout_dir, args.eval_seed, args.eval_num,
             )
             write_outputs(snapshot, out_dir, refresh)
+            StatusRequestHandler.snapshot = snapshot
             return snapshot
 
     server = None
@@ -1887,8 +3674,11 @@ def main() -> int:
         StatusRequestHandler.job_config = {
             "repo_id": repo_id,
             "lerobot_repo_id": lerobot_repo_id,
+            "model_repo_id": model_repo_id,
             "local_dir": local_dir,
             "lerobot_dir": lerobot_dir,
+            "model_local_dir": model_local_dir,
+            "eval_dir": eval_dir,
             "out_dir": out_dir,
             "rebuild": rebuild,
         }

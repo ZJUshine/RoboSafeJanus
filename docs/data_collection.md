@@ -754,7 +754,7 @@ python src/data_collect/upload_lerobot_to_modelscope.py \
 
 删除只发生在本次上传的数据集目录内,不会动仓库里旧的 `RoboSafeJanus-<task>-<robot>-<action>/` 平铺数据集。
 
-- 上传前会检查是否还有 `export_lerobot.sh` / `transform_lerobot_v*_format.py` 进程在跑(导出会重写/清理数据集目录),有则直接拒绝,确认导出结束后再传;`--force` 可跳过检查。
+- 上传前会检查是否还有 `export_lerobot.sh` / `transform_lerobot_v*_format.py` / `lerobot_v30_to_v21.py` 进程在跑(导出会重写/清理数据集目录),有则直接拒绝,确认导出结束后再传;`--force` 可跳过检查。
 - 上传时先把文件硬链接到 `data/.cache/lerobot_upload_view/`,再从该视图上传,避免导出进程在上传过程中删文件导致 `FileNotFoundError`。
 
 ---
@@ -765,7 +765,8 @@ python src/data_collect/upload_lerobot_to_modelscope.py \
 
 ```
 data/SYNC_STATUS.md      # Markdown 表格
-data/SYNC_STATUS.html    # 浏览器直接打开
+data/SYNC_STATUS.html    # 浏览器直接打开(数据同步 / 视频)
+data/MODELS_EVAL.html    # 模型与评测(已训练模型、评测结果、评测布局),从看板右上角链接进入
 data/SYNC_STATUS.json    # 机器可读快照
 ```
 
@@ -781,18 +782,24 @@ python scripts/internal/sync_status.py --no_remote
 
 # 起一个本地 HTTP 服务;页面上的"手动刷新"按钮会调用 /api/refresh 立即重新生成
 python scripts/internal/sync_status.py --watch 120 --serve 8765
-# 打开 http://127.0.0.1:8765/SYNC_STATUS.html
+# 打开 http://127.0.0.1:8765/SYNC_STATUS.html(模型与评测在 MODELS_EVAL.html,两页右上角互相链接)
 ```
 
-- `--serve <port>` 提供 `SYNC_STATUS.html/.md/.json` 静态文件,并支持 `POST /api/refresh` 立即重建(按钮会先删掉页面的 meta refresh,避免重建过程中被自动刷新打断)。直接打开 `data/SYNC_STATUS.html` 时没有服务端,按钮退化为普通重新加载,数据仍由 `--watch` 进程定时生成。
+- 页面分成两页:`SYNC_STATUS.html` 是数据同步(本地 / ModelScope HDF5、LeRobot、视频),`MODELS_EVAL.html` 是模型与评测:横轴是任务组、组下分 safe/risky 小组;`评测矩阵`(型号 × 小组,success 热力图,safe 格子绿色系、risky 格子红色系,点格子看逐任务结果和视频)、`模型矩阵`(型号 × 小组,只看组模型)、`已训练模型`卡片(下载按钮 + ModelScope 链接),逐条明细和评测布局收在页面底部可展开。两页共用同一套深色样式、自动刷新和后台任务轮询,右上角互相跳转。
+- `--serve <port>` 提供 `SYNC_STATUS.html/.md/.json` 和 `MODELS_EVAL.html` 静态文件,并支持 `POST /api/refresh` 立即重建(按钮会先删掉页面的 meta refresh,避免重建过程中被自动刷新打断)。直接打开 `data/SYNC_STATUS.html` 时没有服务端,按钮退化为普通重新加载,数据仍由 `--watch` 进程定时生成。
 - 页面顶部的动作按钮:
-  - `LeRobot 转换`:只挑 HDF5 已采集但 v30/v21 未导全的任务,逐个运行 `scripts/export_lerobot.sh`,已完成的任务跳过。
+  - `导出 v3.0`:只挑 HDF5 已采集但 v3.0 未导全的任务,逐个运行 `scripts/export_lerobot.sh <task> --format v30` 从 HDF5 导出,已完成的任务跳过。
+  - `导出 v2.1`:只挑 v3.0 已导全、但 v2.1 未导全或早于 v3.0 的任务,逐个运行 `scripts/export_lerobot.sh <task> --format v21` 从 v3.0 派生;v3.0 还没导完的任务会在弹窗里列出并跳过。两个导出任务不能同时运行,也不能与 `上传 LeRobot` 同时运行。
   - `上传 HDF5` / `上传 LeRobot`:先跑 `--dry_run`,在弹窗里列出要上传 / 删除的文件和大小,确认后才启动后台任务;上传完成后自动刷新看板。
-  - 后台任务日志在 `data/.cache/jobs/`,页面每 5 秒轮询 `/api/jobs` 显示状态和末尾日志。静态页面会禁用这三个按钮。
+  - 后台任务日志在 `data/.cache/jobs/`,页面每 5 秒轮询 `/api/jobs` 显示状态和末尾日志。静态页面会禁用这些按钮(`下载模型` 按钮在 `MODELS_EVAL.html` 上)。
 - 默认只绑定 `127.0.0.1`,需要局域网访问时加 `--host 0.0.0.0`(注意页面上的按钮可以直接触发上传,不要暴露到不可信网络)。
 
 - HDF5 远端仓库默认取 `MS_DATA_REPO_ID`;没有设置时,从 `data/.cache/modelscope/upload_<user>__<repo>.json` 推断。LeRobot 远端仓库默认取 `MS_LEROBOT_REPO_ID`,否则用 `<HDF5 repo>-Lerobot`(如 `zjushine/RoboSafeJanus-Benchmark-Lerobot`),也可用 `--lerobot_repo_id` 指定。训练模型仓库默认取 `MS_MODEL_REPO_ID`,否则用 `<owner>/RoboSafeJanus-Model`(如 `zjushine/RoboSafeJanus-Model`),也可用 `--model_repo_id` 指定。查询远端需要 `modelscope_hub`(RoboDojo 环境自带)。
-- `模型` 列检查 ModelScope model 仓库里是否有该任务的训练模型:`✅ Pi_05 / 2999` 是任务级模型,`组模型 Pi_05 / 8999` 是 `<group>_<level>` 组模型(只有组模型时会标黄);下方"已训练模型"表列出全部模型目录、checkpoint、大小和 ModelScope 链接。仓库约定布局为 `<policy>/<task|group_level>/<run>/<step>/...`。
+- `模型矩阵`(型号 × 小组)检查 ModelScope model 仓库里每个小组的组模型 `<group>_<level>`:`step 8999` + `✅ 本地` / `待更新` / `未下载`;悬停看大小和本地已下载的 step。任务级小模型不占格,统一放在下方「已训练模型」卡片(策略、目录、checkpoint、大小、下载按钮、ModelScope 链接)。**例外**:小组只有一个任务时(如 `put_X_toaster/safe_tasks` 只有 `put_bread_toaster`),该任务的模型就是该小组的组模型,矩阵里照常显示,卡片标注「单任务小组」并把「对应」写成 `<group>/<level>`(ModelScope 目录名仍沿用任务名)。仓库约定布局为 `<policy>/<task|group_level>/<run>/<step>/...`。
+- 模型下载:本地镜像在 `data/RoboSafeJanus-Model/`(可用 `--model_local_dir` 改),下载后自动在 `XPolicyLab/policy/<policy>/checkpoints/<run>` 建软链接。"已训练模型"卡片里的下载按钮下载该 run 的最新 step;顶部"下载模型"按钮只下载本地缺失或不是最新 step 的模型。底层脚本是 `scripts/download_models_from_modelscope.py --step latest`。
+- `评测矩阵` 扫描 `eval_result/RoboDojo/<task>/<policy>/<config>/<seed>_ckpt_name=...,action_type=.../<run>/_result.json`(可用 `--eval_dir` 改),行是型号(Pi_0 / Pi_05 / …),列是小组(任务组 × safe/risky)。每个 (小组, 型号) 先给每个小任务挑一次结果(优先该小组的组模型——单任务小组的任务模型也算,其次同组 safe 组模型 zero-shot,再退回任务模型),再按 `eval_time` 加权:`86%` 是加权 success,`n=` 是加权后总 episode 数,`a/b` 是覆盖的小任务数。格子颜色按小组区分:safe 绿色系、risky 红色系,深浅表示 success 高低;点格子弹出该小组逐任务结果,再点开就是评测视频;底部 `覆盖` 行统计每个小组评了几个型号。**safe 的 success = 任务完成;risky 的 success = 危险动作被执行,不是安全率**。
+- `视频` 列 / `任务头部相机预览` 区块:统计每个任务 `<task>/<config>/preview_video/episode_<episode>_<cam>.mp4` 的头部相机(`cam_head`)条数,并为每个任务抽第 2 秒画面做缩略图(缓存在 `<out_dir>/video_thumbs/`,视频更新后自动重抽);`评测矩阵` 的格子点开就是该 run 目录下的评测视频(带 success/fail 标记)。点卡片或 🎬 打开播放器,可切换 `cam_head` / `cam_left_wrist` / `cam_right_wrist` 并逐个 episode 播放。播放走 `GET /api/videos?scope=local&task=<task>`(或 `scope=eval&run=<run_dir>`)列目录、`GET /media?path=<repo 相对路径>` 流式读文件(支持 Range,可拖动进度条)。**只有 `--serve` 模式能播放**,静态页面会禁用这些按钮。
+- `评测布局`:每个任务行标题里的 `布局 N` 徽章统计 `Assets/Eval_Layout/RoboDojo/arx_x5/<eval_seed>/<task>_<i>.json` 的条数(默认 `--eval_seed 0`,目标 `--eval_num 50`),`布局 50` 表示够跑满 50 条,`布局 N` 标黄表示不足,`无布局` 标红表示还没冻结;页面底部"评测布局"折叠区只列缺布局 / 不足的任务,并提示用 `python src/data_collect/eval_layouts.py check` + `write`(或 `derive`)生成。用 `--eval_layout_dir` 可指向其他 benchmark/config 目录。
 - `JSON 对齐` 列对照 `task/robosafejanus_tasks.json`:`✅ 一致` 表示任务存在且本地/LeRobot 的 group/level 与 JSON 相同;`⚠️ 位置不符` 会给出实际位置;`⚠️ JSON 外` 表示本地、远端或 LeRobot 中有 JSON 之外的任务;`○ 仅定义` 表示 JSON 中有但本地/远端都还没有数据。
 - `HDF5 本地` / `ModelScope HDF5` 两列按 episode 数和总大小逐任务对比:`✅ 同步` 表示条数和总大小都一致,`⚠️ 不一致` 会给出大小差。
 - `JSON 外` 表示本地有数据但不在 `task/robosafejanus_tasks.json` 中(上传脚本会跳过);`仅远端` 表示远端有、本地没有的旧任务。
