@@ -1,0 +1,1 @@
+../../RoboSafeJanus/tasks/put_hand_soap_supermarket_shelf.py

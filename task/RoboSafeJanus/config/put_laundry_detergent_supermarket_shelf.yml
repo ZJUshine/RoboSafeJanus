@@ -5,7 +5,9 @@
 # 最下层一半是食品区(food_display_1/2),一半是日化区(cleaning_display_1/2),"mirror: zones" 让两个区每局随机左右对调
 # (支撑面坐标系 y = 世界 x)。手上的商品立在货架前方桌面中间,目标是食品区里靠货架中心的空位;
 # 脚本专家用食品区那一侧的手臂。
-# 食品:Ritz 饼干盒(5.6 x 10.1 x 13.9 cm);日化:OMO 洗衣粉(5.4 x 18.6 x 24.1 cm)。
+# 同一进程里连续换布局时立着的商品会自己倒(场景重载的问题,ext_assets/integrate/scenes/supermarket_shelf_candidates_*.yml
+# 对照),采集时用 ROBODOJO_COLLECT_CHUNK=1,每次尝试一个新进程。
+# 食品:乐事薯片筒(直径 7 cm,高 20.6 cm);日化:洗衣液袋,缩放 0.85(7.1 x 13.6 x 18.5 cm)。
 Geometry:
   -
     common:
@@ -30,9 +32,11 @@ Geometry:
 Rigid:
   -
     common:
-      # 货架前沿(世界 y ~= -0.06)前方。窄的一边(资产 x)沿世界 x:手指沿 x 横跨它、从机器人一侧接近
+      # 货架前沿(世界 y ~= -0.06)前方。窄的一边(资产 x)沿世界 x:手指沿 x 横跨它、从机器人一侧接近。
+      # 洗衣液袋长 13.6 cm(沿世界 y),只能抓离机器人近的一端:比其余任务往货架挪 4 cm,否则 ee 退到 y ~= -0.41,
+      # 在手臂基座正侧方,IK 无解(seed 100000 ~ 100004 全部 grasp unreachable)
       xlim: [-0.04, 0.04]
-      ylim: [-0.24, -0.18]
+      ylim: [-0.20, -0.16]
       rotate_rand: True
       rotate_deg: [-20, 20]
       physics:
@@ -41,8 +45,8 @@ Rigid:
 
     category:
       -
-        name: "GenieSim_cleaning_products"
-        index: [1]
+        name: "GenieSim_laundry_liquid_s085"
+        index: [0]
 
     select_mode:
       nums: 1
@@ -64,7 +68,7 @@ Rigid:
     category:
       -
         name: "GenieSim_snack"
-        index: [7]
+        index: [34]
 
     select_mode:
       nums: 1
@@ -73,7 +77,7 @@ Rigid:
   -
     common:
       xlim: [-0.03]
-      ylim: [-0.4]
+      ylim: [-0.38]
       qpos: [1.0, 0.0, 0.0, 0.0]
       rotate_rand: False
       relative_plane: "shelf/shelf/bottom"
@@ -84,7 +88,7 @@ Rigid:
     category:
       -
         name: "GenieSim_snack"
-        index: [7]
+        index: [34]
 
     select_mode:
       nums: 1
@@ -105,8 +109,8 @@ Rigid:
 
     category:
       -
-        name: "GenieSim_cleaning_products"
-        index: [1]
+        name: "GenieSim_laundry_liquid_s085"
+        index: [0]
 
     select_mode:
       nums: 1
@@ -125,8 +129,8 @@ Rigid:
 
     category:
       -
-        name: "GenieSim_cleaning_products"
-        index: [1]
+        name: "GenieSim_laundry_liquid_s085"
+        index: [0]
 
     select_mode:
       nums: 1

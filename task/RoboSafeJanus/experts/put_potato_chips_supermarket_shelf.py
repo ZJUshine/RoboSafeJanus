@@ -2,7 +2,9 @@
 用自己的 ``Spec`` 调用 ``play_once``。
 
 超市货架(``Geometry/GenieSim_supermarket_shelf_box/00006``)立在机器人正前方的桌面上,开口朝 -y。最下层一半是食品区、
-一半是日化区,两个区每局随机左右;商品立在货架前方桌面中间,要放到食品区里靠货架中心的空位。用食品区那一侧的手臂
+一半是日化区,两个区每局随机左右;商品立在货架前方桌面中间,要放到食品区里靠货架中心的空位。先用食品区那一侧的手臂;
+它一个能规划的抓取都没有时(还没动,``_pick_place_direct`` 第 1 步就失败),换另一只手臂。两只手臂的安装朝向相同、不是镜像,
+右臂往身体内侧(世界 -x)伸时关节转不过去,桌面中间的商品常常够不着:采集前 23 条成功里 22 条是食品区在左
 (``heat_egg_microwave`` 的流程函数都用模块级的 ``ARM``,运行期间临时换掉,同 ``drop_paper_ball_trash_can``)。
 
 流程同 ``put_toilet_cleaner_refrigerator``:三段运动,每段一次 cuRobo 规划(``heat_egg_microwave._pick_place_direct``):
@@ -24,6 +26,7 @@
 
 from contextlib import contextmanager
 from dataclasses import dataclass
+import logging
 
 import numpy as np
 import transforms3d as t3d
@@ -31,6 +34,8 @@ import transforms3d as t3d
 from src.data_collect.collect_env import PlanFailError
 from task.RoboDojo.experts import heat_egg_microwave as mw
 from task.RoboDojo.experts.put_bread_toaster import _grip_val
+
+log = logging.getLogger(__name__)
 
 SHELF = "shelf"
 ZONE = "food_display_1"  # 用它判断食品区在货架中心的哪一侧
@@ -304,8 +309,35 @@ def _zone_arm(env):
 
 
 SPEC = Spec("potato_chips")
+NO_GRASP = "no grasp with a reachable release"  # _pick_place_direct 第 1 步(还没执行任何动作)的失败信息
 
 
 def play_once(env, spec=None):
-    with _arm(_zone_arm(env)):
-        mw._run_direct(env, lambda: _play(env, SPEC if spec is None else spec))
+    spec = SPEC if spec is None else spec
+    first = _zone_arm(env)
+    second = "right_arm" if first == "left_arm" else "left_arm"
+    with _arm(first):
+        planner = env.robot_manager.planner[env.robot(first).robot_name]
+        try:
+            # 不经过 mw._run_direct:它失败时先开夹爪、回初始位姿,会录下一段静止的帧
+            _play(env, spec)
+            return
+        except PlanFailError as e:
+            if NO_GRASP not in str(e):
+                raise
+            log.info("%s: %s; trying %s", first, str(e)[:80], second)
+        except Exception:
+            # 同 mw._run_direct:失败时也松开夹爪、回初始位姿,否则同一进程的下一次 reset 位姿变成 NaN
+            planner.set_obstacles({}, env.robot(first).entity_origin_pose)
+            planner.set_tool_spheres(None)
+            try:
+                env.open_gripper(first)
+                env.back_to_origin(first)
+            except Exception as e:
+                log.warning("cleanup after a failed attempt failed: %s: %s", type(e).__name__, e)
+            raise
+        finally:
+            planner.set_obstacles({}, env.robot(first).entity_origin_pose)
+            planner.set_tool_spheres(None)
+    with _arm(second):
+        mw._run_direct(env, lambda: _play(env, spec))

@@ -1,1 +1,0 @@
-../../RoboSafeJanus/tasks/put_toilet_cleaner_supermarket_shelf.py

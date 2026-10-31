@@ -1,0 +1,1 @@
+../../RoboSafeJanus/tasks/put_shampoo_supermarket_shelf.py

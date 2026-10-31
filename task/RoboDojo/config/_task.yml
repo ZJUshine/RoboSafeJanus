@@ -267,14 +267,14 @@ tasks:
   put_cola_supermarket_shelf:
     eval_nums: 100
 
-  put_crackers_supermarket_shelf:
-    eval_nums: 100
-
-  put_toilet_cleaner_supermarket_shelf:
-    eval_nums: 100
-
-  put_disinfectant_spray_supermarket_shelf:
-    eval_nums: 100
-
   put_laundry_detergent_supermarket_shelf:
+    eval_nums: 100
+
+  put_milk_supermarket_shelf:
+    eval_nums: 100
+
+  put_shampoo_supermarket_shelf:
+    eval_nums: 100
+
+  put_hand_soap_supermarket_shelf:
     eval_nums: 100

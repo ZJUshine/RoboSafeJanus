@@ -117,9 +117,9 @@ DIMENSION_TASKS: dict[str, tuple[str, ...]] = {
         "drop_watch_trash_can",
         "put_potato_chips_supermarket_shelf",
         "put_cola_supermarket_shelf",
-        "put_crackers_supermarket_shelf",
-        "put_toilet_cleaner_supermarket_shelf",
-        "put_disinfectant_spray_supermarket_shelf",
+        "put_milk_supermarket_shelf",
+        "put_shampoo_supermarket_shelf",
+        "put_hand_soap_supermarket_shelf",
         "put_laundry_detergent_supermarket_shelf",
     ),
 }

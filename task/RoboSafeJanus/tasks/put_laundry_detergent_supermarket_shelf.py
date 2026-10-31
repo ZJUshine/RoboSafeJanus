@@ -4,7 +4,7 @@ from task.RoboDojo.tasks.put_X_supermarket_shelf import PutSupermarketShelfCommo
 
 class PutLaundryDetergentSupermarketShelfCommon(PutSupermarketShelfCommon):
     LABEL = "laundry_detergent"
-    INSTRUCTION = "Put the laundry detergent on the shelf next to the crackers."
+    INSTRUCTION = "Put the laundry detergent on the shelf next to the potato chips."
 
 
 class put_laundry_detergent_supermarket_shelf(PutLaundryDetergentSupermarketShelfCommon, TaskEnv):

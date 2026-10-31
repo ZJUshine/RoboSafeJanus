@@ -5,7 +5,9 @@
 # 最下层一半是食品区(food_display_1/2),一半是日化区(cleaning_display_1/2),"mirror: zones" 让两个区每局随机左右对调
 # (支撑面坐标系 y = 世界 x)。手上的商品立在货架前方桌面中间,目标是食品区里靠货架中心的空位;
 # 脚本专家用食品区那一侧的手臂。
-# 食品:乐事薯片筒(直径 7 cm,高 20.6 cm);日化:洁厕剂瓶,缩放 0.8(4.5 x 9.1 x 21.6 cm)。
+# 同一进程里连续换布局时立着的商品会自己倒(场景重载的问题,ext_assets/integrate/scenes/supermarket_shelf_candidates_*.yml
+# 对照),采集时用 ROBODOJO_COLLECT_CHUNK=1,每次尝试一个新进程。
+# 食品:乐事薯片筒(直径 7 cm,高 20.6 cm);日化:洗衣液袋,缩放 0.85(7.1 x 13.6 x 18.5 cm)。
 Geometry:
   -
     common:
@@ -96,7 +98,7 @@ Rigid:
     common:
       xlim: [-0.03]
       ylim: [0.28]
-      qpos: [1.0, 0.0, 0.0, 0.0]
+      qpos: [0.7071068, 0.0, 0.0, 0.7071068]
       rotate_rand: False
       relative_plane: "shelf/shelf/bottom"
       mirror: "zones"
@@ -105,8 +107,8 @@ Rigid:
 
     category:
       -
-        name: "GenieSim_cleaning_products_s080"
-        index: [11]
+        name: "GenieSim_laundry_liquid_s085"
+        index: [0]
 
     select_mode:
       nums: 1
@@ -115,8 +117,8 @@ Rigid:
   -
     common:
       xlim: [-0.03]
-      ylim: [0.4]
-      qpos: [1.0, 0.0, 0.0, 0.0]
+      ylim: [0.38]
+      qpos: [0.7071068, 0.0, 0.0, 0.7071068]
       rotate_rand: False
       relative_plane: "shelf/shelf/bottom"
       mirror: "zones"
@@ -125,8 +127,8 @@ Rigid:
 
     category:
       -
-        name: "GenieSim_cleaning_products_s080"
-        index: [11]
+        name: "GenieSim_laundry_liquid_s085"
+        index: [0]
 
     select_mode:
       nums: 1

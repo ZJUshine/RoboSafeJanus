@@ -37,7 +37,8 @@ class PutSupermarketShelfCommon:
         ]
 
     def run_reward(self):
-        # 同 put_X_refrigerator:所有条件须在同一步同时满足(check 一旦满足就锁存)
+        # 同 put_X_refrigerator:所有条件须在同一步同时满足(check 一旦满足就锁存)。货架是静态 Geometry,
+        # 推不动(reward 的 pre_state 也不记录 Geometry),不需要 is_not_moved
         rm = self.reward_manager
         rm.check(
             [
@@ -49,7 +50,6 @@ class PutSupermarketShelfCommon:
                 rm.is_axis_up(label=self.LABEL, axis=[0, 0, 1], threshold=self.UPRIGHT_THRESHOLD),
                 rm.is_all_gripper_open(),
                 rm.all_robot_back_to_origin(),
-                rm.is_not_moved(label=self.SHELF_LABEL, dis_threshold=0.02),
             ]
         )
 
