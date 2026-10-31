@@ -689,6 +689,10 @@ class SceneManager:
                     delete_prim(obj.prim_path)
         else:
             if isinstance(obj, RigidObject) or isinstance(obj, GeometryObject):
+                # destroy() only hides the prim and disables collision on its root, while the colliders sit on
+                # child prims and keep colliding; move it far away first so the next layout's objects, spawned at
+                # nearby poses, do not overlap the invisible stale ones.
+                obj.relocate_offscreen()
                 obj.destroy()
             elif isinstance(obj, GarmentObject):
                 if hasattr(obj, "usd_prim_path") and is_prim_path_valid(obj.usd_prim_path):
