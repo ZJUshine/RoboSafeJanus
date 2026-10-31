@@ -85,7 +85,7 @@ def running_exports() -> list[str]:
     """正在运行的 LeRobot 转换进程(导出会重写/清理数据集目录)。"""
     try:
         result = subprocess.run(
-            ["pgrep", "-af", r"export_lerobot\.sh|transform_lerobot_v(30|21)_format\.py"],
+            ["pgrep", "-af", r"export_lerobot\.sh|transform_lerobot_v(30|21)_format\.py|lerobot_v30_to_v21\.py"],
             capture_output=True, text=True,
         )
     except OSError:

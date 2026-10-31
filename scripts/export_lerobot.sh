@@ -2,11 +2,16 @@
 # 把 data/RoboSafeJanus-Benchmark 按任务转换成 LeRobot,写到与原数据同样分组的目录:
 #   data/RoboSafeJanus-Benchmark-Lerobot/v30/<group>/<safe_tasks|risky_tasks>/<task>/  (v3.0)
 #   data/RoboSafeJanus-Benchmark-Lerobot/v21/<group>/<safe_tasks|risky_tasks>/<task>/  (v2.1)
-#   bash scripts/export_lerobot.sh [task_glob] [--format v30|v21|both] [传给转换器的额外参数]
+#   bash scripts/export_lerobot.sh [task_glob] [--format v30|v21|both] [传给 v3.0 转换器的额外参数]
 # 例:
 #   bash scripts/export_lerobot.sh                                   # 全部已采集任务,两种格式
-#   bash scripts/export_lerobot.sh 'pour_water_*' --format v21       # 只导 v2.1
+#   bash scripts/export_lerobot.sh 'pour_water_*' --format v21       # 只从已有 v3.0 派生 v2.1
 #   bash scripts/export_lerobot.sh 'pour_water_*' --format v30 --max_episode 50
+#
+# v3.0 从 HDF5 导出(XPolicyLab/scripts/transform_lerobot_v30_format.py);v2.1 不再从 HDF5
+# 重新导出,而是由 src/data_collect/lerobot_v30_to_v21.py 从同一任务的 v3.0 派生
+# (按帧切片 + CRF 30 重编码,比直接导出快一个数量级),所以 --format v21 要求 v3.0 已导出。
+# 额外参数只传给 v3.0 转换器。
 #
 # 两种格式分别在独立的 conda 环境里运行(环境变量可覆盖):
 #   ROBOSAFEJANUS_LEROBOT_V30_ENV (默认 xpolicy_lerobot_v30,兼容旧的 ROBOSAFEJANUS_LEROBOT_ENV)
@@ -82,6 +87,10 @@ for fmt in "${formats[@]}"; do
   fi
 done
 
+if [[ "${formats[*]}" == "v21" ]] && (( ${#extra_args[@]} )); then
+  echo "[export_lerobot] --format v21 从 v3.0 派生,忽略额外参数: ${extra_args[*]}" >&2
+fi
+
 first_env=${env_name_v30}
 [[ "${formats[0]}" == "v21" ]] && first_env=${env_name_v21}
 conda activate "${first_env}"
@@ -95,23 +104,31 @@ for task_link in "data/${flat_bench}"/${task_glob}; do
   task_dir=$(python src/data_collect/benchmark_layout.py data/RoboSafeJanus-Benchmark "${task_name}")
   group_rel=$(dirname "${task_dir#data/RoboSafeJanus-Benchmark/}")
 
+  v30_dir="${out_root_v30}/${group_rel}/${task_name}"
   for fmt in "${formats[@]}"; do
     if [[ "${fmt}" == "v30" ]]; then
-      env_name=${env_name_v30}
-      out_root=${out_root_v30}
-      converter="XPolicyLab/scripts/transform_lerobot_v30_format.py"
+      mkdir -p "$(dirname "${v30_dir}")"
+      echo "[export_lerobot] v30 ${task_name} -> ${v30_dir}"
+      conda activate "${env_name_v30}"
+      if ! HF_LEROBOT_HOME="$(dirname "${v30_dir}")" python XPolicyLab/scripts/transform_lerobot_v30_format.py \
+          "${flat_bench}.${task_name}.${env_cfg_type}" --repo_id "${task_name}" "${extra_args[@]}"; then
+        failed+=("v30:${task_name}")
+        # v3.0 失败时不能用残缺的 v3.0 派生 v2.1
+        break
+      fi
     else
-      env_name=${env_name_v21}
-      out_root=${out_root_v21}
-      converter="XPolicyLab/scripts/transform_lerobot_v21_format.py"
-    fi
-    group_dir="${out_root}/${group_rel}"
-    mkdir -p "${group_dir}"
-    echo "[export_lerobot] ${fmt} ${task_name} -> ${group_dir}/${task_name}"
-    conda activate "${env_name}"
-    if ! HF_LEROBOT_HOME="${group_dir}" python "${converter}" \
-        "${flat_bench}.${task_name}.${env_cfg_type}" --repo_id "${task_name}" "${extra_args[@]}"; then
-      failed+=("${fmt}:${task_name}")
+      v21_dir="${out_root_v21}/${group_rel}/${task_name}"
+      if [[ ! -f "${v30_dir}/meta/info.json" ]]; then
+        echo "[export_lerobot] v21 ${task_name}: 没有 v3.0 导出 ${v30_dir},先导 v3.0" >&2
+        failed+=("v21:${task_name}")
+        continue
+      fi
+      mkdir -p "$(dirname "${v21_dir}")"
+      echo "[export_lerobot] v21 ${task_name} <- ${v30_dir}"
+      conda activate "${env_name_v21}"
+      if ! python src/data_collect/lerobot_v30_to_v21.py "${v30_dir}" "${v21_dir}"; then
+        failed+=("v21:${task_name}")
+      fi
     fi
   done
 done

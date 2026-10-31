@@ -47,6 +47,7 @@
 | `src/data_collect/upload_to_hf.py`                                | 把 `data/RoboSafeJanus-Benchmark` 同步到 HF 私有 dataset 仓库         | 一般不改               |
 | `src/data_collect/upload_to_modelscope.py`                        | 把 `data/RoboSafeJanus-Benchmark` 同步到 ModelScope 私有 dataset 仓库 | 一般不改               |
 | `src/data_collect/upload_lerobot_to_modelscope.py`                | 把 `data/RoboSafeJanus-Benchmark-Lerobot` 的 v30/v21 导出同步到 ModelScope 私有 dataset 仓库 | 一般不改               |
+| `src/data_collect/lerobot_v30_to_v21.py`                          | 从同任务的 LeRobot v3.0 导出派生 v2.1(`export_lerobot.sh` 调用)                | 一般不改               |
 | `src/data_collect/upload_common.py`                               | 上传共用:本地 → 远端 `RoboSafeJanus/<task>/` 路径映射、dry-run 计划 | 一般不改               |
 | `src/data_collect/sync_instructions.py`                           | 把已采集 hdf5 的 `instruction` 原地改成 `robosafejanus_tasks.json` 中的指令 | 确认一组任务的指令后   |
 | `scripts/internal/task_success_spec.py`                           | 从 `run_reward` 提取成功判定,写进 `robosafejanus_tasks.json` 的 `success`(含每个判定的 `desc`,格式见脚本说明) | 改了任务的 `run_reward` 后 |
@@ -710,14 +711,14 @@ ls $TASK_DIR/<config>/data | wc -l
 
 ## 8.7 导出 LeRobot(`scripts/export_lerobot.sh`)
 
-把 `data/RoboSafeJanus-Benchmark` 按任务逐个转换成 LeRobot v3.0 和/或 v2.1(XPolicyLab 官方转换器 `XPolicyLab/scripts/transform_lerobot_v30_format.py` / `transform_lerobot_v21_format.py`,键与 RoboDojo 发布的 LeRobot 导出相同),输出与原数据同样分组:
+把 `data/RoboSafeJanus-Benchmark` 按任务逐个转换成 LeRobot v3.0 和/或 v2.1,键与 RoboDojo 发布的 LeRobot 导出相同。v3.0 由 XPolicyLab 官方转换器 `XPolicyLab/scripts/transform_lerobot_v30_format.py` 从 HDF5 导出;v2.1 由 `src/data_collect/lerobot_v30_to_v21.py` 从同任务的 v3.0 派生,不再从 HDF5 重新导出。输出与原数据同样分组:
 
 ```
 data/RoboSafeJanus-Benchmark-Lerobot/v30/<group>/<level>/<task>/{data,meta,videos}   # v3.0,repo_id = <task>
 data/RoboSafeJanus-Benchmark-Lerobot/v21/<group>/<level>/<task>/{data,meta,videos}   # v2.1,repo_id = <task>
 ```
 
-两种格式各自在独立 conda 环境中运行(v3.0 转换器依赖 LeRobot 0.4.4,v2.1 转换器依赖 0.3.3 的 API),不影响 Isaac Sim 的 `RoboDojo` 环境(一次性创建):
+两种格式各自在独立 conda 环境中运行(v3.0 转换器依赖 LeRobot 0.4.4,v2.1 派生要按 0.3.3 / 其 datasets 版本写元数据),不影响 Isaac Sim 的 `RoboDojo` 环境(一次性创建):
 
 ```bash
 conda create -y -n xpolicy_lerobot_v30 -c conda-forge --override-channels python=3.10 "ffmpeg>=7"
@@ -728,13 +729,15 @@ conda run -n xpolicy_lerobot_v21 pip install "lerobot==0.3.3" h5py pyyaml tqdm
 ```
 
 ```bash
-bash scripts/export_lerobot.sh                                  # 全部已采集任务,v3.0 + v2.1 都导
-bash scripts/export_lerobot.sh 'pour_water_*' --max_episode 50  # 按任务名 glob 选择;额外参数透传给转换器
-bash scripts/export_lerobot.sh 'pour_water_*' --format v21      # 只导 v2.1
+bash scripts/export_lerobot.sh                                  # 全部已采集任务,先导 v3.0 再派生 v2.1
+bash scripts/export_lerobot.sh 'pour_water_*' --max_episode 50  # 按任务名 glob 选择;额外参数透传给 v3.0 转换器
+bash scripts/export_lerobot.sh 'pour_water_*' --format v21      # 只从已有 v3.0 重新派生 v2.1
 bash scripts/export_lerobot.sh 'pour_water_*' --format v30      # 只导 v3.0
 ```
 
-- `--format` 可取 `v30` / `v21` / `both`,默认 `both`;`--format` 之外的参数原样透传给转换器。
+- `--format` 可取 `v30` / `v21` / `both`,默认 `both`;`--format` 之外的参数原样透传给 v3.0 转换器。`--format v21` 要求该任务的 v3.0 已导出,v3.0 失败时同一任务不会再派生 v2.1。
+- v2.1 派生:每个 episode 按整数帧号从 v3.0 的分块 mp4 切出,用与 `transform_lerobot_v21_format.py` 相同的参数(libsvtav1、CRF 30、g=2、yuv420p)重编码。`info.json` / `tasks.jsonl` / `episodes.jsonl` 与 parquet(含 schema 元数据)和直接从 HDF5 导出的完全一致;`episodes_stats.jsonl` 按 0.3.3 的方式计算,图像统计来自解码后的 v3.0 帧,与直接导出差约 1e-3。v3.0 是 CRF 18,重编码后相对 HDF5 原图的 PSNR 约低 0.5 dB(≈40 dB),体积与直接导出持平。100 条的任务约 1 分钟(直接导出约 40 分钟)。也可单独运行:`conda run -n xpolicy_lerobot_v21 python src/data_collect/lerobot_v30_to_v21.py <v30 任务目录> <v21 任务目录> [--workers N]`。
+- v2.1 依赖 v3.0:v3.0 重新导出(例如 HDF5 改了)后要再导一次 v2.1;同步看板会把 `meta/info.json` 早于 v3.0 的 v2.1 标为"早于 v3.0"。
 - 环境名可用 `ROBOSAFEJANUS_LEROBOT_V30_ENV` / `ROBOSAFEJANUS_LEROBOT_V21_ENV` 覆盖(v3.0 也兼容旧的 `ROBOSAFEJANUS_LEROBOT_ENV`);输出根目录默认 `data/RoboSafeJanus-Benchmark-Lerobot/v30` 和 `.../v21`,可用 `ROBOSAFEJANUS_LEROBOT_V30_ROOT` / `ROBOSAFEJANUS_LEROBOT_V21_ROOT` 覆盖。
 - 转换器只认 `data/<bench>/<task>/<config>/data` 三层结构,脚本先运行 `python src/data_collect/benchmark_layout.py --flat_view` 重建扁平软链接视图 `data/RoboSafeJanus-Benchmark-flat/<task>`,再以 bench 名 `RoboSafeJanus-Benchmark-flat` 读取;其他需要三层结构的 XPolicyLab 脚本也用这个视图。
 - 默认 `arx_x5`(`ROBOSAFEJANUS_LEROBOT_ENV_CFG` 可改)、每个任务最多 200 条(转换器的 `--max_episode` 默认值),视频 AV1。已存在的任务输出会被覆盖,`<task>_failed` 不导出。
