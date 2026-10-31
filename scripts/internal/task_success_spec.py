@@ -223,6 +223,12 @@ def describe_fn(fn: str, a: dict, cls: type, labels: dict[str, str]) -> str:
                 f"姿态偏差 ≤ {a['rot_threshold']}°")
     if fn == "is_not_moved":
         return f"{a['label']} 离开局开始时的位置 ≤ {a['dis_threshold']} m(没有被推动)"
+    if fn == "is_A_on_B_bottom":
+        return (f"{a['label_A']} 包围盒底面比 {a['label_B']} 包围盒底面高 {a.get('min_z_gap', 0.0)}–{a['max_z_gap']} m,"
+                f"且 {a['label_A']} 在 {a['label_B']} 的俯视投影内")
+    if fn in ("is_A_on_B_left", "is_A_on_B_right"):
+        side = "左" if fn == "is_A_on_B_left" else "右"
+        return f"{a['label_A']} 的原点在 {a['label_B']} 原点{side}侧 {a['x_threshold']} m 以外(世界 x 方向)"
     if fn == "is_lift":
         return f"{a['label']} 比开局时被抬高超过 {a['z_threshold']} m"
     if fn == "is_axis_up":
