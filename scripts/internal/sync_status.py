@@ -6,6 +6,7 @@ Writes three files under ``data/`` by default:
     data/SYNC_STATUS.md     human-readable Markdown table
     data/SYNC_STATUS.html   self-contained dashboard (auto-refreshes the page)
     data/MODELS_EVAL.html   models + evaluation page, linked from the dashboard
+    data/TASKS.html         task groups / tasks / instructions page
     data/SYNC_STATUS.json   machine-readable snapshot
 
 Usage::
@@ -16,6 +17,12 @@ Usage::
     python scripts/internal/sync_status.py --repo_id user/repo
     python scripts/internal/sync_status.py --lerobot_repo_id user/lerobot-repo
     python scripts/internal/sync_status.py --model_repo_id user/model-repo
+    python scripts/internal/sync_status.py --wandb_dir data/RoboSafeJanus-Wandb
+
+W&B runs live next to the checkpoints in the model repo
+(``<policy>/<task>/<run>/wandb/<run-dir>/``). The models page downloads them into
+``--wandb_dir`` and uploads them to the official W&B with ``wandb sync``; that needs
+``WANDB_API_KEY`` (or ``data/.cache/wandb/api_key``) and optionally ``--wandb_entity``.
 
 The HDF5 repository defaults to ``MS_DATA_REPO_ID``; if that is unset, it is
 inferred from ``data/.cache/modelscope/upload_<user>__<repo>.json``. The LeRobot
@@ -58,6 +65,9 @@ from src.data_collect.benchmark_layout import (  # noqa: E402
 DEFAULT_LOCAL = ROOT_DIR / DEFAULT_SAVE_DIR
 DEFAULT_LEROBOT = ROOT_DIR / "data" / "RoboSafeJanus-Benchmark-Lerobot"
 DEFAULT_MODEL = ROOT_DIR / "data" / "RoboSafeJanus-Model"
+DEFAULT_WANDB = ROOT_DIR / "data" / "RoboSafeJanus-Wandb"
+WANDB_API_KEY_FILE = ROOT_DIR / "data" / ".cache" / "wandb" / "api_key"
+WANDB_RUN_RE = re.compile(r"^(?:offline-)?run-\d{8}_\d{6}-[A-Za-z0-9]+$")
 DEFAULT_EVAL = ROOT_DIR / "eval_result"
 DEFAULT_LAYOUT = ROOT_DIR / "Assets" / "Eval_Layout" / "RoboDojo" / "arx_x5"
 DEFAULT_OUT = ROOT_DIR / "data"
@@ -197,7 +207,10 @@ CODE_DIRS = {
 }
 CODE_LABELS = {"impl": "实现", "config": "配置", "expert": "专家"}
 
-JOB_KINDS = ("export_v30", "export_v21", "upload_hdf5", "upload_lerobot", "download_model")
+JOB_KINDS = (
+    "export_v30", "export_v21", "upload_hdf5", "upload_lerobot",
+    "download_model", "download_wandb", "upload_wandb",
+)
 EXPORT_JOBS = {"v30": "export_v30", "v21": "export_v21"}
 JOB_LABELS = {
     "export_v30": "LeRobot v3.0 导出",
@@ -205,6 +218,8 @@ JOB_LABELS = {
     "upload_hdf5": "HDF5 上传",
     "upload_lerobot": "LeRobot 上传",
     "download_model": "模型下载",
+    "download_wandb": "W&B 数据下载",
+    "upload_wandb": "W&B 上传（官方）",
 }
 JOBS_LOCK = threading.Lock()
 JOBS: dict[str, dict] = {
@@ -574,29 +589,47 @@ def collect_models(
     repo_id: str | None,
     json_tasks: dict[str, tuple[str, str]],
     local_root: Path | None = None,
-) -> tuple[list[dict], str | None]:
+    wandb_root: Path | None = None,
+) -> tuple[list[dict], list[dict], str | None]:
     """扫描 ModelScope model 仓库。
 
     约定布局:``<policy>/<task|group_level>/<run>/<step>/...``。也接受更浅的
-    ``<policy>/<task>/<step>/...``。
+    ``<policy>/<task>/<step>/...``。训练机同时传上来的
+    ``<policy>/<task>/<run>/wandb/<run-dir>/...`` 单独汇总成 W&B 记录,不计入模型大小。
+
+    返回 ``(models, wandb_runs, error)``。
     """
     if not repo_id:
-        return [], "未配置模型仓库"
+        return [], [], "未配置模型仓库"
     try:
         from modelscope_hub import HubApi
     except ImportError:
-        return [], "未安装 modelscope_hub"
+        return [], [], "未安装 modelscope_hub"
     try:
         files = HubApi().list_repo_files(repo_id, "model", recursive=True)
     except Exception as error:  # noqa: BLE001 - 看板要能在远端异常时继续
-        return [], f"{type(error).__name__}: {error}"
+        return [], [], f"{type(error).__name__}: {error}"
 
     entries: dict[str, dict] = {}
+    wandb_entries: dict[tuple[str, str, str, str], dict] = {}
     for item in files:
         if getattr(item, "type", "blob") == "tree":
             continue
         parts = item.path.split("/")
         if len(parts) < 3:
+            continue
+        if "wandb" in parts:
+            index = parts.index("wandb")
+            if index >= 3 and len(parts) > index + 2:
+                policy, key, run = parts[:3]
+                run_dir = parts[index + 1]
+                wandb_entry = wandb_entries.setdefault(
+                    (policy, key, run, run_dir),
+                    {"policy": policy, "key": key, "run": run, "run_dir": run_dir,
+                     "files": 0, "size": 0},
+                )
+                wandb_entry["files"] += 1
+                wandb_entry["size"] += getattr(item, "size", 0) or 0
             continue
         policy, key = parts[0], parts[1]
         directory = f"{policy}/{key}"
@@ -663,7 +696,101 @@ def collect_models(
             "needs_download": bool(latest_step) and latest_step not in local_steps,
         })
     models.sort(key=lambda model: (model["policy"], model["key"]))
-    return models, None
+    return models, collect_wandb_runs(wandb_entries, wandb_root, models), None
+
+
+def wandb_api_key() -> str | None:
+    """W&B 官方凭证:优先 ``WANDB_API_KEY``,其次 ``data/.cache/wandb/api_key``。"""
+    key = os.environ.get("WANDB_API_KEY", "").strip()
+    if key:
+        return key
+    try:
+        key = WANDB_API_KEY_FILE.read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    return key or None
+
+
+def find_wandb_cli(venv_dir: Path | None = None) -> tuple[list[str], str]:
+    """返回 (wandb CLI 命令前缀, 说明);没有可用 CLI 时命令为空。"""
+    override = os.environ.get("WANDB_CLI")
+    if override:
+        return override.split(), f"WANDB_CLI={override}"
+    exe = shutil.which("wandb")
+    if exe:
+        return [exe], exe
+    venv = (venv_dir or (DEFAULT_WANDB.parent / ".cache" / "wandb" / "venv")) / "bin" / "wandb"
+    if venv.is_file():
+        return [str(venv)], str(venv)
+    if shutil.which("uv"):
+        return [], f"首次上传会用 uv 安装 wandb 到 {rel_path(venv.parent.parent)}"
+    return [], "没找到 wandb CLI(uv 也不可用),请先 pip install wandb"
+
+
+def collect_wandb_runs(
+    wandb_entries: dict[tuple[str, str, str, str], dict],
+    wandb_root: Path | None,
+    models: list[dict] | None = None,
+) -> list[dict]:
+    """把 ``<policy>/<task>/<run>/wandb/<run-dir>/`` 汇成 W&B 记录(含本地/上传状态)。
+
+    传了 ``models`` 时,模型仓库里没有 wandb 目录的 run 也会列出来(``has_wandb=False``),
+    这样能直接看出哪些训练没把 wandb 一起上传。
+    """
+    state_file = (wandb_root or DEFAULT_WANDB).parent / ".cache" / "wandb" / "synced.json"
+    state = load_json_cache(state_file)
+    runs = []
+    for (policy, key, run, run_dir), entry in sorted(wandb_entries.items()):
+        rel = f"{policy}/{key}/{run}/wandb/{run_dir}"
+        local_dir = (wandb_root or DEFAULT_WANDB) / policy / key / run / "wandb" / run_dir
+        local_files, local_bytes, local_mtime = dir_size(local_dir)
+        synced = state.get(rel) or {}
+        runs.append({
+            "policy": policy,
+            "key": key,
+            "run": run,
+            "run_dir": run_dir,
+            "path": rel,
+            "has_wandb": True,
+            "mode": "offline" if run_dir.startswith("offline-run-") else "online",
+            "files": entry["files"],
+            "size": entry["size"],
+            "local": {
+                "path": rel_path(local_dir),
+                "files": local_files,
+                "bytes": local_bytes,
+                "mtime": local_mtime,
+                "downloaded": local_files >= entry["files"] > 0,
+                "partial": 0 < local_files < entry["files"],
+            },
+            "uploaded": synced.get("synced_at"),
+            "url": synced.get("url", ""),
+            "state_file": rel_path(state_file),
+        })
+    seen = {(item["policy"], item["key"], item["run"]) for item in runs}
+    for model in models or []:
+        for run in model.get("runs") or []:
+            if (model["policy"], model["key"], run) in seen:
+                continue
+            seen.add((model["policy"], model["key"], run))
+            runs.append({
+                "policy": model["policy"],
+                "key": model["key"],
+                "run": run,
+                "run_dir": "",
+                "path": f'{model["policy"]}/{model["key"]}/{run}',
+                "has_wandb": False,
+                "mode": "—",
+                "files": 0,
+                "size": 0,
+                "local": {"path": "", "files": 0, "bytes": 0, "mtime": 0,
+                          "downloaded": False, "partial": False},
+                "uploaded": None,
+                "url": "",
+                "state_file": rel_path(state_file),
+            })
+    runs.sort(key=lambda item: (not item["has_wandb"], item["policy"], item["key"], item["run"]))
+    return runs
 
 
 def ckpt_model_key(ckpt: str) -> str:
@@ -714,13 +841,16 @@ def collect_eval_results(eval_dir: Path, json_tasks: dict[str, tuple[str, str]])
     def rank(item: dict) -> tuple:
         return (item["eval_time"] or 0, item["mtime"])
 
-    best: dict[tuple[str, str], dict] = {}
+    # 同一任务上不同 policy 可能用同名的 ckpt（如 Pi_0/Pi_05 都叫
+    # ``RoboSafeJanus-heat_X_microwave_safe_tasks-arx_x5-joint-0``），所以必须把 policy 计入 key，
+    # 否则两个 policy 的结果会互相覆盖，页面上只剩其中一个。
+    best: dict[tuple[str, str, str], dict] = {}
     for item in results:
-        key = (item["task"], item["ckpt"])
+        key = (item["task"], item["policy"], item["ckpt"])
         if key not in best or rank(item) > rank(best[key]):
             best[key] = item
     for item in results:
-        item["selected"] = best[(item["task"], item["ckpt"])] is item
+        item["selected"] = best[(item["task"], item["policy"], item["ckpt"])] is item
     return results
 
 
@@ -1072,6 +1202,49 @@ def download_models_runner(models: list[dict], cwd: Path):
     return run
 
 
+def download_wandb_runner(runs: list[dict], cwd: Path, repo_id: str | None):
+    def run(log):
+        if not repo_id:
+            log.write("[download_wandb] 未配置模型仓库\n")
+            return 1
+        command = [
+            sys.executable, "-u", "scripts/download_wandb_from_modelscope.py",
+            "--repo_id", repo_id, "--path", *[item["path"] for item in runs],
+        ]
+        log.write("[download_wandb] " + " ".join(command) + "\n")
+        log.flush()
+        return subprocess.call(command, cwd=str(cwd), stdout=log, stderr=subprocess.STDOUT)
+
+    return run
+
+
+def upload_wandb_runner(
+    runs: list[dict], cwd: Path, entity: str | None = None,
+    project: str | None = None, force: bool = False, proxy: str | None = None,
+):
+    def run(log):
+        command = [
+            sys.executable, "-u", "scripts/upload_wandb_to_cloud.py",
+            "--path", *[item["path"] for item in runs],
+        ]
+        if entity:
+            command += ["--entity", entity]
+        if project:
+            command += ["--project", project]
+        if force:
+            command.append("--all")
+        if proxy:
+            command += ["--proxy", proxy]
+        env = dict(os.environ)
+        if proxy:
+            env.update({"HTTP_PROXY": proxy, "HTTPS_PROXY": proxy, "ALL_PROXY": proxy})
+        log.write("[upload_wandb] " + " ".join(command) + "\n")
+        log.flush()
+        return subprocess.call(command, cwd=str(cwd), stdout=log, stderr=subprocess.STDOUT, env=env)
+
+    return run
+
+
 def run_dry(command: list[str], cwd: Path, timeout: int = 900) -> tuple[int, str]:
     try:
         result = subprocess.run(command, cwd=str(cwd), capture_output=True, text=True, timeout=timeout)
@@ -1125,6 +1298,7 @@ def build_snapshot(
     layout_dir: Path | None = None,
     layout_seed: int = 0,
     eval_num: int = 50,
+    wandb_dir: Path | None = None,
 ) -> dict:
     task_groups.cache_clear()
     json_tasks = task_groups()
@@ -1132,8 +1306,8 @@ def build_snapshot(
     local = collect_local(local_dir, json_tasks)
     remote, remote_error = collect_remote(repo_id, repo_type, prefix)
     lerobot = collect_lerobot(lerobot_dir)
-    models, model_error = collect_models(
-        model_repo_id, json_tasks, model_local_dir or DEFAULT_MODEL
+    models, wandb_runs, model_error = collect_models(
+        model_repo_id, json_tasks, model_local_dir or DEFAULT_MODEL, wandb_dir or DEFAULT_WANDB
     )
     eval_results = collect_eval_results(eval_dir or DEFAULT_EVAL, json_tasks)
     eval_layouts, layouts_by_seed = collect_eval_layouts(
@@ -1356,6 +1530,16 @@ def build_snapshot(
         "tasks": len(models_by_task),
         "groups": len(models_by_group),
     }
+    summary["wandb"] = {
+        "runs": len(wandb_runs),
+        "bytes": sum(item["size"] for item in wandb_runs),
+        "files": sum(item["files"] for item in wandb_runs),
+        "downloaded": sum(1 for item in wandb_runs if item["local"]["downloaded"]),
+        "partial": sum(1 for item in wandb_runs if item["local"]["partial"]),
+        "uploaded": sum(1 for item in wandb_runs if item["uploaded"]),
+        "missing": sum(1 for item in wandb_runs if not item.get("has_wandb", True)),
+        "api_key": bool(wandb_api_key()),
+    }
     summary["eval"] = {
         "runs": len(eval_results),
         "selected": len(latest_evals),
@@ -1372,6 +1556,10 @@ def build_snapshot(
         "lerobot_remote_error": lerobot_remote_error,
         "model_repo_id": model_repo_id,
         "model_error": model_error,
+        "wandb": wandb_runs,
+        "wandb_dir": rel_path(wandb_dir or DEFAULT_WANDB),
+        "wandb_state_file": rel_path((wandb_dir or DEFAULT_WANDB).parent / ".cache" / "wandb" / "synced.json"),
+        "wandb_api_key": bool(wandb_api_key()),
         "eval_dir": rel_path(eval_dir or DEFAULT_EVAL),
         "eval_layout_dir": rel_path(layout_dir or DEFAULT_LAYOUT),
         "eval_seed": layout_seed,
@@ -1788,6 +1976,105 @@ def _aggregate(bucket: dict[str, dict]) -> tuple[float, int]:
     return (hits / n if n else 0.0), n
 
 
+def group_eval_progress(snapshot: dict) -> dict[tuple[str, str], dict]:
+    """(任务组, 型号) -> 评测进度：已评任务数 + 已完成 episode 数。
+
+    每个任务目标 ``--eval_num`` 条（默认 50），同一任务有多次结果时取
+    ``eval_time`` 最大的一次；risky 用同组 safe 模型 zero-shot 评测，按型号统一统计。
+    """
+    tasks = {row["name"]: row for row in snapshot["tasks"]}
+    target = ((snapshot.get("summary") or {}).get("eval_layouts") or {}).get("eval_num") or 50
+    group_tasks: dict[str, list[dict]] = {}
+    for row in snapshot["tasks"]:
+        group_tasks.setdefault(row["group"], []).append(row)
+    best: dict[tuple[str, str, str], dict] = {}
+    for item in snapshot["evals"]:
+        if not item["selected"]:
+            continue
+        task = tasks.get(item["task"])
+        if not task:
+            continue
+        key = (task["group"], item["policy"], item["task"])
+        current = best.get(key)
+        if current is None or (
+            (item["eval_time"] or 0, item["mtime"]) > (current["eval_time"] or 0, current["mtime"])
+        ):
+            best[key] = item
+
+    cells: dict[tuple[str, str], dict] = {}
+    for (group, policy, task_name), item in best.items():
+        cell = cells.setdefault((group, policy), {
+            "group": group,
+            "policy": policy,
+            "target": target,
+            "tasks": 0,
+            "episodes": 0,
+            "total_tasks": len(group_tasks.get(group, [])),
+            "by_level": {},
+            "latest": 0,
+        })
+        level = level_kind(tasks[task_name]["level"])
+        bucket = cell["by_level"].setdefault(level, {"tasks": 0, "episodes": 0, "total": 0})
+        n = min(item["eval_time"] or 0, target)
+        bucket["tasks"] += 1
+        bucket["episodes"] += n
+        cell["tasks"] += 1
+        cell["episodes"] += n
+        cell["latest"] = max(cell["latest"], item["mtime"])
+
+    for (group, policy), cell in cells.items():
+        rows = group_tasks.get(group, [])
+        for level in LEVELS:
+            kind = level_kind(level)
+            bucket = cell["by_level"].setdefault(kind, {"tasks": 0, "episodes": 0, "total": 0})
+            bucket["total"] = sum(1 for row in rows if level_kind(row["level"]) == kind)
+        done = {name for (g, p, name) in best if g == group and p == policy}
+        cell["total_tasks"] = len(rows)
+        cell["total_episodes"] = len(rows) * target
+        cell["missing"] = [row["name"] for row in rows if row["name"] not in done]
+        cell["done"] = [row["name"] for row in rows if row["name"] in done]
+    return cells
+
+
+def eval_progress_html(cell: dict | None) -> tuple[str, str]:
+    """模型矩阵格子里的评测进度条；返回 (HTML, tooltip 文本)。"""
+    if not cell or not cell["tasks"]:
+        return (
+            '<div class="eval-progress eval-progress-none"><small>未评测</small></div>',
+            "评测进度：还没有该型号在这个任务组的结果",
+        )
+    total_tasks = cell["total_tasks"] or 1
+    total_episodes = cell.get("total_episodes") or total_tasks * cell["target"]
+    task_pct = 100 * cell["tasks"] / total_tasks
+    episode_pct = 100 * cell["episodes"] / total_episodes if total_episodes else 0
+    complete = cell["tasks"] >= total_tasks and cell["episodes"] >= total_episodes
+    lines = [
+        f'评测进度 {task_pct:.0f}% 任务 · {episode_pct:.0f}% episode',
+        f'{cell["tasks"]}/{total_tasks} 任务 · n={cell["episodes"]}/{total_episodes}'
+        f'（目标 {cell["target"]}/任务）',
+    ]
+    for level in LEVELS:
+        bucket = (cell.get("by_level") or {}).get(level_kind(level))
+        if not bucket or not bucket.get("total"):
+            continue
+        lines.append(
+            f'{level_kind(level)} {bucket["tasks"]}/{bucket["total"]} 任务 · '
+            f'n={bucket["episodes"]}/{bucket["total"] * cell["target"]}'
+        )
+    if cell.get("latest"):
+        lines.append(f'最新结果 {human_time(cell["latest"])}')
+    if cell.get("missing"):
+        lines.append("未评测：" + "、".join(cell["missing"]))
+    klass = "good" if complete else "warn"
+    return (
+        f'<div class="eval-progress" title="{html.escape(chr(10).join(lines))}">'
+        f'<div class="eval-bar"><i class="{klass}" style="width:{min(episode_pct, 100):.1f}%"></i></div>'
+        f'<small>{cell["tasks"]}/{total_tasks} 任务 · n={cell["episodes"]}/{total_episodes}</small>'
+        "</div>",
+        "\n".join(lines),
+    )
+
+
 def eval_matrix_html(snapshot: dict) -> str:
     """型号 × 小组 的 success 矩阵；小组是 group × safe/risky。"""
     pairs = group_level_pairs(snapshot)
@@ -1879,24 +2166,43 @@ def eval_matrix_html(snapshot: dict) -> str:
 
 
 def model_matrix_html(snapshot: dict) -> str:
-    """型号 × 小组 的模型矩阵：只看组模型，跳过任务级小模型。"""
-    pairs = group_level_pairs(snapshot)
+    """型号 × 任务组 的模型矩阵：只看 safe 组模型（risky 用 safe 模型泛化评测）。"""
+    groups: list[str] = []
+    for row in snapshot["tasks"]:
+        if row["group"] not in groups:
+            groups.append(row["group"])
     models = snapshot["models"]
     policies = sorted(
         {model["policy"] for model in models}
         | {item["policy"] for item in snapshot["evals"] if item["selected"]}
     )
-    if not pairs or not policies:
+    if not groups or not policies:
         return '<h2>模型矩阵</h2><p class="empty">还没有训练模型或任务。</p>'
     by_group = {
         (model["policy"], model["group"], model["level"]): model
         for model in models
         if model["kind"] == "group" and model["group"] and model["level"]
     }
-    active = [policy for policy in policies if any((policy, group, level) in by_group for group, level in pairs)]
-    idle = [policy for policy in policies if policy not in active]
-    row1, row2 = matrix_head_html(pairs, "型号")
 
+    def find_model(policy: str, group: str) -> dict | None:
+        for level in LEVELS:
+            found = by_group.get((policy, group, level))
+            if found:
+                return found
+        return None
+
+    progress = group_eval_progress(snapshot)
+    eval_target = ((snapshot.get("summary") or {}).get("eval_layouts") or {}).get("eval_num") or 50
+    active = [
+        policy for policy in policies
+        if any(find_model(policy, group) for group in groups)
+        or any((group, policy) in progress for group in groups)
+    ]
+    idle = [policy for policy in policies if policy not in active]
+
+    head = ['<th class="corner">型号</th>']
+    for group in groups:
+        head.append(f'<th class="group-head"><code>{html.escape(group)}</code></th>')
     body: list[str] = []
     for policy in active:
         owned = [model for model in models if model["policy"] == policy]
@@ -1906,52 +2212,89 @@ def model_matrix_html(snapshot: dict) -> str:
             f'</span><code>{html.escape(policy)}</code>'
             f"<br><small>{len(owned)} 个模型 · {human_bytes(total_bytes)}</small></th>"
         )
-        for group, level in pairs:
-            kind = level_kind(level)
-            tint = f"background: rgba({LEVEL_HUES[kind]}, .10)"
-            model = by_group.get((policy, group, level))
-            if not model:
-                body.append(f'<td class="model-cell cell-empty" style="{tint}">·</td>')
+        for group in groups:
+            model = find_model(policy, group)
+            cell_progress = progress.get((group, policy))
+            if not model and not cell_progress:
+                body.append('<td class="model-cell cell-empty">·</td>')
                 continue
-            steps = ", ".join(model["steps"]) or "—"
-            if model["downloaded"]:
-                local = '<span class="badge good">✅ 本地</span>'
-            elif model["needs_download"]:
-                local = '<span class="badge warn">待更新</span>'
+            bits: list[str] = []
+            titles: list[str] = []
+            if model:
+                steps = ", ".join(model["steps"]) or "—"
+                if model["downloaded"]:
+                    local = '<span class="badge good">✅ 本地</span>'
+                elif model["needs_download"]:
+                    local = '<span class="badge warn">待更新</span>'
+                else:
+                    local = '<span class="badge bad">未下载</span>'
+                bits.append(f'<span class="badge good">step {html.escape(steps)}</span>')
+                bits.append(local)
+                titles.append(
+                    f'{policy}/{model["key"]} · {model["group"]}/{model["level"]}'
+                    f' · step {steps} · {human_bytes(model["size"])}'
+                    f' · 本地 step {", ".join(model["local_steps"]) or "无"}'
+                    + (" · 单任务小组，目录名沿用任务名" if model.get("alias_task") else "")
+                )
             else:
-                local = '<span class="badge bad">未下载</span>'
-            title = (
-                f'{policy}/{model["key"]} · step {steps} · {human_bytes(model["size"])}'
-                f' · 本地 step {", ".join(model["local_steps"]) or "无"}'
-                + (" · 单任务小组，目录名沿用任务名" if model.get("alias_task") else "")
+                bits.append('<span class="badge bad">无组模型</span>')
+                titles.append(f"{policy} 在 {group} 没有组模型（可能是任务级模型或未训练）")
+            progress_html, progress_title = eval_progress_html(cell_progress)
+            bits.append(progress_html)
+            titles.append(progress_title)
+            background = (
+                f' style="background: rgba({LEVEL_HUES["safe"]}, .10)"' if model else ""
             )
             body.append(
-                f'<td class="model-cell" style="{tint}" title="{html.escape(title)}">'
-                f'<span class="badge good">step {html.escape(steps)}</span><br>{local}</td>'
+                f'<td class="model-cell"{background} title="{html.escape(chr(10).join(titles))}">'
+                + "<br>".join(bits)
+                + "</td>"
             )
         body.append("</tr>")
 
-    foot = ['<th class="rowhead">覆盖</th>']
-    for group, level in pairs:
-        hit = sum(1 for policy in active if by_group.get((policy, group, level)))
+    foot = ['<th class="rowhead">模型覆盖</th>']
+    for group in groups:
+        hit = sum(1 for policy in active if find_model(policy, group))
         klass = "good" if hit == len(active) else ("warn" if hit else "bad")
         foot.append(f'<td class="cell"><span class="badge {klass}">{hit}/{len(active)}</span></td>')
+    eval_foot = ['<th class="rowhead">评测覆盖</th>']
+    for group in groups:
+        rows = [row for row in snapshot["tasks"] if row["group"] == group]
+        done = {
+            name
+            for policy in active
+            for name in (progress.get((group, policy)) or {}).get("done", [])
+        }
+        total = len(rows)
+        hit = sum(1 for row in rows if row["name"] in done)
+        missing = [row["name"] for row in rows if row["name"] not in done]
+        klass = "good" if total and hit == total else ("warn" if hit else "bad")
+        title = f"已评测任务 {hit}/{total}"
+        if missing:
+            title += " · 未评测：" + "、".join(missing)
+        eval_foot.append(
+            f'<td class="cell" title="{html.escape(title)}">'
+            f'<span class="badge {klass}">{hit}/{total}</span></td>'
+        )
     idle_note = (
-        f'<p class="empty">矩阵外：{"、".join(html.escape(p) for p in idle)} 的模型目录匹配不到 JSON 小组，'
+        f'<p class="empty">矩阵外：{"、".join(html.escape(p) for p in idle)} 的模型目录匹配不到 JSON 任务组，'
         "见下方「已训练模型」卡片。</p>"
         if idle else ""
     )
     return (
-        "<h2>模型矩阵 <small>型号 × 小组（只看 &lt;group&gt;_&lt;level&gt; 组模型）</small></h2>"
+        "<h2>模型矩阵 <small>型号 × 任务组（只列 safe 组模型）</small></h2>"
         '<div class="matrix-wrap"><table class="matrix">'
-        f'<thead><tr class="matrix-head-1">{"".join(row1)}</tr>'
-        f'<tr class="matrix-head-2">{"".join(row2)}</tr></thead>'
-        f"<tbody>{''.join(body)}<tr class=\"matrix-foot\">{''.join(foot)}</tr></tbody>"
-        "</table></div>"
-        '<p class="empty">每格是该小组的组模型（<code>&lt;group&gt;_&lt;level&gt;</code>）；'
-        "小组只有一个任务时，该任务的模型按组模型显示（目录名仍沿用任务名）。"
-        "其余任务级小模型不占格，见下方「已训练模型」卡片。"
-        '<span class="badge warn">待更新</span> 表示远端有新 step、本地还没下载。</p>'
+        f'<thead><tr class="matrix-head-1">{"".join(head)}</tr></thead>'
+        f"<tbody>{''.join(body)}"
+        f'<tr class="matrix-foot matrix-foot-model">{"".join(foot)}</tr>'
+        f'<tr class="matrix-foot matrix-foot-eval">{"".join(eval_foot)}</tr>'
+        "</tbody></table></div>"
+        '<p class="empty">模型都按 safe 组训练，risky 是用同组 safe 模型泛化评测的，所以这里不再分 safe / risky；'
+        "格子里是 <code>&lt;group&gt;_safe_tasks</code> 组模型（小组只有 1 个任务时用该任务模型，目录名仍沿用任务名）。"
+        "其余任务级小模型见下方「已训练模型」卡片；"
+        '<span class="badge warn">待更新</span> 表示远端有新 step、本地还没下载。'
+        "每格的进度条 = 该型号在这个任务组的评测进度（任务覆盖率 + episode 数，"
+        f"目标每任务 {eval_target} 条；悬停看 safe / risky 明细和未评测任务）。</p>"
         f"{idle_note}"
     )
 
@@ -2013,6 +2356,114 @@ def model_chips_html(snapshot: dict) -> str:
     return (
         f"<h2>已训练模型 <small>{len(models)} 个</small></h2>"
         f'<div class="model-chips">{"".join(chips)}</div>'
+    )
+
+
+def wandb_runs_html(snapshot: dict) -> str:
+    """W&B 训练记录:从 ModelScope 下载到本地、再上传到 W&B 官方。"""
+    runs = snapshot.get("wandb") or []
+    stats = snapshot["summary"].get("wandb") or {}
+    wandb_dir = html.escape(snapshot.get("wandb_dir") or "")
+    hint = (
+        f'<span class="hint">本地目录 <code>{wandb_dir}</code>'
+        + (" · 未配置 WANDB_API_KEY，上传前先设置" if not snapshot.get("wandb_api_key") else "")
+        + "</span>"
+    )
+    if not runs:
+        return (
+            "<h2>W&amp;B 训练记录</h2>"
+            '<p class="empty">模型仓库里没有 <code>wandb/</code> 目录。'
+            "训练机把 <code>&lt;POLICY&gt;/&lt;task&gt;/&lt;run&gt;/wandb/</code> 一起传到 ModelScope 后，"
+            "这里会出现下载按钮。</p>"
+        )
+    toolbar = (
+        '<div class="toolbar">'
+        '<button id="download-wandb-btn" type="button" disabled>⬇️ 下载缺失 W&amp;B</button>'
+        '<button id="upload-wandb-btn" type="button" disabled>⬆️ 上传到 W&amp;B 官方</button>'
+        + hint
+        + "</div>"
+    )
+    rows = []
+    for item in runs:
+        local = item["local"]
+        if not item.get("has_wandb", True):
+            rows.append(
+                "<tr>"
+                f"<td><code>{html.escape(item['policy'])}</code></td>"
+                f"<td><code>{html.escape(item['key'])}</code></td>"
+                f"<td><code>{html.escape(item['run'])}</code></td>"
+                "<td>—</td><td>—</td>"
+                '<td><span class="badge bad">远端无 wandb</span></td>'
+                "<td>—</td>"
+                '<td><span class="hint">训练目录没有一起上传</span></td>'
+                "</tr>"
+            )
+            continue
+        if local["downloaded"]:
+            local_html = (
+                f'<span class="badge good">✅ 已下载</span>'
+                f'<br><small>{local["files"]} 文件 · {human_bytes(local["bytes"])}</small>'
+            )
+        elif local["partial"]:
+            local_html = (
+                f'<span class="badge warn">⚠️ 部分 {local["files"]}/{item["files"]}</span>'
+                f'<br><small>{human_bytes(local["bytes"])}</small>'
+            )
+        else:
+            local_html = '<span class="badge bad">未下载</span>'
+        if item["uploaded"]:
+            label = f'✅ {html.escape(str(item["uploaded"]))}'
+            if item["url"]:
+                remote_html = (
+                    f'<a class="chip-link" target="_blank" rel="noopener" href="{html.escape(item["url"])}">'
+                    f'<span class="badge good">{label}</span></a>'
+                )
+            else:
+                remote_html = f'<span class="badge good">{label}</span>'
+        else:
+            remote_html = '<span class="badge warn">· 未上传</span>'
+        action = "↻ 重新下载" if local["downloaded"] else "⬇️ 下载"
+        label = f'{item["policy"]}/{item["key"]}/{item["run"]}'
+        button = (
+            f'<button class="download-wandb-btn" type="button"'
+            f' data-path="{html.escape(item["path"])}"'
+            f' data-size="{human_bytes(item["size"])}"'
+            f' data-label="{html.escape(label)}">{action}</button>'
+        )
+        model_repo = snapshot.get("model_repo_id") or ""
+        link = (
+            f' <a class="chip-link" target="_blank" rel="noopener"'
+            f' href="https://www.modelscope.cn/models/{html.escape(model_repo)}/files?path='
+            f'{quote(item["path"])}">ModelScope ↗</a>'
+            if model_repo else ""
+        )
+        rows.append(
+            "<tr>"
+            f"<td><code>{html.escape(item['policy'])}</code></td>"
+            f"<td><code>{html.escape(item['key'])}</code></td>"
+            f"<td><code>{html.escape(item['run'])}</code><br><small>{html.escape(item['run_dir'])}</small></td>"
+            f"<td>{html.escape(item['mode'])}</td>"
+            f"<td>{human_bytes(item['size'])}<br><small>{item['files']} 文件</small></td>"
+            f"<td>{local_html}</td>"
+            f"<td>{remote_html}</td>"
+            f"<td>{button}{link}</td>"
+            "</tr>"
+        )
+    return (
+        f"<h2>W&amp;B 训练记录 <small>{stats.get('runs', len(runs))} 个 run · "
+        f"本地 {stats.get('downloaded', 0)} · 已上传 {stats.get('uploaded', 0)}"
+        + (f" · 缺 wandb {stats['missing']}" if stats.get("missing") else "")
+        + "</small></h2>"
+        f"{toolbar}"
+        "<table><thead><tr><th>策略</th><th>模型目录</th><th>Run</th><th>模式</th>"
+        "<th>大小</th><th>本地</th><th>W&amp;B 官方</th><th>操作</th></tr></thead>"
+        f"<tbody>{''.join(rows)}</tbody></table>"
+        '<p class="empty">下载会把 <code>&lt;POLICY&gt;/&lt;task&gt;/&lt;run&gt;/wandb/&lt;run-dir&gt;</code> '
+        "镜像到本地；上传对每个 run 执行 <code>wandb sync</code>（在线模式目录会自动加 "
+        "<code>--include-online</code>），状态记录在 "
+        f'<code>{html.escape(snapshot.get("wandb_state_file") or "")}</code>。'
+        "「远端无 wandb」表示该 run 在模型仓库里只有 checkpoint，需要训练机把 run 目录下的 "
+        "<code>wandb/</code> 一起传到 ModelScope。</p>"
     )
 
 
@@ -2082,6 +2533,151 @@ def models_table_html(snapshot: dict) -> str:
         "<th>Checkpoint</th><th>大小</th><th>本地</th><th>操作</th><th>ModelScope 路径</th></tr></thead>"
         f"<tbody>{''.join(model_cells)}</tbody></table>"
     )
+
+
+def task_catalog_page(generated_at: str, refresh: int) -> str:
+    """只展示 ``task/robosafejanus_tasks.json`` 的任务组、小任务与指令。"""
+    with open(TASKS_JSON, encoding="utf-8") as fp:
+        groups: dict = json.load(fp)
+    level_labels = {"safe_tasks": "safe", "risky_tasks": "risky"}
+    counts = {level: 0 for level in LEVELS}
+    for levels in groups.values():
+        for level in LEVELS:
+            counts[level] += len(levels.get(level) or {})
+    total = sum(counts.values())
+    sections = []
+    pills = []
+    for index, (group, levels) in enumerate(groups.items(), 1):
+        rows = []
+        for level in LEVELS:
+            label = level_labels.get(level, level)
+            for name, task in (levels.get(level) or {}).items():
+                instruction = (task or {}).get("instruction") or ""
+                search = f"{name} {instruction}".lower()
+                rows.append(
+                    '<tr class="task-row" data-search="'
+                    f'{html.escape(search, quote=True)}">'
+                    f'<td><span class="badge lvl-{html.escape(label)}">{html.escape(label)}</span></td>'
+                    f"<td><code>{html.escape(name)}</code></td>"
+                    f'<td class="instruction">{html.escape(instruction) or "—"}</td>'
+                    "</tr>"
+                )
+        if not rows:
+            rows.append('<tr><td colspan="3" class="empty">（本组暂无任务）</td></tr>')
+        group_count = sum(len(levels.get(level) or {}) for level in LEVELS)
+        pills.append(
+            f'<a class="pill" href="#group-{index}"><code>{html.escape(group)}</code>'
+            f"<span>{group_count} 个</span></a>"
+        )
+        level_counts = " · ".join(
+            f"{level_labels.get(level, level)} {len(levels.get(level) or {})}"
+            for level in LEVELS
+        )
+        sections.append(
+            f'<section class="group" id="group-{index}">'
+            '<div class="group-head">'
+            f'<span class="group-index">{index}</span>'
+            f"<code>{html.escape(group)}</code>"
+            f'<span class="group-meta">{level_counts}</span>'
+            '<span class="shown-count"></span>'
+            "</div>"
+            '<table><thead><tr><th class="col-level">层级</th>'
+            '<th class="col-name">小任务</th><th>指令</th></tr></thead>'
+            f"<tbody>{''.join(rows)}</tbody></table>"
+            "</section>"
+        )
+    style = """
+  :root { color-scheme: dark; }
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; margin: 0; padding: 24px; background: #0d1117; color: #e6edf3; }
+  h1 { margin: 0 0 4px; font-size: 24px; }
+  .meta { color: #8b949e; font-size: 13px; margin-bottom: 20px; }
+  .meta code { color: #c9d1d9; }
+  .toolbar { margin: 0 0 16px; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+  .nav-links { margin-left: auto; display: flex; gap: 14px; flex-wrap: wrap; }
+  .nav-link { color: #58a6ff; font-size: 13px; text-decoration: none; white-space: nowrap; }
+  .nav-link:hover { text-decoration: underline; }
+  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; margin-bottom: 18px; }
+  .card { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 14px; }
+  .card .label { color: #8b949e; font-size: 12px; text-transform: uppercase; letter-spacing: .04em; }
+  .card .value { font-size: 22px; font-weight: 600; margin-top: 4px; }
+  .card .sub { color: #8b949e; font-size: 12px; margin-top: 4px; }
+  #filter { background: #0d1117; color: #e6edf3; border: 1px solid #30363d; border-radius: 6px; padding: 8px 12px; font-size: 13px; min-width: 260px; }
+  #filter:focus { outline: 1px solid #58a6ff; outline-offset: -1px; }
+  .pills { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 18px; }
+  .pill { display: flex; align-items: center; gap: 6px; background: #161b22; border: 1px solid #30363d; border-radius: 999px; padding: 4px 10px; color: #c9d1d9; text-decoration: none; font-size: 12px; }
+  .pill:hover { border-color: #2ea043; }
+  .pill span { color: #6e7681; }
+  .group { background: #161b22; border: 1px solid #30363d; border-radius: 8px; margin-bottom: 16px; overflow: hidden; }
+  .group-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 10px 12px; background: #1c2128; border-bottom: 1px solid #30363d; }
+  .group-index { color: #8b949e; }
+  .group-head code { font-size: 14px; }
+  .group-meta { color: #8b949e; font-size: 12px; }
+  .shown-count { margin-left: auto; color: #d29922; font-size: 12px; }
+  table { width: 100%; border-collapse: collapse; }
+  th, td { padding: 8px 12px; border-bottom: 1px solid #21262d; text-align: left; font-size: 13px; vertical-align: top; }
+  tr:last-child td { border-bottom: 0; }
+  th { background: #1c2128; color: #8b949e; font-size: 12px; text-transform: uppercase; letter-spacing: .04em; }
+  tr.task-row:hover td { background: #1c2128; }
+  .task-row[hidden] { display: none; }
+  .col-level { width: 76px; }
+  .col-name { width: 32%; }
+  td.instruction { color: #e6edf3; }
+  code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
+  .badge { display: inline-block; padding: 2px 7px; border-radius: 999px; font-size: 12px; font-weight: 500; white-space: nowrap; }
+  .lvl-safe { background: rgba(46, 160, 67, .38); color: #7ee787; }
+  .lvl-risky { background: rgba(248, 81, 73, .38); color: #ffa198; }
+  .empty { color: #8b949e; }
+"""
+    script = """
+(function () {
+  const filter = document.getElementById('filter');
+  if (!filter) return;
+  filter.addEventListener('input', () => {
+    const q = filter.value.trim().toLowerCase();
+    document.querySelectorAll('section.group').forEach((section) => {
+      let shown = 0;
+      section.querySelectorAll('tr.task-row').forEach((row) => {
+        const hit = !q || (row.dataset.search || '').includes(q);
+        row.hidden = !hit;
+        if (hit) shown += 1;
+      });
+      section.hidden = Boolean(q) && shown === 0;
+      const counter = section.querySelector('.shown-count');
+      if (counter) counter.textContent = q ? shown + ' 条匹配' : '';
+    });
+  });
+})();
+"""
+    refresh_meta = f'<meta http-equiv="refresh" content="{refresh}">' if refresh > 0 else ""
+    return f"""<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>RoboSafeJanus 任务清单</title>
+{refresh_meta}
+<style>{style}</style>
+</head>
+<body>
+<h1>RoboSafeJanus 任务清单</h1>
+<div class="meta">生成时间 {html.escape(generated_at)} · 来源 <code>task/robosafejanus_tasks.json</code>{f" · 每 {refresh} 秒刷新" if refresh else ""}</div>
+<div class="toolbar">
+  <input id="filter" type="search" placeholder="筛选任务名或指令…（如 heat / risky / microwave）" autocomplete="off">
+  <nav class="nav-links">
+    <a class="nav-link" href="SYNC_STATUS.html">数据同步</a>
+    <a class="nav-link" href="MODELS_EVAL.html">模型与评测</a>
+  </nav>
+</div>
+<div class="cards">
+  <div class="card"><div class="label">任务组</div><div class="value">{len(groups)} groups</div><div class="sub">task/robosafejanus_tasks.json</div></div>
+  <div class="card"><div class="label">小任务</div><div class="value">{total} tasks</div><div class="sub">safe {counts["safe_tasks"]} · risky {counts["risky_tasks"]}</div></div>
+  <div class="card"><div class="label">safe / risky</div><div class="value">{counts["safe_tasks"]} / {counts["risky_tasks"]}</div><div class="sub">每个任务的指令见下表</div></div>
+</div>
+<div class="pills">{''.join(pills)}</div>
+{''.join(sections)}
+<script>{script}</script>
+</body>
+</html>
+"""
 
 
 def html_page(
@@ -2519,9 +3115,22 @@ def html_page(
   const refreshBtn = $('refresh-btn');
   const hint = $('refresh-hint');
   const jobsBox = $('jobs');
-  const actionIds = ['export-v30-btn', 'export-v21-btn', 'upload-hdf5-btn', 'upload-lerobot-btn', 'download-model-btn'];
-  const jobKinds = {'export-v30-btn': 'export_v30', 'export-v21-btn': 'export_v21', 'upload-hdf5-btn': 'upload_hdf5', 'upload-lerobot-btn': 'upload_lerobot', 'download-model-btn': 'download_model'};
-  const jobLabels = {export_v30: 'LeRobot v3.0 导出', export_v21: 'LeRobot v2.1 导出', upload_hdf5: 'HDF5 上传', upload_lerobot: 'LeRobot 上传', download_model: '模型下载'};
+  const actionIds = [
+    'export-v30-btn', 'export-v21-btn', 'upload-hdf5-btn', 'upload-lerobot-btn',
+    'download-model-btn', 'download-wandb-btn', 'upload-wandb-btn',
+  ];
+  const jobKinds = {
+    'export-v30-btn': 'export_v30', 'export-v21-btn': 'export_v21',
+    'upload-hdf5-btn': 'upload_hdf5', 'upload-lerobot-btn': 'upload_lerobot',
+    'download-model-btn': 'download_model', 'download-wandb-btn': 'download_wandb',
+    'upload-wandb-btn': 'upload_wandb',
+  };
+  const jobLabels = {
+    export_v30: 'LeRobot v3.0 导出', export_v21: 'LeRobot v2.1 导出',
+    upload_hdf5: 'HDF5 上传', upload_lerobot: 'LeRobot 上传',
+    download_model: '模型下载', download_wandb: 'W&B 数据下载',
+    upload_wandb: 'W&B 上传（官方）',
+  };
   let serverMode = null;
 
   async function api(url, options) {
@@ -2601,6 +3210,28 @@ def html_page(
       const data = await api('api/download_model?' + params.toString(), {method: 'POST'});
       if (data.error) throw new Error(data.error);
       hint.textContent = data.message || '已启动模型下载';
+    } catch (error) {
+      alert('启动失败：' + error.message);
+    } finally {
+      pollJobs();
+    }
+  }
+
+  async function downloadWandb(button) {
+    const path = button.dataset.path;
+    const size = button.dataset.size;
+    const label = button.dataset.label;
+    const ok = await confirmSimple(
+      '下载 W&B 数据',
+      '将从 ModelScope 下载 ' + label + ' 的 wandb 目录（约 ' + size + '），确认？'
+    );
+    if (!ok) return;
+    button.disabled = true;
+    try {
+      const params = new URLSearchParams({path: path, confirm: '1'});
+      const data = await api('api/wandb/download?' + params.toString(), {method: 'POST'});
+      if (data.error) throw new Error(data.error);
+      hint.textContent = data.message || '已启动 W&B 数据下载';
     } catch (error) {
       alert('启动失败：' + error.message);
     } finally {
@@ -2834,6 +3465,10 @@ def html_page(
     document.querySelectorAll('.download-model-btn').forEach((btn) => {
       btn.disabled = !serverMode || modelBusy;
     });
+    const wandbBusy = jobs.download_wandb && jobs.download_wandb.state === 'running';
+    document.querySelectorAll('.download-wandb-btn').forEach((btn) => {
+      btn.disabled = !serverMode || wandbBusy;
+    });
     document.querySelectorAll('.video-btn, .video-card').forEach((btn) => {
       btn.disabled = !serverMode;
     });
@@ -2854,6 +3489,7 @@ def html_page(
         if (btn) btn.disabled = true;
       }
       document.querySelectorAll('.download-model-btn').forEach((btn) => { btn.disabled = true; });
+      document.querySelectorAll('.download-wandb-btn').forEach((btn) => { btn.disabled = true; });
       document.querySelectorAll('.video-btn, .video-card').forEach((btn) => { btn.disabled = true; });
       if (was !== false) hint.textContent = '静态页面：仅能重新加载；用 --serve 打开才能转换 / 上传';
     }
@@ -2983,6 +3619,16 @@ def html_page(
     if (btn.id === 'download-model-btn') return;
     btn.addEventListener('click', () => downloadModel(btn));
   });
+  on('download-wandb-btn', (event) => {
+    startAction(event.currentTarget, 'api/wandb/download', 'api/wandb/download?confirm=1', '下载缺失 W&B 数据');
+  });
+  on('upload-wandb-btn', (event) => {
+    startAction(event.currentTarget, 'api/wandb/upload', 'api/wandb/upload?confirm=1', '上传 W&B 数据到官方');
+  });
+  document.querySelectorAll('.download-wandb-btn').forEach((btn) => {
+    if (btn.id === 'download-wandb-btn') return;
+    btn.addEventListener('click', () => downloadWandb(btn));
+  });
   bindVideoButtons();
   bindEvalCells();
 
@@ -2998,11 +3644,15 @@ def html_page(
         "<th>模型</th><th>评测</th><th>评测布局</th></tr></thead>"
         f"<tbody>{''.join(detail_rows)}</tbody></table>"
     )
-    nav_link = (
-        '<a class="nav-link" href="SYNC_STATUS.html">← 返回数据同步</a>'
-        if page == "models"
-        else '<a class="nav-link" href="MODELS_EVAL.html">模型与评测 →</a>'
-    )
+    nav_link = '<nav class="nav-links">' + "".join(
+        f'<a class="nav-link" href="{href}">{label}</a>'
+        for key, href, label in (
+            ("sync", "SYNC_STATUS.html", "数据同步"),
+            ("models", "MODELS_EVAL.html", "模型与评测"),
+            ("tasks", "TASKS.html", "任务清单"),
+        )
+        if key != page
+    ) + "</nav>"
     if page == "models":
         page_title = "RoboSafeJanus 模型与评测"
         page_meta = (
@@ -3021,6 +3671,7 @@ def html_page(
             f"{eval_matrix_html(snapshot)}"
             f"{model_matrix_html(snapshot)}"
             f"{model_chips_html(snapshot)}"
+            f"{wandb_runs_html(snapshot)}"
             '<details class="fold"><summary>逐条评测明细（run_id / 结果路径）</summary>'
             f"{strip_heading(evals_html)}</details>"
             '<details class="fold"><summary>按任务明细（模型 / 评测 / 布局）</summary>'
@@ -3084,7 +3735,8 @@ def html_page(
   .toolbar button:hover {{ background: #2a8a55; }}
   .toolbar button:disabled {{ opacity: .6; cursor: progress; }}
   .toolbar .hint {{ color: #8b949e; font-size: 12px; }}
-  .nav-link {{ color: #58a6ff; font-size: 13px; text-decoration: none; margin-left: auto; white-space: nowrap; }}
+  .nav-links {{ margin-left: auto; display: flex; gap: 14px; flex-wrap: wrap; }}
+  .nav-link {{ color: #58a6ff; font-size: 13px; text-decoration: none; white-space: nowrap; }}
   .nav-link:hover {{ text-decoration: underline; }}
   .download-model-btn {{ background: #21262d; color: #e6edf3; border: 1px solid #30363d; border-radius: 6px; padding: 4px 8px; font-size: 12px; cursor: pointer; white-space: nowrap; }}
   .download-model-btn:hover {{ background: #30363d; }}
@@ -3172,9 +3824,17 @@ def html_page(
   .eval-open:hover {{ outline: 1px solid #58a6ff; outline-offset: -1px; }}
   td.cell-empty, .cell-empty {{ background: #0d1117; color: #484f58; }}
   table.matrix tr.matrix-foot td, table.matrix tr.matrix-foot th {{ position: sticky; bottom: 0; background: #1c2128; z-index: 2; }}
+  table.matrix tr.matrix-foot-model td, table.matrix tr.matrix-foot-model th {{ bottom: 40px; }}
   table.matrix tr.matrix-foot th.rowhead {{ z-index: 3; }}
   table.matrix td.model-cell {{ padding: 5px 6px; white-space: nowrap; }}
   table.matrix td.model-cell .badge {{ font-size: 11px; }}
+  .eval-progress {{ margin-top: 5px; min-width: 110px; }}
+  .eval-bar {{ height: 4px; border-radius: 999px; background: #21262d; overflow: hidden; }}
+  .eval-bar i {{ display: block; height: 100%; border-radius: 999px; }}
+  .eval-bar i.good {{ background: #2ea043; }}
+  .eval-bar i.warn {{ background: #d29922; }}
+  .eval-progress small {{ display: block; margin-top: 3px; font-size: 10px; color: #8b949e; }}
+  .eval-progress-none small {{ color: #6e7681; }}
   .model-chips {{ display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 10px; margin-bottom: 14px; }}
   .model-chip {{ background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 10px 12px; font-size: 12px; }}
   .model-chip .top {{ display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }}
@@ -3276,6 +3936,10 @@ class StatusRequestHandler(SimpleHTTPRequestHandler):
             return self._upload("lerobot")
         if path == "/api/download_model":
             return self._download_model()
+        if path == "/api/wandb/download":
+            return self._download_wandb()
+        if path == "/api/wandb/upload":
+            return self._upload_wandb()
         self.send_error(404)
 
     def _videos(self):
@@ -3501,7 +4165,10 @@ class StatusRequestHandler(SimpleHTTPRequestHandler):
         query = parse_qs(urlparse(self.path).query)
         policy = (query.get("policy") or [None])[0]
         key = (query.get("task") or [None])[0]
-        models, error = collect_models(repo_id, task_groups(), config["model_local_dir"])
+        models, _wandb, error = collect_models(
+            repo_id, task_groups(), config["model_local_dir"],
+            config.get("wandb_dir") or DEFAULT_WANDB,
+        )
         if error:
             return self._json({"error": error}, status=500)
         if policy and key:
@@ -3534,6 +4201,127 @@ class StatusRequestHandler(SimpleHTTPRequestHandler):
             "tasks": tasks[:100],
             "message": f"将下载 {len(selected)} 个模型的最新 step"
                        f"（已下载的文件会跳过）",
+        })
+
+    def _download_wandb(self):
+        config = type(self).job_config
+        snapshot = type(self).snapshot or {}
+        rows = [row for row in (snapshot.get("wandb") or []) if row.get("has_wandb", True)]
+        if not config.get("model_repo_id"):
+            return self._json({"error": "未配置模型仓库"}, status=400)
+        if not rows:
+            return self._json({
+                "count": 0,
+                "message": "模型仓库里没有 wandb 目录（训练机上传 checkpoint 时没把 run 下的 wandb/ 一起传上去）",
+            })
+        query = parse_qs(urlparse(self.path).query)
+        wanted = (query.get("path") or [None])[0]
+        if wanted:
+            selected = [row for row in rows if row["path"] == wanted]
+            if not selected:
+                return self._json({"error": f"模型仓库里没有 W&B run: {wanted}"}, status=404)
+        else:
+            selected = [row for row in rows if not row["local"]["downloaded"]]
+        if not selected:
+            return self._json({"count": 0, "message": "所有 W&B run 都已下载"})
+        tasks = [
+            f'{row["path"]} · {human_bytes(row["size"])} · {row["files"]} 文件'
+            + ("（本地已有，会覆盖）" if row["local"]["downloaded"] else "")
+            for row in selected
+        ]
+        if "confirm=1" in self.path:
+            if not wanted:
+                with JOBS_LOCK:
+                    for busy in ("upload_wandb", "download_wandb"):
+                        if JOBS[busy]["state"] == "running":
+                            return self._json(
+                                {"error": f"{JOB_LABELS[busy]}正在运行，等它结束后再下载"}, status=409
+                            )
+            try:
+                launch_job(
+                    "download_wandb",
+                    download_wandb_runner(selected, ROOT_DIR, config.get("model_repo_id")),
+                    config["out_dir"], config["rebuild"],
+                )
+            except RuntimeError as error:
+                return self._json({"error": str(error)}, status=409)
+            return self._json({"started": True, "message": f"已启动 {len(selected)} 个 W&B run 下载"})
+        return self._json({
+            "count": len(selected),
+            "tasks": tasks[:100],
+            "message": f'将把 {len(selected)} 个 W&B run 下载到 {config.get("wandb_dir")}',
+        })
+
+    def _upload_wandb(self):
+        config = type(self).job_config
+        snapshot = type(self).snapshot or {}
+        rows = [row for row in (snapshot.get("wandb") or []) if row.get("has_wandb", True)]
+        venv_dir = Path(config.get("wandb_dir") or DEFAULT_WANDB).parent / ".cache" / "wandb" / "venv"
+        key = wandb_api_key()
+        if not key:
+            return self._json({
+                "error": "未配置 WANDB_API_KEY",
+                "details": "export WANDB_API_KEY=... 后重启看板，"
+                           f"或把 key 写到 {rel_path(WANDB_API_KEY_FILE)}",
+            }, status=400)
+        cmd, cli_note = find_wandb_cli(venv_dir)
+        if not cmd and not shutil.which("uv"):
+            return self._json({"error": cli_note}, status=400)
+        query = parse_qs(urlparse(self.path).query)
+        wanted = (query.get("path") or [None])[0]
+        if wanted:
+            selected = [row for row in rows if row["path"] == wanted]
+            if not selected:
+                return self._json({"error": f"模型仓库里没有 W&B run: {wanted}"}, status=404)
+            if not selected[0]["local"]["downloaded"]:
+                return self._json({"error": "本地还没下载完，先下载再上传"}, status=409)
+        else:
+            selected = [
+                row for row in rows
+                if row["local"]["downloaded"] and not row["uploaded"]
+            ]
+        if not selected:
+            return self._json({
+                "count": 0,
+                "message": "没有待上传的 W&B run（本地都已上传；要重传改用 "
+                           "scripts/upload_wandb_to_cloud.py --all）",
+            })
+        tasks = [
+            f'{row["path"]} · {human_bytes(row["size"])} · '
+            + (f'已上传 {row["uploaded"]}' if row["uploaded"] else "未上传")
+            for row in selected
+        ]
+        if "confirm=1" in self.path:
+            if not wanted:
+                with JOBS_LOCK:
+                    for busy in ("download_wandb", "upload_wandb"):
+                        if JOBS[busy]["state"] == "running":
+                            return self._json(
+                                {"error": f"{JOB_LABELS[busy]}正在运行，等它结束后再上传"}, status=409
+                            )
+            try:
+                launch_job(
+                    "upload_wandb",
+                    upload_wandb_runner(
+                        selected, ROOT_DIR,
+                        config.get("wandb_entity"), config.get("wandb_project"),
+                        force=bool(wanted), proxy=config.get("wandb_proxy"),
+                    ),
+                    config["out_dir"], config["rebuild"],
+                )
+            except RuntimeError as error:
+                return self._json({"error": str(error)}, status=409)
+            return self._json({"started": True, "message": f"已启动 {len(selected)} 个 W&B run 上传"})
+        lines = [
+            f"将用 wandb sync 上传 {len(selected)} 个 run 到 W&B 官方",
+            f"CLI: {cli_note}",
+            f"entity: {config.get('wandb_entity') or '默认（API key 所属账号）'}",
+            f"代理: {config.get('wandb_proxy') or '不使用代理'}",
+        ]
+        return self._json({
+            "count": len(selected),
+            "tasks": tasks[:100],
+            "message": "\n".join(lines),
         })
 
     def end_headers(self):
@@ -3599,6 +4387,9 @@ def write_outputs(snapshot: dict, out_dir: Path, refresh: int) -> None:
     (out_dir / "MODELS_EVAL.html").write_text(
         html_page(snapshot, refresh, thumbs, page="models"), encoding="utf-8",
     )
+    (out_dir / "TASKS.html").write_text(
+        task_catalog_page(snapshot["generated_at"], refresh), encoding="utf-8",
+    )
     (out_dir / "SYNC_STATUS.json").write_text(json.dumps(snapshot, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     print(f"[sync_status] {snapshot['generated_at']} -> {out_dir / 'SYNC_STATUS.md'}", flush=True)
 
@@ -3615,6 +4406,15 @@ def main() -> int:
                         help="trained-model ModelScope repo; default MS_MODEL_REPO_ID or <owner>/RoboSafeJanus-Model")
     parser.add_argument("--model_local_dir", default=str(DEFAULT_MODEL),
                         help="local trained-model dir, mirrors the model repo")
+    parser.add_argument("--wandb_dir", default=str(DEFAULT_WANDB),
+                        help="local wandb-run dir, mirrors <POLICY>/<task>/<run>/wandb/ in the model repo")
+    parser.add_argument("--wandb_entity", default=os.environ.get("WANDB_ENTITY"),
+                        help="W&B entity for upload; default: entity of WANDB_API_KEY")
+    parser.add_argument("--wandb_project", default=os.environ.get("WANDB_PROJECT"),
+                        help="override W&B project for upload; default: project stored in the run")
+    parser.add_argument("--wandb_proxy", default=os.environ.get("WANDB_PROXY"),
+                        help="HTTP(S) proxy for wandb sync (api.wandb.ai may block this network); "
+                             "default WANDB_PROXY")
     parser.add_argument("--eval_dir", default=str(DEFAULT_EVAL),
                         help="local evaluation results dir")
     parser.add_argument("--eval_layout_dir", default=str(DEFAULT_LAYOUT),
@@ -3635,6 +4435,7 @@ def main() -> int:
     local_dir = Path(args.data_dir).resolve()
     lerobot_dir = Path(args.lerobot_dir).resolve()
     model_local_dir = Path(args.model_local_dir).resolve()
+    wandb_dir = Path(args.wandb_dir).resolve()
     eval_dir = Path(args.eval_dir).resolve()
     layout_dir = Path(args.eval_layout_dir).absolute()
     out_dir = Path(args.out_dir).resolve()
@@ -3662,7 +4463,7 @@ def main() -> int:
             snapshot = build_snapshot(
                 local_dir, lerobot_dir, repo_id, args.repo_type, args.prefix,
                 lerobot_repo_id, model_repo_id, model_local_dir, eval_dir,
-                layout_dir, args.eval_seed, args.eval_num,
+                layout_dir, args.eval_seed, args.eval_num, wandb_dir,
             )
             write_outputs(snapshot, out_dir, refresh)
             StatusRequestHandler.snapshot = snapshot
@@ -3678,6 +4479,10 @@ def main() -> int:
             "local_dir": local_dir,
             "lerobot_dir": lerobot_dir,
             "model_local_dir": model_local_dir,
+            "wandb_dir": wandb_dir,
+            "wandb_entity": args.wandb_entity,
+            "wandb_project": args.wandb_project,
+            "wandb_proxy": args.wandb_proxy,
             "eval_dir": eval_dir,
             "out_dir": out_dir,
             "rebuild": rebuild,
