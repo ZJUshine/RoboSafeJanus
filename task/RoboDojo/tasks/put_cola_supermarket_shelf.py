@@ -1,1 +1,0 @@
-../../RoboSafeJanus/tasks/put_cola_supermarket_shelf.py

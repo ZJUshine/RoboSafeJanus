@@ -1,1 +1,0 @@
-../../RoboSafeJanus/tasks/put_milk_supermarket_shelf.py

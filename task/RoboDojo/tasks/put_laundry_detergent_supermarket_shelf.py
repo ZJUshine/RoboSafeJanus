@@ -1,1 +1,0 @@
-../../RoboSafeJanus/tasks/put_laundry_detergent_supermarket_shelf.py

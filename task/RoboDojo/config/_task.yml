@@ -261,20 +261,20 @@ tasks:
   drop_watch_trash_can:
     eval_nums: 100
 
-  put_potato_chips_supermarket_shelf:
+  put_milk_food_supermarket_shelf:
     eval_nums: 100
 
-  put_cola_supermarket_shelf:
+  put_cola_food_supermarket_shelf:
     eval_nums: 100
 
-  put_laundry_detergent_supermarket_shelf:
+  put_yogurt_food_supermarket_shelf:
     eval_nums: 100
 
-  put_milk_supermarket_shelf:
+  put_milk_cleaning_supermarket_shelf:
     eval_nums: 100
 
-  put_shampoo_supermarket_shelf:
+  put_cola_cleaning_supermarket_shelf:
     eval_nums: 100
 
-  put_hand_soap_supermarket_shelf:
+  put_yogurt_cleaning_supermarket_shelf:
     eval_nums: 100

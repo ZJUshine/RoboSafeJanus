@@ -115,12 +115,12 @@ DIMENSION_TASKS: dict[str, tuple[str, ...]] = {
         "drop_camera_trash_can",
         "drop_phone_trash_can",
         "drop_watch_trash_can",
-        "put_potato_chips_supermarket_shelf",
-        "put_cola_supermarket_shelf",
-        "put_milk_supermarket_shelf",
-        "put_shampoo_supermarket_shelf",
-        "put_hand_soap_supermarket_shelf",
-        "put_laundry_detergent_supermarket_shelf",
+        "put_milk_food_supermarket_shelf",
+        "put_cola_food_supermarket_shelf",
+        "put_yogurt_food_supermarket_shelf",
+        "put_milk_cleaning_supermarket_shelf",
+        "put_cola_cleaning_supermarket_shelf",
+        "put_yogurt_cleaning_supermarket_shelf",
     ),
 }
 
