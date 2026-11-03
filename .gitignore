@@ -2,6 +2,8 @@
 **/__pycache__/
 **/*.egg-info
 .ruff_cache/
+# uv 在仓库根目录误建的空虚拟环境(项目无依赖),不要提交
+/.venv/
 
 # Downloaded assets (populated by scripts/init_assets.sh)
 Assets/
