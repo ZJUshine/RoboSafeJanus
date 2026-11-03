@@ -44,7 +44,6 @@
 | `src/data_collect/merge_shards.py`                                | 合并并行 worker 的分片                            | 一般不改               |
 | `src/data_collect/teleop_collection.py` / `xr_input.py` / `teleop_replay.py` | 遥操作录制、手柄输入、重放渲染                            | 改按键映射 / IK / 输入设备  |
 | `src/data_collect/eval_layouts.py`                                | 为新任务 / 探针任务冻结评测布局                          | 需要新增评测布局时          |
-| `src/data_collect/upload_to_hf.py`                                | 把 `data/RoboSafeJanus-Benchmark` 同步到 HF 私有 dataset 仓库         | 一般不改               |
 | `src/data_collect/upload_to_modelscope.py`                        | 把 `data/RoboSafeJanus-Benchmark` 同步到 ModelScope 私有 dataset 仓库 | 一般不改               |
 | `src/data_collect/upload_lerobot_to_modelscope.py`                | 把 `data/RoboSafeJanus-Benchmark-Lerobot` 的 v30/v21 导出同步到 ModelScope 私有 dataset 仓库 | 一般不改               |
 | `src/data_collect/lerobot_v30_to_v21.py`                          | 从同任务的 LeRobot v3.0 导出派生 v2.1(`export_lerobot.sh` 调用)                | 一般不改               |
@@ -603,7 +602,7 @@ python src/data_collect/eval_layouts.py derive --source make_toast --task make_t
 
 ---
 
-## 8.5 上传到 Hugging Face / ModelScope 私有仓库
+## 8.5 上传到 ModelScope 私有仓库
 
 远端沿用**扁平布局**,与本地的嵌套目录不同:
 
@@ -612,25 +611,9 @@ data/RoboSafeJanus-Benchmark/<group>/<level>/<task>[_failed]/<config>/...   (本
 <repo>/RoboSafeJanus/<task>[_failed]/<config>/...                           (远端)
 ```
 
-两个脚本都只上传 `task/robosafejanus_tasks.json` 中的任务(映射见 `benchmark_layout.upload_files`),`_shards/` 和 JSON 之外的目录不上传(会打印 `skip`)。上传前在 `data/.cache/upload_view/RoboSafeJanus/` 下按远端路径建硬链接,SDK 上传这个视图;硬链接不占额外空间,mtime / size 与原文件相同,上传缓存可复用。`--prefix` 可改远端顶层目录名。
+脚本只上传 `task/robosafejanus_tasks.json` 中的任务(映射见 `benchmark_layout.upload_files`),`_shards/` 和 JSON 之外的目录不上传(会打印 `skip`)。上传前在 `data/.cache/upload_view/RoboSafeJanus/` 下按远端路径建硬链接,SDK 上传这个视图;硬链接不占额外空间,mtime / size 与原文件相同,上传缓存可复用。`--prefix` 可改远端顶层目录名。
 
 `--dry_run` 按任务列出要上传(新增 / 大小变化)和要删除(远端有、本地没有,例如改名前的旧任务)的文件,不上传不删除,**同步前先看一遍**。上传对齐情况也可以用 `python scripts/internal/check_task_alignment.py --modelscope <user>/<repo>` 逐文件检查。
-
-**Hugging Face(`upload_to_hf.py`)**
-
-```bash
-# 先登录(需要 write 权限的 token),或 export HF_TOKEN=hf_xxx
-hf auth login --force
-# 预览:按任务列出要上传 / 删除的文件,不上传不删除
-python src/data_collect/upload_to_hf.py --repo_id <user>/<repo> --dry_run
-# 同步:上传新增 / 修改的文件,再删除远端多出来的文件
-python src/data_collect/upload_to_hf.py --repo_id <user>/<repo>
-```
-
-- 远端路径 `<repo>/RoboSafeJanus/<task>/...`(见上)。仓库不存在时自动建为**私有** dataset;已存在但为公开时报错退出。
-- 可反复运行:用 `upload_large_folder` 断点续传,哈希缓存在 `data/.cache/upload_view/.cache/huggingface/`,中断后重跑即可续传;本地删掉的 episode、改名 / 移出 JSON 的任务会在上传完成后从远端 `RoboSafeJanus/` 下删除(`--no_delete` 关闭)。本地没有可上传文件时拒绝同步。
-- `--exclude "RoboSafeJanus/*_failed/*"` 可排除失败尝试(模式写远端路径)。正在采集的任务等结束再传。
-- hf-mirror.com 不支持上传,脚本默认直连 `https://huggingface.co`(忽略 `HF_ENDPOINT`,可用 `--endpoint` / `HF_UPLOAD_ENDPOINT` 覆盖),需要能直连或设置 `HTTPS_PROXY`。
 
 **ModelScope(`upload_to_modelscope.py`)**
 
@@ -644,7 +627,7 @@ python src/data_collect/upload_to_modelscope.py --repo_id <user>/<repo> --dry_ru
 python src/data_collect/upload_to_modelscope.py --repo_id <user>/<repo>
 ```
 
-- 参数和行为与 `upload_to_hf.py` 一致:远端路径 `<repo>/RoboSafeJanus/<task>/...`,仓库不存在时自动建为**私有** dataset,已存在但非私有时报错退出;`--exclude` 写法相同;先上传后删除(`--no_delete` 关闭),上传有失败时不删远端,本地没有可上传文件时拒绝同步。远端列文件较慢,`--dry_run` 可能要几分钟。
+- 远端路径 `<repo>/RoboSafeJanus/<task>/...`(见上)。仓库不存在时自动建为**私有** dataset,已存在但非私有时报错退出;`--exclude "RoboSafeJanus/*_failed/*"` 可排除失败尝试(模式写远端路径)。正在采集的任务等结束再传。
 - 可反复运行:已提交文件记在 `data/.cache/modelscope/upload_<user>__<repo>.json`,中断后重跑即续传;缓存丢失时会重新算 sha256,内容相同的文件服务端复用,不重复传输。
 - ModelScope 在国内可直连,不需要代理;国际站用 `--endpoint https://www.modelscope.ai`。
 

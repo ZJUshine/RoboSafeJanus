@@ -1,4 +1,4 @@
-"""``upload_to_hf.py`` / ``upload_to_modelscope.py`` 共用:本地 → 远端路径映射与同步计划。
+"""``upload_to_modelscope.py`` 用:本地 → 远端路径映射与同步计划。
 
 远端布局为扁平的 ``<prefix>/<task>[_failed]/<config>/...``(默认 prefix ``RoboSafeJanus``),本地是
 ``data/RoboSafeJanus-Benchmark/<group>/<level>/<task>/...``,映射见 ``benchmark_layout.upload_files``。

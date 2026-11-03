@@ -80,7 +80,7 @@ OMNI_KIT_ACCEPT_EULA=YES bash scripts/robodojo.sh eval \
 | 成功判定 | `python scripts/internal/task_success_spec.py --group <group>`(与 JSON 对照) |
 | 采集数据 | `check_task_alignment.py --group <group> --only data --deep`;`ls <dir>/data \| wc -l` 与 `seed.txt` 条数一致;抽帧/看视频 |
 | 上传前 | `check_task_alignment.py --group <group> --deep`,无 ERROR |
-| 上传后 | `check_task_alignment.py --only modelscope --modelscope <repo>`(或 `--hf`),逐文件一致 |
+| 上传后 | `check_task_alignment.py --only modelscope --modelscope <repo>`,逐文件一致 |
 | 脚本 / Python | `bash -n <script>`;`ruff check <files>`;`git diff --check` |
 
 - `check_task_alignment.py` 有 ERROR 时退出码为 1,必须修完;WARN 要在汇报里说明是否可忽略。
@@ -88,13 +88,13 @@ OMNI_KIT_ACCEPT_EULA=YES bash scripts/robodojo.sh eval \
 
 ## 5. 数据上传
 
-- 远端(ModelScope `zjushine/RoboSafeJanus-Benchmark`、HF)保持**扁平布局** `RoboSafeJanus/<task>/<config>/...`,不要改成本地的嵌套布局。
+- 远端(ModelScope `zjushine/RoboSafeJanus-Benchmark`)保持**扁平布局** `RoboSafeJanus/<task>/<config>/...`,不要改成本地的嵌套布局。
 - 只上传 JSON 中的任务;正在采集或还没合并完的任务不要上传。
 - **先 `--dry_run`**,把要上传 / 要删除的文件清单给用户看;涉及删除远端文件(改名、移出 JSON 的旧任务)时必须等用户确认后再真正同步。
 - 仓库必须是私有的;脚本发现仓库公开会退出,不要绕过。
 - 上传中断直接重跑同一命令续传。上传后用 `check_task_alignment.py --only modelscope` 核对,并可运行 `python scripts/internal/sync_status.py` 刷新同步看板。
 - LeRobot 导出(`scripts/export_lerobot.sh`)在 HDF5 数据确认无误后再做;HDF5 有改动(如同步了指令)后要重新导出对应任务。
-- 不要把 token 写进代码、命令历史或提交;使用 `hf auth login` / `modelscope login` 或环境变量。
+- 不要把 token 写进代码、命令历史或提交;使用 `modelscope login` 或环境变量。
 
 ## 6. 提交
 

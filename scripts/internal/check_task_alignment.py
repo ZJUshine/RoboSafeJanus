@@ -16,7 +16,6 @@
     flat        data/RoboSafeJanus-Benchmark-flat 软链接视图
     lerobot     data/RoboSafeJanus-Benchmark-Lerobot/<v21|v30>/... 导出目录
     modelscope  远端 <repo>/RoboSafeJanus/<task>/ 与 JSON、本地数据逐文件(大小)是否一致(需要 modelscope_hub)
-    hf          同上,Hugging Face(需要 huggingface_hub)
 
 用法::
 
@@ -77,7 +76,7 @@ ASSET_SECTIONS = ("Rigid", "Articulation", "Geometry", "Fluid", "Garment", "Clut
 LABEL_ARGS = ("label", "label_A", "label_B", "label_C")
 LEROBOT_VERSIONS = ("v21", "v30")
 FLAT_VIEW_CMD = "python src/data_collect/benchmark_layout.py --flat_view"
-SECTIONS = ("json", "code", "config", "inventory", "eval_layout", "data", "flat", "lerobot", "modelscope", "hf")
+SECTIONS = ("json", "code", "config", "inventory", "eval_layout", "data", "flat", "lerobot", "modelscope")
 LEVEL_ORDER = {"ERROR": 0, "WARN": 1, "INFO": 2}
 
 
@@ -689,14 +688,6 @@ def list_modelscope(repo_id: str, endpoint: str | None) -> dict[str, int]:
     return {f.path: f.size for f in api.list_repo_files(repo_id, "dataset", recursive=True) if not f.is_dir}
 
 
-def list_hf(repo_id: str, endpoint: str | None) -> dict[str, int]:
-    from huggingface_hub import HfApi
-    from huggingface_hub.hf_api import RepoFile
-
-    tree = HfApi(endpoint=endpoint).list_repo_tree(repo_id, repo_type="dataset", recursive=True)
-    return {f.path: f.size for f in tree if isinstance(f, RepoFile)}
-
-
 def check_remote(
     report: Report, sec: str, tasks: dict, remote: dict[str, int], local_files: dict[str, dict[str, int]], prefix: str
 ) -> None:
@@ -761,7 +752,7 @@ def print_text(report: Report, sections: list[str]) -> None:
 
 def parse_sections(value: str | None, remote: list[str]) -> list[str]:
     if not value:
-        return [s for s in SECTIONS if s not in ("modelscope", "hf") or s in remote]
+        return [s for s in SECTIONS if s != "modelscope" or s in remote]
     chosen = [s.strip() for s in value.split(",") if s.strip()]
     unknown = [s for s in chosen if s not in SECTIONS]
     if unknown:
@@ -776,9 +767,7 @@ def main() -> int:
     parser.add_argument("--deep", action="store_true", help="逐个读取 hdf5 的 instruction(需要 h5py)")
     parser.add_argument("--modelscope", metavar="REPO_ID", default=os.environ.get("MS_DATA_REPO_ID"),
                         help="检查 ModelScope dataset(也可用环境变量 MS_DATA_REPO_ID)")
-    parser.add_argument("--hf", metavar="REPO_ID", default=os.environ.get("HF_DATA_REPO_ID"),
-                        help="检查 Hugging Face dataset(也可用环境变量 HF_DATA_REPO_ID)")
-    parser.add_argument("--endpoint", default=None, help="ModelScope / HF endpoint")
+    parser.add_argument("--endpoint", default=None, help="ModelScope endpoint")
     parser.add_argument(
         "--remote_prefix", default=REMOTE_PREFIX, help="远端顶层目录,布局为 <prefix>/<task>/<config>/..."
     )
@@ -790,7 +779,7 @@ def main() -> int:
     parser.add_argument("--strict", action="store_true", help="有 WARN 也返回 1")
     args = parser.parse_args()
 
-    remote = [name for name, repo in (("modelscope", args.modelscope), ("hf", args.hf)) if repo]
+    remote = [name for name, repo in (("modelscope", args.modelscope),) if repo]
     sections = parse_sections(args.only, remote)
     data_dir = Path(args.data_dir).resolve()
     report = Report()
@@ -814,7 +803,7 @@ def main() -> int:
         check_flat(report, tasks, data_dir, data_dir.with_name(f"{BENCHMARK_NAME}-flat"))
     if "lerobot" in sections:
         check_lerobot(report, tasks, data_dir, data_dir.with_name(f"{BENCHMARK_NAME}-Lerobot"))
-    for sec, repo, lister in (("modelscope", args.modelscope, list_modelscope), ("hf", args.hf, list_hf)):
+    for sec, repo, lister in (("modelscope", args.modelscope, list_modelscope),):
         if sec not in sections:
             continue
         if not repo:

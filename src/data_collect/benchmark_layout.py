@@ -16,7 +16,7 @@
 ``data/<bench>/<task>/<config>/data`` 结构的 XPolicyLab 转换 / 训练脚本使用(bench 名为
 ``RoboSafeJanus-Benchmark-flat``)。
 
-远端仓库(``upload_to_modelscope.py`` / ``upload_to_hf.py``)沿用扁平布局 ``RoboSafeJanus/<task>[_failed]/...``:
+远端仓库(``upload_to_modelscope.py``)沿用扁平布局 ``RoboSafeJanus/<task>[_failed]/...``:
 ``upload_files`` 给出远端路径到本地文件的映射,``build_upload_view`` 在 ``<save_dir 的父目录>/.cache/upload_view``
 下按远端路径建硬链接,供 SDK 整目录上传(硬链接与原文件 mtime / size 相同,上传缓存可复用)。
 """

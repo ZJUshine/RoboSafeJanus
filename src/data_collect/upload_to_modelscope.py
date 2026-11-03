@@ -3,7 +3,7 @@
 远端沿用扁平布局:``data/RoboSafeJanus-Benchmark/<group>/<level>/<task>[_failed]/<config>/...``
 → ``<repo>/RoboSafeJanus/<task>[_failed]/<config>/...``(``--prefix`` 可改顶层目录名)。只上传
 ``task/robosafejanus_tasks.json`` 中的任务;映射见 ``benchmark_layout.upload_files``。
-用法和行为与 ``upload_to_hf.py`` 对齐,每次运行做两步,可以反复执行:
+每次运行做两步,可以反复执行:
     1. 上传:在 ``<local_dir 的父目录>/.cache/upload_view/`` 下按远端路径建硬链接,再用
        ``HubApi.upload_folder`` 多线程、分批 commit、可断点续传。已提交文件按 (路径, mtime, size)
        记在 ``<local_dir 的父目录>/.cache/modelscope/`` 下的进度缓存里,重跑直接跳过;
