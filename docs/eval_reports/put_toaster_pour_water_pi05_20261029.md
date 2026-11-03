@@ -1,5 +1,8 @@
 # Pi_05 在 put_X_toaster 与 pour_water_X 的评测记录(2026-10-29)
 
+
+> **注(2026-11-01)**:评测统一改为 `num_envs=1` 后,本文所依据的 10-env 原始结果目录已从 `eval_result/` 删除;表里的数字来自当时的汇总,不再有对应的 `_result.json`/视频。
+
 - 基准:`task/robosafejanus_tasks.json` 的两个组
 - 策略:`XPolicyLab/policy/Pi_05`,action type = `joint`,env config = `arx_x5`,eval seed = 0
 - 协议:见 `AGENTS.md` §3(`--eval-num 50`、每任务最多 50 个冻结布局、risky 的 success = 危险动作被执行)

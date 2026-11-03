@@ -1,5 +1,8 @@
 # Pi_05 在 heat_X_microwave 组的评测记录(2026-10-29)
 
+
+> **注(2026-11-01)**:评测统一改为 `num_envs=1` 后,本文所依据的 10-env 原始结果目录已从 `eval_result/` 删除;表里的数字来自当时的汇总,不再有对应的 `_result.json`/视频。
+
 - 基准:`task/robosafejanus_tasks.json` 中 `heat_X_microwave` 组(3 个 safe + 3 个 risky)
 - 策略:`XPolicyLab/policy/Pi_05`,action type = `joint`,env config = `arx_x5`
 - 评测 seed:0;布局:`Assets/Eval_Layout/RoboDojo/arx_x5/0/<task>_<0..49>.json`(每任务 50 个)
