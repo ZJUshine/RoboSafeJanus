@@ -28,6 +28,7 @@ import argparse
 from collections import defaultdict
 import fnmatch
 import os
+import re
 import sys
 
 try:
@@ -77,15 +78,35 @@ def step_key(step):
 api = HubApi(endpoint=args.endpoint)
 files = api.list_repo_files(args.repo_id, "model", revision=args.revision, recursive=True)
 
+# 只有纯数字或 step_<n> 形式的目录才是 checkpoint step;assets/、wandb/ 等是 run 级附属内容。
+STEP_RE = re.compile(r"^(?:global_)?step[_-]?\d+$|^\d+$", re.IGNORECASE)
+
 # (policy, task, run) -> step -> [(path, size)];顶层 README / .gitattributes 等不是 checkpoint,忽略
 runs = defaultdict(lambda: defaultdict(list))
+# (policy, task, run) -> [(path, size)];run 级附属文件,例如
+# LingBot_VLA/<task>/<run>/lingbotvla_cli.yaml(评测适配器需要)和
+# LingBot_VLA/<task>/<run>/assets/norm_stats/*.json,它们不属于任何 step。
+run_files = defaultdict(list)
 for f in files:
     parts = f.path.split("/")
-    if f.is_dir or len(parts) < 5:
+    if f.is_dir or len(parts) < 4:
         continue
-    policy, task, run, step = parts[:4]
-    if matches(policy, args.policy) and matches(task, args.task) and matches(run, args.run):
+    policy, task, run = parts[:3]
+    if not (matches(policy, args.policy) and matches(task, args.task) and matches(run, args.run)):
+        continue
+    if len(parts) == 4:
+        run_files[(policy, task, run)].append((f.path, f.size or 0))
+        continue
+    step = parts[3]
+    # wandb/ 是训练日志目录,由 download_wandb_from_modelscope.py 单独处理,
+    # 不能当成一个 step,否则 --step latest 会误选它。
+    if step == "wandb":
+        continue
+    if STEP_RE.match(step):
         runs[(policy, task, run)][step].append((f.path, f.size or 0))
+    else:
+        # assets/ 等 run 级附属子目录:不跟 --step 走。
+        run_files[(policy, task, run)].append((f.path, f.size or 0))
 
 selected = {}
 for key, steps in sorted(runs.items()):
@@ -103,6 +124,9 @@ if not selected:
     sys.exit(f"[download_models] no checkpoints in {args.repo_id} match "
              f"policy={args.policy} task={args.task} run={args.run} step={args.step}")
 
+# run 根目录的附属文件不跟 --step 走:只要这个 run 被选中,就一并下载。
+selected_run_files = {key: run_files[key] for key in selected if run_files.get(key)}
+
 total_files, total_bytes = 0, 0
 for (policy, task, run), steps in selected.items():
     for step, items in steps.items():
@@ -110,6 +134,15 @@ for (policy, task, run), steps in selected.items():
         total_files += len(items)
         total_bytes += size
         print(f"  {policy}/{task}/{run}/{step}  ({len(items)} files, {size / 1e9:.2f} GB)")
+    items = selected_run_files.get((policy, task, run), [])
+    if items:
+        size = sum(s for _, s in items)
+        total_files += len(items)
+        total_bytes += size
+        names = ", ".join(os.path.basename(p) for p, _ in items[:5])
+        if len(items) > 5:
+            names += f", ... (+{len(items) - 5})"
+        print(f"  {policy}/{task}/{run}/  (run 级附属 {len(items)} files: {names})")
 print(f"[download_models] {len(selected)} runs, {total_files} files, {total_bytes / 1e9:.2f} GB from {args.repo_id}")
 if args.list:
     sys.exit(0)
@@ -117,6 +150,7 @@ if args.list:
 local_dir = os.path.abspath(args.local_dir)
 os.makedirs(local_dir, exist_ok=True)
 paths = [p for steps in selected.values() for items in steps.values() for p, _ in items]
+paths += [p for items in selected_run_files.values() for p, _ in items]
 api.download_repo(
     args.repo_id,
     "model",
