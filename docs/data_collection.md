@@ -602,6 +602,35 @@ python src/data_collect/eval_layouts.py derive --source make_toast --task make_t
 
 ---
 
+## 8.4 资产:从 ModelScope 下载(`scripts/init_assets.sh`)
+
+`Assets/` 和 `ext_assets/` 放在私有 dataset `zjushine/RoboSafeJanus-Asset`。它以 Hugging Face `RoboDojo-Benchmark/RoboDojo` 的 `Assets/` 为基础,加上 RoboSafeJanus 的改动:X5 官方关节限位(`Robots/x5/ARX.usd`、`Robots/x5/X5A.urdf`)、`Robots/*/curobo.yml`、`Eval_Layout/RoboDojo/arx_x5/0/` 评测布局、ArtVIP / GenieSim / SimReady 等包装物体,以及包装物体引用的原件 `ext_assets/robodojo_format/`、`ext_assets/integrate/`。
+
+```bash
+pip install -U "modelscope>=1.40"
+modelscope login --token <token>     # 账号需要有这个私有仓库的权限
+bash scripts/init_assets.sh          # 下载到 .cache/robosafejanus_assets/,Assets 软链到那里
+```
+
+- 约 47 GB(Assets 39 GB + ext_assets 8 GB),中断后重跑同一条命令即续传。
+- 包装物体的 `object.usd` / `metadata.json` 和 `Robots/*/curobo.yml` 里写着上传机的绝对路径 `/mnt/hierophant-1/xuancun/RoboSafeJanus/`。下载完脚本会把它替换成 `.cache/robosafejanus_assets/`,重复执行不会改坏;上传机路径变了时用 `MS_SOURCE_PREFIX=<旧路径>/` 指定。
+- `Assets/`(含 Robots / Object / Material / Eval_Layout)已完整时直接跳过;要重新下载,先删掉或改名 `Assets` 软链接。
+- `ASSET_SOURCE=hf bash scripts/init_assets.sh` 走原来的 Hugging Face 稀疏克隆,拿到的是**官方原版**,没有上面的 RoboSafeJanus 改动。
+- 改了资产后要重新上传,其他机器才拿得到。只传有变化的文件,内容相同的 LFS 文件服务端复用;不会删除远端多出来的文件:
+
+  ```bash
+  python - <<'EOF'
+  from modelscope_hub import HubApi
+  api = HubApi()
+  api.upload_folder("zjushine/RoboSafeJanus-Asset", "dataset", ".cache/robodojo_assets_repo",
+                    allow_patterns=["Assets/*"])
+  api.upload_folder("zjushine/RoboSafeJanus-Asset", "dataset", "ext_assets", path_in_repo="ext_assets",
+                    allow_patterns=["robodojo_format/*", "integrate/*"])
+  EOF
+  ```
+
+  本机的 `Assets` 软链到 `.cache/robodojo_assets_repo/Assets`(HF 克隆,路径就是 `/mnt/hierophant-1/xuancun/RoboSafeJanus/`);在别的机器上传时,把第一个目录换成该机器 `Assets` 的父目录。
+
 ## 8.5 上传到 ModelScope 私有仓库
 
 远端沿用**扁平布局**,与本地的嵌套目录不同:
@@ -658,6 +687,7 @@ rsync -avL --partial -e "ssh -p $PORT" Assets/ $SERVER:$REPO/Assets/
 rsync -av --partial -e "ssh -p $PORT" ext_assets/robodojo_format ext_assets/integrate $SERVER:$REPO/ext_assets/
 ```
 
+- 也可以不传资产:在服务器上 `bash scripts/init_assets.sh` 直接从 ModelScope 下载(8.4 节),绝对路径会自动替换,下面的 rsync `Assets/`、`ext_assets` 和 sed 步骤都可以省掉。
 - 资产里有本地仓库的**绝对路径**:`ArtVIP_*` / `GenieSim_*` 包装的 `object.usd`(均为 ASCII usda)和 `metadata.json` 引用 `ext_assets/robodojo_format/...`,`Assets/Robots/*/curobo.yml` 里有 `asset_root_path` / `urdf_path`,`ext_assets/integrate/manifest.json` 也有。服务器上的仓库路径不同,同步后在服务器上统一替换,否则这些资产加载失败:
 
   ```bash

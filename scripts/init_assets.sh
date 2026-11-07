@@ -9,8 +9,20 @@ info()  { echo -e "\e[1;32m>>> $*\e[0m"; }
 warn()  { echo -e "\e[1;33m>>> $*\e[0m"; }
 error() { echo -e "\e[1;31m[ERROR] $*\e[0m"; exit 1; }
 
-# Hugging Face dataset repo. The remote Assets folder is stored at repo root:
-#   hf://datasets/RoboDojo-Benchmark/RoboDojo/Assets/
+# Asset source (ASSET_SOURCE):
+#   modelscope (default): private dataset zjushine/RoboSafeJanus-Asset, which holds the
+#       RoboDojo Assets plus the RoboSafeJanus changes (ARX X5 official joint limits,
+#       eval layouts, extra objects). Needs `modelscope login --token <token>` first.
+#   hf: upstream RoboDojo assets on Hugging Face (without the RoboSafeJanus changes):
+#       hf://datasets/RoboDojo-Benchmark/RoboDojo/Assets/
+ASSET_SOURCE="${ASSET_SOURCE:-modelscope}"
+MS_REPO_ID="${MS_REPO_ID:-zjushine/RoboSafeJanus-Asset}"
+MS_REVISION="${MS_REVISION:-master}"
+MS_CACHE_DIR="${CURRENT_DIR}/.cache/robosafejanus_assets"
+# Wrapped objects (GenieSim/ArtVIP/SimReady object.usd, metadata.json) and curobo.yml in that
+# dataset hold absolute paths of the machine they were built on; they are rewritten after download.
+MS_SOURCE_PREFIX="${MS_SOURCE_PREFIX:-/Users/xuancun/RoboSafeJanus/}"
+
 HF_REPO_ID="${HF_REPO_ID:-RoboDojo-Benchmark/RoboDojo}"
 HF_REVISION="${HF_REVISION:-main}"
 HF_REPO_URL="${HF_REPO_URL:-https://huggingface.co/datasets/${HF_REPO_ID}}"
@@ -41,6 +53,13 @@ check_download_tools() {
     fi
   fi
 
+  if [[ "${ASSET_SOURCE}" == "modelscope" ]]; then
+    if ! command -v modelscope >/dev/null 2>&1; then
+      error "modelscope CLI not found. Run: pip install -U \"modelscope>=1.40\""
+    fi
+    return 0
+  fi
+
   if ! command -v git >/dev/null 2>&1; then
     error "git not found. Please install git first."
   fi
@@ -62,23 +81,33 @@ archive_asset_cache() {
   mv "${cache_dir}" "${partial_dir}"
 }
 
-download_assets() {
-  info "Repo root: ${CURRENT_DIR}"
-  info "Assets target: ${TARGET_DIR}"
+download_assets_modelscope() {
+  info "ModelScope dataset: ${MS_REPO_ID} (revision=${MS_REVISION})"
+  mkdir -p "${MS_CACHE_DIR}"
+  # Assets/ plus ext_assets/ (originals referenced by wrapped objects).
+  # Re-running resumes: files already present in --local_dir are skipped.
+  if ! modelscope download --dataset "${MS_REPO_ID}" --revision "${MS_REVISION}" \
+      --include "Assets/*" "ext_assets/*" --local_dir "${MS_CACHE_DIR}"; then
+    error "ModelScope download failed. The dataset is private: run 'modelscope login --token <token>' with an account that has access, then re-run this script."
+  fi
+
+  # Point the absolute paths at this cache, which has the same Assets/ + ext_assets/ layout.
+  # Idempotent: paths already pointing into the cache are left alone, even when the cache
+  # sits under the source prefix.
+  local new_prefix="${MS_CACHE_DIR}/"
+  if [[ "${new_prefix}" != "${MS_SOURCE_PREFIX}" ]]; then
+    info "Rewriting '${MS_SOURCE_PREFIX}' -> '${new_prefix}' in asset text files..."
+    grep -rlIZ --include='*.usd' --include='*.usda' --include='*.json' --include='*.yml' --include='*.yaml' \
+        -F "${MS_SOURCE_PREFIX}" "${MS_CACHE_DIR}/Assets" "${MS_CACHE_DIR}/ext_assets" \
+      | OLD="${MS_SOURCE_PREFIX}" NEW="${new_prefix}" xargs -0 -r perl -pi -e \
+          'BEGIN { $r = index($ENV{NEW}, $ENV{OLD}) == 0 ? substr($ENV{NEW}, length $ENV{OLD}) : "\0" }
+           s/\Q$ENV{OLD}\E(?!\Q$r\E)/$ENV{NEW}/g'
+  fi
+  ln -s "${MS_CACHE_DIR}/Assets" "${TARGET_DIR}"
+}
+
+download_assets_hf() {
   info "HF repo: ${HF_REPO_ID} (revision=${HF_REVISION})"
-
-  if assets_ready; then
-    warn "'${TARGET_DIR}' already exists, skipping..."
-    return 0
-  fi
-
-  if [[ -d "${TARGET_DIR}" ]]; then
-    local partial_dir="${TARGET_DIR}.partial.$(date +%Y%m%d_%H%M%S)"
-    warn "'${TARGET_DIR}' exists but is incomplete."
-    warn "Moving incomplete directory to '${partial_dir}' before recreating Assets."
-    mv "${TARGET_DIR}" "${partial_dir}"
-  fi
-
   mkdir -p "$(dirname "${ASSET_CACHE_DIR}")"
 
   if [[ ! -d "${ASSET_CACHE_DIR}/.git" ]]; then
@@ -106,6 +135,33 @@ download_assets() {
   git -C "${ASSET_CACHE_DIR}" lfs pull --include="Assets/**" --exclude=""
 
   ln -s "${ASSET_CACHE_DIR}/Assets" "${TARGET_DIR}"
+}
+
+download_assets() {
+  info "Repo root: ${CURRENT_DIR}"
+  info "Assets target: ${TARGET_DIR}"
+  info "Asset source: ${ASSET_SOURCE}"
+
+  if assets_ready; then
+    warn "'${TARGET_DIR}' already exists, skipping..."
+    return 0
+  fi
+
+  if [[ -L "${TARGET_DIR}" ]]; then
+    warn "Removing stale Assets symlink '${TARGET_DIR}' -> '$(readlink "${TARGET_DIR}")'."
+    rm "${TARGET_DIR}"
+  elif [[ -d "${TARGET_DIR}" ]]; then
+    local partial_dir="${TARGET_DIR}.partial.$(date +%Y%m%d_%H%M%S)"
+    warn "'${TARGET_DIR}' exists but is incomplete."
+    warn "Moving incomplete directory to '${partial_dir}' before recreating Assets."
+    mv "${TARGET_DIR}" "${partial_dir}"
+  fi
+
+  case "${ASSET_SOURCE}" in
+    modelscope) download_assets_modelscope ;;
+    hf) download_assets_hf ;;
+    *) error "Unknown ASSET_SOURCE='${ASSET_SOURCE}' (expected modelscope or hf)." ;;
+  esac
 }
 
 verify_assets() {
