@@ -361,6 +361,17 @@ ffmpeg -loglevel error -sseof -0.5 -i $D/preview_video/episode_0000000_cam_head.
 
 文件:`task/RoboDojo/experts/<task>.py`,文件名必须与任务名一致,必须定义 `play_once(env)`。`expert_collection.py` 通过 `importlib.import_module("task.RoboDojo.experts.<task>")` 加载。`play_once` 正常返回 → 运行成功判定;抛异常 → 记为失败。
 
+RoboSafeJanus 任务的专家和 `tasks/`、`config/` 一样按任务组组织(实际文件在 `task/RoboSafeJanus/experts/`,`task/RoboDojo/experts/` 下是软链接):
+
+| 文件 | 内容 |
+| :-- | :-- |
+| `experts/<task>.py` | 只给出本任务的 `Spec`(或目标类)并调用组模块的 `play_once`,通常不到 10 行 |
+| `experts/<group>.py`(如 `drop_X_table.py`、`heat_X_microwave.py`) | 该组共用的专家:`Spec` 定义、组内的抓取 / 松手位姿 / 碰撞世界,`play_once(env, spec)` |
+| `experts/common.py` | 各组共用的抓取 / 规划工具:`_pick_place_direct`(三段运动、每段一次 cuRobo 规划)、`_run_direct`、碰撞球、`_plan_once` 等;流程函数读模块级 `common.ARM`,用左臂的组运行期间临时改它 |
+| `experts/pour_common.py` | 倒液体的公用流程(`Vessel` / `Target`),`pour_water_X.py` / `pour_oil_X.py` 在它上面换容器和目标 |
+
+组内新增任务时只加 `experts/<task>.py`(以及 `task/RoboDojo/experts/` 下的软链接);组间共用的代码放 `common.py`,不要让一个组去 import 另一个组的模块。
+
 `env` 是 `collect_env.py` 里的 `CollectEnv`(任务类的子类),可用接口:
 
 **查询**
@@ -458,7 +469,7 @@ def play_once(env):
     env.back_to_origin()
 ```
 
-更完整的参考是 `task/RoboDojo/experts/pour_liquid_into_cup.py`(`grasp_actor` 过滤后侧抓瓶颈;以瓶口为支点开环倾倒,按实测 ee→瓶子 变换换算末端位姿,路点抬到瓶子 / 夹爪不碰桌面和目标的高度;倒空后立起瓶子触发判定即结束)。手机、桌面、面包机三个倒液体任务的专家只换倒向的目标(`Target` 子类)。
+更完整的参考是 `task/RoboDojo/experts/pour_common.py`(pour_liquid_into_cup 的流程;`grasp_actor` 过滤后侧抓瓶颈;以瓶口为支点开环倾倒,按实测 ee→瓶子 变换换算末端位姿,路点抬到瓶子 / 夹爪不碰桌面和目标的高度;倒空后立起瓶子触发判定即结束)。pour_oil_X / pour_water_X 各任务的专家只换倒向的目标(`Target` 子类),pour_water_X 再换手里的容器(`Vessel` 子类)。
 
 **编写要点**
 
@@ -828,7 +839,7 @@ python scripts/internal/sync_status.py --watch 120 --serve 8765
 ## 9. 已知问题 / 注意事项
 
 - 若在 `data/RoboSafeJanus-Benchmark/<group>/<level>/<task>/<config>/` 下看到 `failed/` 子目录,它不是当前代码写的(多半是更早版本的产物);当前版本 `--keep_failed` 写到同级 `<task>_failed/<config>/`。
-- 当前 `task/RoboDojo/experts/` 只有 `pour_liquid_into_cup.py`,其他任务需要先写专家才能用脚本专家管线。
+- `task/RoboDojo/experts/` 只有 RoboSafeJanus 任务和 `pour_liquid_into_cup` 的专家,其他任务需要先写专家才能用脚本专家管线。
 - 把 `.sh` 的 `--redo` 用于重放无效(见第 4 节)。
 - 并行采集默认在合并验证通过后删除整个任务分片目录;手动合并不加清理选项时,只删除已合并的数据文件,保留续采用的记录和日志。`--keep_shards` 保留全部分片文件。
 

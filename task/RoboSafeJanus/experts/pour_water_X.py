@@ -1,4 +1,4 @@
-"""用杯子倒水的公用部分(pour_water_X 组):流程同 ``pour_liquid_into_cup``,手里换成装水的杯子(``Cup``),
+"""pour_water_X 组共用的脚本专家:流程见 ``pour_common``,手里换成装水的杯子(``Cup``),
 倒向平放在桌上的目标(``FlatTarget`` 子类,socket / laptop / book)或桌上开口朝上的容器(``ContainerTarget`` 子类,
 cup / plant_pot / wine_glass)。
 
@@ -11,12 +11,12 @@ import logging
 
 import numpy as np
 
-from task.RoboDojo.experts import pour_liquid_into_cup as cup
+from task.RoboDojo.experts import pour_common as pour
 
 log = logging.getLogger(__name__)
 
 
-class Cup(cup.Vessel):
+class Cup(pour.Vessel):
     LABEL = "water_cup"
     FLUID = "liquid"
     GRASP_Z = (0.08, 0.10)  # 侧抓杯沿下方(TCP 高度):再低时预抓取位姿离桌面太近、不可达
@@ -26,10 +26,10 @@ class Cup(cup.Vessel):
     TILT_START = 45.0
     TILT_STOP = 60.0
     BACK_TILT = 40.0
-    WRIST_PICK = 4  # 不要先把手腕转半圈再抓
+    WRIST_PICK = 4  # 不要先把手腕转半圈再抓;官方限位 joint6=±120°,对称抓取的两版只选转得少的
 
 
-class FlatTarget(cup.Target):
+class FlatTarget(pour.Target):
     """平放在桌上的实心目标:出流点在它中心(往杯子一侧 ``LAND_BACK``、沿抓取接近方向 ``ACROSS``)、顶面上方
     ``MOUTH_ABOVE`` 处。
 
@@ -44,7 +44,7 @@ class FlatTarget(cup.Target):
     POUR_TIME = 6.0
 
     def __init__(self, env):
-        box = cup.footprint(env, self.LABEL)
+        box = pour.footprint(env, self.LABEL)
         self.aim_xy, self.top, self.boxes = box[0], box[3], [box]
 
     def pivot_xy(self, d):
@@ -60,11 +60,14 @@ class ContainerTarget(FlatTarget):
 
     LAND_BACK = 0.06
     ACROSS = 0.03
-    TILT_POUR = 120.0
+    # X5 官方限位 joint6 = ±120°:120° 的倾倒角在旧数据里让 80% 的成功轨迹 |joint6| 超过 120°
+    # (中位数 123°,最大 179°)。降到 105° 让大多数抓取可达;出流变慢,用 POUR_TIMEOUT 补。
+    TILT_POUR = 105.0
+    POUR_TIMEOUT = 8.0
 
     def __init__(self, env):
         super().__init__(env)
-        m = cup._mat(env.get_obj_pose(self.LABEL))
+        m = pour._mat(env.get_obj_pose(self.LABEL))
         _, _, _, meta = env.get_obj_asset(self.LABEL)
         center = np.asarray(meta["active"]["place"]["up"]["contact_circle"]["center"][:2], dtype=float)
         self.aim_xy = (m @ np.append(center, [0.0, 1.0]))[:2]
@@ -72,10 +75,10 @@ class ContainerTarget(FlatTarget):
 
 def _poured(env, label):
     """杯子包围盒外的液体粒子中,在 ``label`` 包围盒内的比例。"""
-    p = cup.particles(env, Cup.FLUID)
+    p = pour.particles(env, Cup.FLUID)
     inside = []
     for name in (Cup.LABEL, label):
-        m, (lo, hi) = cup._mat(env.get_obj_pose(name)), cup._bbox(env, name)
+        m, (lo, hi) = pour._mat(env.get_obj_pose(name)), pour._bbox(env, name)
         loc = (p - m[:3, 3]) @ m[:3, :3]
         inside.append(np.all((loc >= lo) & (loc <= hi), axis=1))
     poured = ~inside[0]
@@ -83,13 +86,13 @@ def _poured(env, label):
 
 
 def play_once(env, target_cls):
-    target = cup.play_once(env, target_cls, Cup)
+    target = pour.play_once(env, target_cls, Cup)
     landed = env.reward_manager.func_parser.fluid_landed_state[0].get((Cup.FLUID, target.LABEL))
     log.info(
         "landed on the %s %.3f, in its bbox %.3f, left in the cup %.3f",
         target.LABEL,
         float(landed.mean()) if landed is not None else float("nan"),
         _poured(env, target.LABEL),
-        cup._in_vessel(env, Cup),
+        pour._in_vessel(env, Cup),
     )
     return target

@@ -1,6 +1,6 @@
-"""put_apple_refrigerator 的脚本专家:同 ``put_toilet_cleaner_refrigerator``,苹果矮,自上而下抓(``grasp="top"``)。"""
+"""put_apple_refrigerator 的脚本专家:流程见 ``put_X_refrigerator``,苹果矮,自上而下抓(``grasp="top"``)。"""
 
-from task.RoboDojo.experts import put_toilet_cleaner_refrigerator as fridge
+from task.RoboDojo.experts import put_X_refrigerator as fridge
 
 SPEC = fridge.Spec("apple", grasp="top")
 

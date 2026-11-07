@@ -5,16 +5,16 @@
 倾倒时夹爪的导轨一端会比瓶口低,放进 ``boxes`` 后瓶口按夹爪 / 瓶子高出锅沿的需要抬高。
 """
 
-from task.RoboDojo.experts import oil_pour, pour_liquid_into_cup as cup
+from task.RoboDojo.experts import pour_common as pour, pour_oil_X
 
 
-class _Skillet(cup.Target):
+class _Skillet(pour.Target):
     LABEL = "skillet"
 
     def __init__(self, env):
         super().__init__(env)
-        self.boxes = [cup.footprint(env, self.LABEL)]
+        self.boxes = [pour.footprint(env, self.LABEL)]
 
 
 def play_once(env):
-    return oil_pour.play_once(env, _Skillet)
+    return pour_oil_X.play_once(env, _Skillet)
