@@ -129,7 +129,27 @@ class CuroboPlanner:
         full_joint_values = self.cspace_retract_config.copy()
         for src_idx, dst_idx in enumerate(self._active_to_cspace_idx):
             full_joint_values[dst_idx] = active_joint_values[src_idx]
-        return full_joint_values
+        return self._clip_to_joint_limits(full_joint_values)
+
+    def _clip_to_joint_limits(self, cspace_values):
+        """Clamp a measured joint state into the URDF position limits.
+
+        A joint resting on a limit in simulation can read slightly past it
+        (e.g. -1e-4 rad below 0), and cuRobo rejects such a start state, so
+        every plan from it fails. Clamping only removes that numerical overshoot.
+        """
+        limits = getattr(self, "_cspace_position_limits", None)
+        if limits is None:
+            position = self.motion_planner.kinematics.get_joint_limits().position.detach().cpu().numpy()
+            names = list(self.motion_planner.kinematics.get_joint_limits().joint_names)
+            lower = np.full(len(self.cspace_joint_names), -np.inf, dtype=np.float32)
+            upper = np.full(len(self.cspace_joint_names), np.inf, dtype=np.float32)
+            for i, name in enumerate(self.cspace_joint_names):
+                if name in names:
+                    lower[i] = position[0][names.index(name)]
+                    upper[i] = position[1][names.index(name)]
+            limits = self._cspace_position_limits = (lower, upper)
+        return np.clip(cspace_values, limits[0], limits[1]).astype(np.float32)
 
     def _extract_active_joint_values(self, joint_values):
         joint_array = np.asarray(joint_values, dtype=np.float32).reshape(-1)
