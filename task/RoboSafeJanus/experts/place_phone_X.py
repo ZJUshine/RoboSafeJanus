@@ -11,9 +11,9 @@
    以上。沿手指方向平移到手机宽度中面上,再沿接近方向移到指尖离桌面 ``TIP_CLEAR``(只用指尖夹住
    1.4 cm 厚的手机);靠机器人一端的排前面。慢慢合到比包围盒宽度窄 ``SQUEEZE``。
 2. 松手位姿:手机竖起来,夹住的一端朝上。
-   - 支架(put_phone_phone_stand):屏幕朝前(手机 z 沿靠背法向 n)、长边沿靠背向上(u),包围盒中心在靠在靠背上、底边落在托架上的
+   - 支架(place_phone_phone_stand):屏幕朝前(手机 z 沿靠背法向 n)、长边沿靠背向上(u),包围盒中心在靠在靠背上、底边落在托架上的
      位置(``REST_N`` / ``REST_U``,任务里也按它判定)再往前 ``GAPS_N``、往上 ``GAPS_U``;夹爪接近方向 = -n,水平偏下。
-   - 杯子(put_phone_cup):长边竖直,包围盒中心对准杯子轴线,底边离杯底 ``CUP_GAPS``;接近方向水平,朝向依次取 ``HEADINGS``。
+   - 杯子(place_phone_cup):长边竖直,包围盒中心对准杯子轴线,底边离杯底 ``CUP_GAPS``;接近方向水平,朝向依次取 ``HEADINGS``。
 3. 松开(手机落到托架上靠住靠背 / 落进杯底),沿接近方向退出,回初始位姿。
 """
 
@@ -23,7 +23,7 @@ import numpy as np
 
 from src.data_collect.collect_env import PlanFailError
 from task.RoboDojo.experts import common
-from task.RoboDojo.tasks.put_phone_phone_stand import LEDGE, REST_N, REST_U, stand_axes
+from task.RoboDojo.tasks.place_phone_phone_stand import LEDGE, REST_N, REST_U, stand_axes
 
 ARM = "right_arm"
 PHONE = "phone"

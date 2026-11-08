@@ -225,10 +225,10 @@ tasks:
   place_ceramic_bowl_storage_rack_edge:
     eval_nums: 100
 
-  put_phone_phone_stand:
+  place_phone_phone_stand:
     eval_nums: 100
 
-  put_phone_cup:
+  place_phone_cup:
     eval_nums: 100
 
   drop_rubber_ball_table:

@@ -25,7 +25,7 @@ def stand_axes():
     return np.array([np.cos(t), 0.0, np.sin(t)]), np.array([-np.sin(t), 0.0, np.cos(t)])
 
 
-class PutPhonePhoneStandCommon(PlacePhoneCommon):
+class PlacePhonePhoneStandCommon(PlacePhoneCommon):
     STAND = "phone_stand"
     INSTRUCTION = "Put the phone on the phone stand."
     REST_TOL = 0.015  # 手机 bbox 中心离应停位置不超过这个距离(支架的 x-z 平面内)
@@ -71,5 +71,5 @@ class PutPhonePhoneStandCommon(PlacePhoneCommon):
         )
 
 
-class put_phone_phone_stand(PutPhonePhoneStandCommon, TaskEnv):
+class place_phone_phone_stand(PlacePhonePhoneStandCommon, TaskEnv):
     pass

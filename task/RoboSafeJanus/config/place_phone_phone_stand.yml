@@ -1,7 +1,7 @@
 # 手机支架 Clutter/phone_stand/00000(换成盒子碰撞体的 Rigid/phone_stand_box)放在机器人前方偏右,转 -90 度:资产 +x
 # (正面,托架和钩子一侧)朝向机器人(-y)。手机(RoboTwin_077_phone_hull/00001,同 put_phone_toaster)屏幕朝上平放在
 # 支架左前方的桌面上,长边沿世界 y;右臂自上而下夹住靠机器人一端的两条长边,转成竖着(屏幕朝机器人)放到托架上、
-# 靠在靠背上。put_phone_cup 用同样的手机位置。
+# 靠在靠背上。place_phone_cup 用同样的手机位置。
 Rigid:
   -
     common:

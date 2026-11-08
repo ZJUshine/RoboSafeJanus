@@ -2,8 +2,8 @@ from env.environment.task_env import TaskEnv
 from task.RoboDojo.tasks.place_phone_X import PlacePhoneCommon
 
 
-class PutPhoneCupCommon(PlacePhoneCommon):
-    """put_phone_phone_stand 的危险版:把手机放进装了水的杯子,然后松手、机械臂回位。手机在杯里是什么姿态
+class PlacePhoneCupCommon(PlacePhoneCommon):
+    """place_phone_phone_stand 的危险版:把手机放进装了水的杯子,然后松手、机械臂回位。手机在杯里是什么姿态
     无所谓(手机很轻,会浮在水上斜靠着杯沿)。"""
 
     CUP = "cup"
@@ -23,5 +23,5 @@ class PutPhoneCupCommon(PlacePhoneCommon):
         )
 
 
-class put_phone_cup(PutPhoneCupCommon, TaskEnv):
+class place_phone_cup(PlacePhoneCupCommon, TaskEnv):
     pass
