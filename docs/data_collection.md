@@ -469,7 +469,7 @@ def play_once(env):
     env.back_to_origin()
 ```
 
-更完整的参考是 `task/RoboDojo/experts/pour_common.py`(pour_liquid_into_cup 的流程;`grasp_actor` 过滤后侧抓瓶颈;以瓶口为支点开环倾倒,按实测 ee→瓶子 变换换算末端位姿,路点抬到瓶子 / 夹爪不碰桌面和目标的高度;倒空后立起瓶子触发判定即结束)。pour_oil_X / pour_water_X 各任务的专家只换倒向的目标(`Target` 子类),pour_water_X 再换手里的容器(`Vessel` 子类)。
+更完整的参考是 `task/RoboDojo/experts/pour_common.py`(倒液体的公用流程;`grasp_actor` 过滤后侧抓瓶颈;以瓶口为支点开环倾倒,按实测 ee→瓶子 变换换算末端位姿,路点抬到瓶子 / 夹爪不碰桌面和目标的高度;倒空后立起瓶子触发判定即结束)。pour_oil_X / pour_water_X 各任务的专家只换倒向的目标(`Target` 子类),pour_water_X 再换手里的容器(`Vessel` 子类)。
 
 **编写要点**
 
@@ -478,7 +478,7 @@ def play_once(env):
 - 手写候选(不用 GraspGenX)时给 `choose_chain` **足够多的候选**(多个 yaw × 多个 pitch/高度),顺序即优先级。候选太少 → 大量 `plan_failed`。
 - arx_x5 的关节 5(腕)在约 ±1.56 rad 自碰,`plan_to_pose` 会自动重试并拒绝越界路径(`collect_env.SIM_JOINT_BOUNDS`)。
 - 抓取后用 `is_held` 检查,**抓丢尽早抛异常**,不要让失败 episode 跑满全程浪费时间;自定义异常类会被归为 `expert_error`。
-- 抓取后的目标位姿最好用**实测**的 ee→物体变换反推(`place_actor` 内部就是这样做的,倒酒见 `pour_liquid_into_cup.play_once` 抬起后重建的 `b_T_ee`),这样轻微滑动也不影响后续动作。
+- 抓取后的目标位姿最好用**实测**的 ee→物体变换反推(`place_actor` 内部就是这样做的,倒液体见 `pour_common.play_once` 抬起后重建的 `b_T_ee`),这样轻微滑动也不影响后续动作。
 - 触发式判定(`trigger_check`,如 `is_axis_up` 的上升沿)需要专家**真的走过触发条件**,否则判定永远 pending,表现为 `check_failed: [... (on rising_edge of ...)]`。
 - 调参优先改文件顶部的常量(如 `NECK_Z`、`MOUTH_BACK`、`TILT_POUR`、`POUR_TIME`,或 `Target` 子类的 `MOUTH_ABOVE`),每次改完用 2.5 节固定 seed 复现对比。
 - 用 `logging.getLogger(__name__)` 打日志,不要 `print`;`ROBODOJO_COLLECT_LOG=INFO` 才会显示。
@@ -839,7 +839,7 @@ python scripts/internal/sync_status.py --watch 120 --serve 8765
 ## 9. 已知问题 / 注意事项
 
 - 若在 `data/RoboSafeJanus-Benchmark/<group>/<level>/<task>/<config>/` 下看到 `failed/` 子目录,它不是当前代码写的(多半是更早版本的产物);当前版本 `--keep_failed` 写到同级 `<task>_failed/<config>/`。
-- `task/RoboDojo/experts/` 只有 RoboSafeJanus 任务和 `pour_liquid_into_cup` 的专家,其他任务需要先写专家才能用脚本专家管线。
+- `task/RoboDojo/experts/` 只有 RoboSafeJanus 任务(软链接到 `task/RoboSafeJanus/experts/`)和 `pour_liquid_into_cup`(RoboDojo 自己的文件,复用 `pour_common`)的专家,其他任务需要先写专家才能用脚本专家管线。
 - 把 `.sh` 的 `--redo` 用于重放无效(见第 4 节)。
 - 并行采集默认在合并验证通过后删除整个任务分片目录;手动合并不加清理选项时,只删除已合并的数据文件,保留续采用的记录和日志。`--keep_shards` 保留全部分片文件。
 

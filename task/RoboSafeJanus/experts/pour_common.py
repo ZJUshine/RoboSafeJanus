@@ -1,4 +1,4 @@
-"""倒液体的公用流程(单臂:瓶子所在一侧的手臂)。默认是 pour_liquid_into_cup:瓶子(``Vessel``)倒进杯子(``Target``);
+"""倒液体的公用流程(单臂:瓶子所在一侧的手臂)。默认类是瓶子(``Vessel``)倒进杯子(``Target``);
 pour_oil_X 组(``pour_oil_X``)换瓶子的 label、各任务换倒向的目标(``Target`` 子类);pour_water_X 组(``pour_water_X``)
 再换手里的容器(``Vessel`` 子类)。
 
