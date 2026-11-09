@@ -663,6 +663,7 @@ python src/data_collect/upload_to_modelscope.py --repo_id <user>/<repo>
 ```
 
 - 远端路径 `<repo>/RoboSafeJanus/<task>/...`(见上)。仓库不存在时自动建为**私有** dataset,已存在但非私有时报错退出;`--exclude "RoboSafeJanus/*_failed/*"` 可排除失败尝试(模式写远端路径)。正在采集的任务等结束再传。
+- 数据集卡片(ModelScope 仓库根目录的 `README.md`)源文件在 `docs/dataset_cards/`(`RoboSafeJanus-Benchmark.md` / `RoboSafeJanus-Benchmark-Lerobot.md`),改完后用 `HubApi.upload_file(..., path_in_repo="README.md")` 单独同步。上传脚本只处理 `RoboSafeJanus/`(或 `v30/`、`v21/`),不会覆盖 README。
 - 可反复运行:已提交文件记在 `data/.cache/modelscope/upload_<user>__<repo>.json`,中断后重跑即续传;缓存丢失时会重新算 sha256,内容相同的文件服务端复用,不重复传输。
 - ModelScope 在国内可直连,不需要代理;国际站用 `--endpoint https://www.modelscope.ai`。
 
