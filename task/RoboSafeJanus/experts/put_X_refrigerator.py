@@ -23,6 +23,7 @@
    退出 ``RETREAT`` 再回去(两次规划,中间停一下),直接回程会把竖着的瓶子蹭倒。
 """
 
+from copy import deepcopy
 from dataclasses import dataclass
 
 import numpy as np
@@ -47,6 +48,13 @@ class Spec:
     # 物体当障碍物时长宽方向的缩放:瓶子(圆角、细颈)的包围盒比瓶身大,抓取 / 松手位姿上 cuRobo 偏保守的腕部碰撞球就
     # 伸进了包围盒,判碰撞,要缩小;方盒子用原尺寸,缩小了手臂会擦着它过去把它碰倒
     obstacle_shrink: tuple = (1.0, 1.0, 1.0)
+    # side:松手后退的距离,按顺序试(见 common._pick_place_direct 的 retreat);None 时只试 RETREAT
+    retreat: tuple = None
+    # 回程(物体已竖在隔板上)物体障碍物长宽高的放大倍数:细高的瓶子按原尺寸时,回程路径贴着它扫过,张开的手指把它勾出来、
+    # 带倒;放大后规划不通时退回缩小的模型(common._pick_place_direct 的 return_fallback)
+    return_grow: tuple = None
+    # 抓取候选先在碰撞世界里做 IK,有解的排前面再取前 MAX_GRASPS 个:否则按分数截断时前 40 个大多够不到
+    ik_prefilter: bool = False
 
 
 @dataclass(frozen=True)
@@ -171,7 +179,15 @@ def _grasps(env, spec, inward):
                 keep.append((g, score))
     if not keep:
         raise PlanFailError(f"{ARM}: no {spec.grasp} grasp for {label} ({len(candidates)} candidates)")
-    return keep[:MAX_GRASPS]
+    return keep if spec.ik_prefilter else keep[:MAX_GRASPS]
+
+
+def _ik_sorted(env, planner, root, grasps, set_grasp_world):
+    """``Spec.ik_prefilter``:在去抓取时的碰撞世界里逐个做 IK,有解的候选按原顺序排前面(没解的不丢,排在后面)。"""
+    set_grasp_world()
+    q0 = np.asarray(env.get_arm_joints(ARM), dtype=float)
+    ok = [planner.solve_ik_to_joint(q0, list(g), deepcopy(root))["status"] == "Success" for g, _ in grasps]
+    return [c for c, k in zip(grasps, ok) if k] + [c for c, k in zip(grasps, ok) if not k]
 
 
 def _close(env, spec, grasp):
@@ -239,13 +255,18 @@ def _play(env, spec):
     fixed["fridge_door"] = _door_box(geom, door, fridge)
     lo, hi = common._bbox(env, label)
     local = common.GRID * (hi - lo) + lo
+    open_tool = common._finger_spheres(common.GRIPPER_OPEN, FINGER_SPACING)
 
     def set_world(with_obj, tool):
         obstacles = dict(fixed)
         if with_obj:
             # 去抓取时、以及松手后沿接近方向退出时("return_tight"),按 Spec.obstacle_shrink 缩小。回程一定要
             # 带着物体:不带时回程路径贴着竖放在隔板上的瓶子扫过去,一蹭就倒
-            obstacles[label] = common._obj_box(env, label, 1.0 if with_obj == "return" else spec.obstacle_shrink)
+            if with_obj == "return":
+                scale = spec.return_grow or 1.0
+            else:
+                scale = spec.obstacle_shrink
+            obstacles[label] = common._obj_box(env, label, scale)
         planner.set_obstacles(obstacles, root)
         planner.set_tool_spheres(tool)
 
@@ -254,17 +275,21 @@ def _play(env, spec):
         width = min(float(np.ptp(held_ee[:, 1])), common.GRIPPER_OPEN)
         return common._finger_spheres(width, FINGER_SPACING) + common._bbox_spheres(ee_T_obj, lo, hi)
 
+    grasps = _grasps(env, spec, inward)
+    if spec.ik_prefilter:
+        grasps = _ik_sorted(env, planner, root, grasps, lambda: set_world("grasp", open_tool))
     common._pick_place_direct(
         env,
         label,
         set_world=set_world,
-        grasps=_grasps(env, spec, inward),
-        open_tool=common._finger_spheres(common.GRIPPER_OPEN, FINGER_SPACING),
+        grasps=grasps[:MAX_GRASPS],
+        open_tool=open_tool,
         held_tool=held_tool,
         releases=lambda ee, ee_T_obj: _release_poses(spec, geom, fridge, inward, ee, ee_T_obj, local),
         close=lambda g: _close(env, spec, g),
         carry_slow=spec.carry_slow or CARRY_SLOW,
-        retreat=RETREAT if spec.grasp == "side" else 0.0,
+        retreat=(spec.retreat or RETREAT) if spec.grasp == "side" else 0.0,
+        return_fallback=spec.return_grow is not None,
     )
 
 

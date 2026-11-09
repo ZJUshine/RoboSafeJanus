@@ -243,6 +243,7 @@ def _pick_place_direct(
     grasp_open=1.0,
     release_open=1.0,
     retreat_fallback=False,
+    return_fallback=False,
 ):
     """三段运动、每段一次 cuRobo 规划的抓取 + 放置(见模块说明):
 
@@ -252,7 +253,8 @@ def _pick_place_direct(
     - ``held_tool(ee_T_obj)``:夹住物体后的 tool 碰撞球(手指 + 物体);
     - ``releases(ee, ee_T_obj)``:松手位姿候选 ``[ee 位姿, ...]``(``ee`` 是抓取时的 ee 位姿矩阵);
     - ``close(grasp)``:合拢夹爪;``after_close()``:合拢后的钩子(例如按物体的新位姿重新设置障碍物);
-    - ``retreat`` > 0:松开后先沿接近方向退出这么远(一次规划,不带物体),再带着原尺寸的物体回初始位姿。竖放在隔板上的
+    - ``retreat`` > 0(或几个距离的元组,按顺序试到第一个能规划的):松开后先沿接近方向退出这么远(一次规划,不带物体),
+      再带着原尺寸的物体回初始位姿;``return_fallback`` 时回程规划不通再带缩小的物体("return_tight")试一次。竖放在隔板上的
       瓶子要这样:松手位姿上 cuRobo 偏保守的腕部碰撞球已经伸进了瓶子的包围盒,直接回程只能把物体缩小 / 去掉,回程路径
       贴着瓶子扫过去,一蹭就倒。
     - ``grasp_open`` / ``release_open``:去抓取前 / 松手时夹爪张开到的归一化开度(默认全开)。碗沿这种斜着抓的薄壁,
@@ -315,23 +317,28 @@ def _pick_place_direct(
     env.open_gripper(ARM, release_open)
     env.delay(RELEASE_SETTLE)
     tries = ("return", False)
-    if retreat > 0:
+    dists = tuple(retreat) if isinstance(retreat, (tuple, list)) else ((retreat,) if retreat > 0 else ())
+    if dists:
         ee = _mat(env.get_arm_pose(ARM))
-        back = ee.copy()
-        back[:3, 3] -= retreat * ee[:3, 0]
-        rb = None
-        for with_obj in ("return_tight", False):  # 带着(缩小的)物体退,免得退的路上扫到它
-            set_world(with_obj, open_tool)
-            rb = _plan_linear(env, _pose(back))
+        rb, back = None, ee.copy()
+        for dist in dists:  # 按顺序试:长的退不出来(直线约束 + 关节限位)时退短一点
+            back = ee.copy()
+            back[:3, 3] -= dist * ee[:3, 0]
+            for with_obj in ("return_tight", False):  # 带着(缩小的)物体退,免得退的路上扫到它
+                set_world(with_obj, open_tool)
+                rb = _plan_linear(env, _pose(back))
+                if rb is not None:
+                    break
             if rb is not None:
                 break
         if rb is None and retreat_fallback:
             rb = _plan_once(env, _pose(back))
         if rb is not None:
             env.execute_plan(ARM, rb)
-            tries = ("return",)
+            # return_fallback:回程带的物体模型规划不通时(例如放大过的),退回缩小的物体模型,仍然不去掉物体
+            tries = ("return", "return_tight") if return_fallback else ("return",)
         elif not retreat_fallback:
-            raise PlanFailError(f"{ARM}: cannot back {retreat:.2f} m out of the release pose")
+            raise PlanFailError(f"{ARM}: cannot back {max(dists):.2f} m out of the release pose")
     if release_open < 1.0:
         env.open_gripper(ARM)
 

@@ -2,7 +2,14 @@
 
 from task.RoboDojo.experts import put_X_refrigerator as fridge
 
-SPEC = fridge.Spec("toilet_cleaner", full_close=True, obstacle_shrink=fridge.BOTTLE_SHRINK)
+SPEC = fridge.Spec(
+    "toilet_cleaner",
+    full_close=True,
+    obstacle_shrink=fridge.BOTTLE_SHRINK,
+    retreat=(0.10, 0.08, 0.06),
+    return_grow=(1.3, 1.3, 1.05),
+    ik_prefilter=True,
+)
 
 
 def play_once(env):
