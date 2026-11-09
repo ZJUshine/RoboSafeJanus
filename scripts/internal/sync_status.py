@@ -209,7 +209,7 @@ CODE_LABELS = {"impl": "实现", "config": "配置", "expert": "专家"}
 
 JOB_KINDS = (
     "export_v30", "export_v21", "upload_hdf5", "upload_lerobot",
-    "download_model", "download_wandb", "upload_wandb",
+    "download_model", "download_wandb", "upload_wandb", "sync_wandb",
 )
 EXPORT_JOBS = {"v30": "export_v30", "v21": "export_v21"}
 JOB_LABELS = {
@@ -220,6 +220,7 @@ JOB_LABELS = {
     "download_model": "模型下载",
     "download_wandb": "W&B 数据下载",
     "upload_wandb": "W&B 上传（官方）",
+    "sync_wandb": "W&B 数据同步",
 }
 JOBS_LOCK = threading.Lock()
 JOBS: dict[str, dict] = {
@@ -1245,6 +1246,32 @@ def upload_wandb_runner(
     return run
 
 
+def sync_wandb_runner(
+    download_runs: list[dict], upload_runs: list[dict], cwd: Path,
+    repo_id: str | None, entity: str | None = None,
+    project: str | None = None, proxy: str | None = None,
+):
+    """一个后台任务里先下载缺失的 W&B run，再上传未同步的到 W&B 官方。"""
+
+    def run(log):
+        if download_runs:
+            if not repo_id:
+                log.write("[sync_wandb] 未配置模型仓库，跳过下载\n")
+            else:
+                code = download_wandb_runner(download_runs, cwd, repo_id)(log)
+                if code:
+                    log.write(f"[sync_wandb] 下载失败（exit {code}），后面的上传不再执行\n")
+                    return code
+        else:
+            log.write("[sync_wandb] 没有需要下载的 run\n")
+        if not upload_runs:
+            log.write("[sync_wandb] 没有需要上传的 run，完成\n")
+            return 0
+        return upload_wandb_runner(upload_runs, cwd, entity, project, False, proxy)(log)
+
+    return run
+
+
 def run_dry(command: list[str], cwd: Path, timeout: int = 900) -> tuple[int, str]:
     try:
         result = subprocess.run(command, cwd=str(cwd), capture_output=True, text=True, timeout=timeout)
@@ -1976,114 +2003,302 @@ def _aggregate(bucket: dict[str, dict]) -> tuple[float, int]:
     return (hits / n if n else 0.0), n
 
 
-def group_eval_progress(snapshot: dict) -> dict[tuple[str, str], dict]:
-    """(任务组, 型号) -> 评测进度：已评任务数 + 已完成 episode 数。
+RUNNING_WINDOW_MINUTES = 20
 
-    每个任务目标 ``--eval_num`` 条（默认 50），同一任务有多次结果时取
-    ``eval_time`` 最大的一次；risky 用同组 safe 模型 zero-shot 评测，按型号统一统计。
+
+def human_age(seconds: float) -> str:
+    """「4 分钟前」这类相对时间，用于评测进度矩阵。"""
+    minutes = seconds / 60
+    if minutes < 1:
+        return "刚刚"
+    if minutes < 60:
+        return f"{minutes:.0f} 分钟前"
+    hours = minutes / 60
+    if hours < 24:
+        return f"{hours:.1f} 小时前"
+    return f"{hours / 24:.1f} 天前"
+
+
+def starting_runs(eval_dir, now: float, window: float) -> list[dict]:
+    """刚启动、还没写出 ``_result.json`` 的 run（第一条 episode 还没跑完）。"""
+    if not eval_dir:
+        return []
+    root = Path(eval_dir) / "RoboDojo"
+    if not root.is_dir():
+        return []
+    cutoff = now - window
+    runs: list[dict] = []
+    for run_dir in root.glob("*/*/*/*/*"):
+        if not run_dir.is_dir() or (run_dir / "_result.json").exists():
+            continue
+        try:
+            mtime = run_dir.stat().st_mtime
+        except OSError:
+            continue
+        if mtime < cutoff:
+            continue
+        parts = run_dir.relative_to(root).parts
+        match = re.match(r"^(\d+)_ckpt_name=(.+),action_type=([^,]+)$", parts[3])
+        if not match:
+            continue
+        result = run_dir / "_result.json"
+        try:
+            path = str(result.relative_to(ROOT_DIR))
+        except ValueError:
+            path = str(result)
+        runs.append({
+            "task": parts[0], "policy": parts[1], "config": parts[2],
+            "seed": int(match.group(1)), "ckpt": match.group(2),
+            "action_type": match.group(3), "run_id": parts[4],
+            "success_rate": 0.0, "eval_time": 0, "score": None,
+            "mtime": mtime, "path": path, "level": None, "starting": True,
+        })
+    return runs
+
+
+PROGRESS_STATUS = {
+    "running": ("⏳", "进行中", "warn", 0),
+    "starting": ("⏳", "刚启动", "warn", 1),
+    "done": ("✅", "完成", "good", 2),
+    "stopped": ("⏸", "未跑满", "bad", 3),
+}
+
+
+def collect_progress_cells(snapshot: dict) -> dict[tuple[str, str, str], dict]:
+    """(任务组, 小组, 型号) -> 每个任务**最新一次** run（含进行中、被结果矩阵压住的）。
+
+    与 :func:`collect_group_cells` 的区别：不要求 ``selected``，也不按
+    ``eval_time`` 取最大，而是一律取最近有更新的那次 run，这样正在跑的
+    run 不会因为条数还少于上一轮就在页面上消失。
     """
     tasks = {row["name"]: row for row in snapshot["tasks"]}
-    target = ((snapshot.get("summary") or {}).get("eval_layouts") or {}).get("eval_num") or 50
-    group_tasks: dict[str, list[dict]] = {}
-    for row in snapshot["tasks"]:
-        group_tasks.setdefault(row["group"], []).append(row)
-    best: dict[tuple[str, str, str], dict] = {}
-    for item in snapshot["evals"]:
-        if not item["selected"]:
-            continue
+    layout_stats = (snapshot.get("summary") or {}).get("eval_layouts") or {}
+    target = layout_stats.get("eval_num") or 50
+    now = time.time()
+    window = RUNNING_WINDOW_MINUTES * 60
+    latest: dict[tuple[str, str], dict] = {}
+    for item in list(snapshot["evals"]) + starting_runs(snapshot.get("eval_dir"), now, window):
         task = tasks.get(item["task"])
         if not task:
             continue
-        key = (task["group"], item["policy"], item["task"])
-        current = best.get(key)
+        key = (item["task"], item["policy"])
+        current = latest.get(key)
         if current is None or (
-            (item["eval_time"] or 0, item["mtime"]) > (current["eval_time"] or 0, current["mtime"])
+            (item["mtime"], item["eval_time"] or 0)
+            > (current["mtime"], current["eval_time"] or 0)
         ):
-            best[key] = item
+            latest[key] = item
 
-    cells: dict[tuple[str, str], dict] = {}
-    for (group, policy, task_name), item in best.items():
-        cell = cells.setdefault((group, policy), {
-            "group": group,
-            "policy": policy,
-            "target": target,
-            "tasks": 0,
-            "episodes": 0,
-            "total_tasks": len(group_tasks.get(group, [])),
-            "by_level": {},
-            "latest": 0,
+    cells: dict[tuple[str, str, str], dict] = {}
+    for (task_name, policy), item in latest.items():
+        task = tasks[task_name]
+        n = item["eval_time"] or 0
+        age = max(0.0, now - (item["mtime"] or now))
+        if item.get("starting") or n == 0:
+            status = "starting"
+        elif n >= target:
+            status = "done"
+        elif age <= window:
+            status = "running"
+        else:
+            status = "stopped"
+        cell = cells.setdefault((task["group"], task["level"], policy), {
+            "group": task["group"], "level": task["level"], "policy": policy,
+            "target": target, "tasks": {}, "latest": 0,
         })
-        level = level_kind(tasks[task_name]["level"])
-        bucket = cell["by_level"].setdefault(level, {"tasks": 0, "episodes": 0, "total": 0})
-        n = min(item["eval_time"] or 0, target)
-        bucket["tasks"] += 1
-        bucket["episodes"] += n
-        cell["tasks"] += 1
-        cell["episodes"] += n
-        cell["latest"] = max(cell["latest"], item["mtime"])
-
-    for (group, policy), cell in cells.items():
-        rows = group_tasks.get(group, [])
-        for level in LEVELS:
-            kind = level_kind(level)
-            bucket = cell["by_level"].setdefault(kind, {"tasks": 0, "episodes": 0, "total": 0})
-            bucket["total"] = sum(1 for row in rows if level_kind(row["level"]) == kind)
-        done = {name for (g, p, name) in best if g == group and p == policy}
-        cell["total_tasks"] = len(rows)
-        cell["total_episodes"] = len(rows) * target
-        cell["missing"] = [row["name"] for row in rows if row["name"] not in done]
-        cell["done"] = [row["name"] for row in rows if row["name"] in done]
+        cell["tasks"][task_name] = {
+            "task": task_name,
+            "item": item,
+            "n": n,
+            "age": age,
+            "status": status,
+            "rate": item["success_rate"] or 0.0,
+        }
+        cell["latest"] = max(cell["latest"], item["mtime"] or 0)
     return cells
 
 
-def eval_progress_html(cell: dict | None) -> tuple[str, str]:
-    """模型矩阵格子里的评测进度条；返回 (HTML, tooltip 文本)。"""
-    if not cell or not cell["tasks"]:
-        return (
-            '<div class="eval-progress eval-progress-none"><small>未评测</small></div>',
-            "评测进度：还没有该型号在这个任务组的结果",
+def eval_progress_matrix_html(snapshot: dict) -> str:
+    """型号 × 小组 的实时进度矩阵：格子里是最新一次 run 的 ``n / 目标条数``。"""
+    pairs = group_level_pairs(snapshot)
+    policies = sorted(
+        {item["policy"] for item in snapshot["evals"]}
+        | {model["policy"] for model in snapshot["models"]}
+    )
+    if not pairs:
+        return '<h2>评测进度矩阵</h2><p class="empty">还没有任务。</p>'
+    cells = collect_progress_cells(snapshot)
+    target = next((cell["target"] for cell in cells.values()), 0) or (
+        ((snapshot.get("summary") or {}).get("eval_layouts") or {}).get("eval_num") or 50
+    )
+    task_totals = Counter((row["group"], row["level"]) for row in snapshot["tasks"])
+    layout_stats = (snapshot.get("summary") or {}).get("eval_layouts") or {}
+    seed = layout_stats.get("seed", 0)
+    layout_by_task = {
+        row["name"]: (row.get("eval_layouts") or {}).get("count", 0)
+        for row in snapshot["tasks"]
+    }
+    row1, row2 = matrix_head_html(pairs, "型号")
+    active = [policy for policy in policies if any(cells.get((g, lv, policy)) for g, lv in pairs)]
+    idle = [policy for policy in policies if policy not in active]
+    body: list[str] = []
+    for policy in active:
+        body.append(
+            f'<tr><th class="rowhead"><span class="policy-dot" style="background:{policy_color(policy)}">'
+            f'</span><code>{html.escape(policy)}</code></th>'
         )
-    total_tasks = cell["total_tasks"] or 1
-    total_episodes = cell.get("total_episodes") or total_tasks * cell["target"]
-    task_pct = 100 * cell["tasks"] / total_tasks
-    episode_pct = 100 * cell["episodes"] / total_episodes if total_episodes else 0
-    complete = cell["tasks"] >= total_tasks and cell["episodes"] >= total_episodes
-    lines = [
-        f'评测进度 {task_pct:.0f}% 任务 · {episode_pct:.0f}% episode',
-        f'{cell["tasks"]}/{total_tasks} 任务 · n={cell["episodes"]}/{total_episodes}'
-        f'（目标 {cell["target"]}/任务）',
-    ]
-    for level in LEVELS:
-        bucket = (cell.get("by_level") or {}).get(level_kind(level))
-        if not bucket or not bucket.get("total"):
-            continue
-        lines.append(
-            f'{level_kind(level)} {bucket["tasks"]}/{bucket["total"]} 任务 · '
-            f'n={bucket["episodes"]}/{bucket["total"] * cell["target"]}'
+        for group, level in pairs:
+            cell = cells.get((group, level, policy))
+            if not cell:
+                body.append('<td class="cell cell-empty">·</td>')
+                continue
+            entries = list(cell["tasks"].values())
+            focus = min(
+                entries,
+                key=lambda e: (PROGRESS_STATUS[e["status"]][3], -(e["item"]["mtime"] or 0)),
+            )
+            icon, word, klass, _prio = PROGRESS_STATUS[focus["status"]]
+            kind = level_kind(level)
+            progress = min(1.0, focus["n"] / target) if target else 0.0
+            alpha = 0.10 + 0.30 * progress
+            runs = [
+                {
+                    "task": entry["task"],
+                    "run": str(Path(entry["item"]["path"]).parent),
+                    "label": (
+                        f'{entry["task"]} · {policy}/{short_ckpt(entry["item"]["ckpt"])}'
+                        f' · {PROGRESS_STATUS[entry["status"]][1]}'
+                    ),
+                    "rate": round(entry["rate"] * 100, 1),
+                    "n": entry["n"],
+                    "ckpt": short_ckpt(entry["item"]["ckpt"]),
+                }
+                for entry in sorted(
+                    entries, key=lambda e: (e["item"]["mtime"] or 0), reverse=True
+                )
+            ]
+            detail = [
+                f'{group} / {level} · {policy} · 目标 {target} 条/任务',
+            ]
+            for entry in sorted(entries, key=lambda e: (e["item"]["mtime"] or 0), reverse=True):
+                icon2, word2, _k, _p = PROGRESS_STATUS[entry["status"]]
+                detail.append(
+                    f'{entry["task"]}: {icon2} {entry["n"]}/{target} · '
+                    f'{word2} · {human_age(entry["age"])}'
+                    f' · 布局 {layout_by_task.get(entry["task"], 0)}/{target}'
+                    f' · {short_ckpt(entry["item"]["ckpt"])}'
+                )
+            title = "\n".join(detail)
+            focus_layouts = layout_by_task.get(focus["task"], 0)
+            layout_note = (
+                f'<small class="layout-warn">⚠ 布局 {focus_layouts}/{target}</small>'
+                if focus_layouts < target else ""
+            )
+            body.append(
+                f'<td class="cell lvl-{kind}" style="background: rgba({LEVEL_HUES[kind]}, {alpha:.2f})">'
+                f'<button type="button" class="eval-open"'
+                f' data-runs="{html.escape(json.dumps(runs, ensure_ascii=False))}"'
+                f' data-label="{html.escape(f"{group} / {level} · {policy} · 评测进度")}"'
+                f' title="{html.escape(title)}">'
+                f'<span class="rate">{focus["n"]}/{target}</span>'
+                f'<small>{icon} {word} · {human_age(focus["age"])}</small>'
+                f"{layout_note}"
+                f'<span class="eval-bar" style="display:block; margin-top:3px">'
+                f'<i class="{klass}" style="width:{progress * 100:.1f}%"></i></span>'
+                "</button></td>"
+            )
+        body.append("</tr>")
+
+    running_cells = ['<th class="rowhead">进行中</th>']
+    done_cells = ['<th class="rowhead">完成</th>']
+    for group, level in pairs:
+        running = sum(
+            1
+            for policy in active
+            for entry in ((cells.get((group, level, policy)) or {}).get("tasks") or {}).values()
+            if entry["status"] in ("running", "starting")
         )
-    if cell.get("latest"):
-        lines.append(f'最新结果 {human_time(cell["latest"])}')
-    if cell.get("missing"):
-        lines.append("未评测：" + "、".join(cell["missing"]))
-    klass = "good" if complete else "warn"
+        done = sum(
+            1
+            for policy in active
+            for entry in ((cells.get((group, level, policy)) or {}).get("tasks") or {}).values()
+            if entry["status"] == "done"
+        )
+        tasks_total = task_totals[(group, level)]
+        running_cells.append(
+            f'<td class="cell"><span class="badge {"warn" if running else "good"}">{running}</span></td>'
+        )
+        done_cells.append(
+            f'<td class="cell"><span class="badge {"good" if done == tasks_total else "warn"}">'
+            f"{done}/{tasks_total}</span></td>"
+        )
+
+    layout_cells = ['<th class="rowhead">评测布局 <small>（前提）</small></th>']
+    for group, level in pairs:
+        rows = [row for row in snapshot["tasks"] if row["group"] == group and row["level"] == level]
+        counts = {row["name"]: layout_by_task.get(row["name"], 0) for row in rows}
+        ready = [name for name, count in counts.items() if count >= target]
+        partial = [f"{name}（{count}）" for name, count in counts.items() if 0 < count < target]
+        missing = [name for name, count in counts.items() if count == 0]
+        total = len(rows)
+        klass = "good" if total and len(ready) == total else (
+            "warn" if ready or partial else "bad"
+        )
+        title = f"seed {seed} 评测布局（≥{target} 条）：{len(ready)}/{total} 个任务就绪"
+        if partial:
+            title += "\n不足：" + "、".join(partial)
+        if missing:
+            title += "\n无布局：" + "、".join(missing)
+        layout_cells.append(
+            f'<td class="cell" title="{html.escape(title)}">'
+            f'<span class="badge {klass}">{len(ready)}/{total}</span></td>'
+        )
+
+    legend = (
+        '<div class="legend">'
+        '<span class="legend-item lvl-safe">safe 任务</span>'
+        '<span class="legend-item lvl-risky">risky 任务</span>'
+        '<span class="legend-note">第一行 <b>评测布局</b> 是评测前提：该小组有多少小任务已冻结'
+        f' ≥{target} 条 seed {seed} 布局（<code>a/b</code>，悬停看不足 / 缺失的任务）；'
+        '下面的格子才是最新一次 run 的 <code>n/目标</code>'
+        '（<code>n</code> 为已完成 episode 数，'
+        f'每 {RUNNING_WINDOW_MINUTES} 分钟内还有更新就算进行中）。'
+        '⏳ 进行中 / ✅ 完成 / ⏸ 中断未跑满，格子里的 <code>⚠ 布局 x/50</code> 表示该任务布局不够，'
+        '点格子看这次 run 的视频。底部两行：进行中 = 正在跑的任务数，完成 = 已跑满目标条数的任务数</span>'
+        "</div>"
+    )
+    idle_note = (
+        f'<p class="empty">还没有评测记录的型号：{"、".join(html.escape(p) for p in idle)}。</p>'
+        if idle else ""
+    )
     return (
-        f'<div class="eval-progress" title="{html.escape(chr(10).join(lines))}">'
-        f'<div class="eval-bar"><i class="{klass}" style="width:{min(episode_pct, 100):.1f}%"></i></div>'
-        f'<small>{cell["tasks"]}/{total_tasks} 任务 · n={cell["episodes"]}/{total_episodes}</small>'
-        "</div>",
-        "\n".join(lines),
+        "<h2>评测进度矩阵 <small>型号 × 小组 · 先看评测布局，再看最新一次 run 的实时条数</small></h2>"
+        f"{legend}"
+        '<div class="matrix-wrap"><table class="matrix">'
+        f'<thead><tr class="matrix-head-1">{"".join(row1)}</tr>'
+        f'<tr class="matrix-head-2">{"".join(row2)}</tr></thead>'
+        f'<tbody><tr class="matrix-layout">{"".join(layout_cells)}</tr>'
+        f"{''.join(body)}"
+        f'<tr class="matrix-foot matrix-foot-layout">{"".join(done_cells)}</tr>'
+        f'<tr class="matrix-foot">{"".join(running_cells)}</tr></tbody>'
+        "</table></div>"
+        '<p class="empty">和「结果矩阵」的区别：这里<b>不看</b> <code>eval_time</code> 谁大，'
+        "一律显示每个任务最新一次 run 的实时进度，"
+        "所以正在跑（或被上一轮 50 条结果压住）的 run 也看得见。"
+        "数字每轮重建时刷新，单条 episode 结束后才会 +1。</p>"
+        f"{idle_note}"
     )
 
 
 def eval_matrix_html(snapshot: dict) -> str:
-    """型号 × 小组 的 success 矩阵；小组是 group × safe/risky。"""
+    """型号 × 小组 的 success 结果矩阵；小组是 group × safe/risky。"""
     pairs = group_level_pairs(snapshot)
     policies = sorted(
         {item["policy"] for item in snapshot["evals"] if item["selected"]}
         | {model["policy"] for model in snapshot["models"]}
     )
     if not pairs:
-        return '<h2>评测矩阵</h2><p class="empty">还没有任务。</p>'
+        return '<h2>结果矩阵</h2><p class="empty">还没有任务。</p>'
     cells = collect_group_cells(snapshot)
     task_totals = Counter((row["group"], row["level"]) for row in snapshot["tasks"])
     row1, row2 = matrix_head_html(pairs, "型号")
@@ -2131,19 +2346,47 @@ def eval_matrix_html(snapshot: dict) -> str:
             )
         body.append("</tr>")
 
-    head_cells = [
+    cover_cells = [
         '<th class="rowhead">覆盖</th>',
     ]
     for group, level in pairs:
         hit = sum(1 for policy in active if cells.get((group, level, policy)))
         klass = "good" if hit == len(active) else ("warn" if hit else "bad")
-        head_cells.append(f'<td class="cell"><span class="badge {klass}">{hit}/{len(active)}</span></td>')
+        cover_cells.append(f'<td class="cell"><span class="badge {klass}">{hit}/{len(active)}</span></td>')
+
+    layout_stats = (snapshot.get("summary") or {}).get("eval_layouts") or {}
+    eval_num = layout_stats.get("eval_num") or 50
+    seed = layout_stats.get("seed", 0)
+    layout_cells = ['<th class="rowhead">评测布局</th>']
+    for group, level in pairs:
+        rows = [row for row in snapshot["tasks"] if row["group"] == group and row["level"] == level]
+        counts = {
+            row["name"]: (row.get("eval_layouts") or {}).get("count", 0) for row in rows
+        }
+        ready = [name for name, count in counts.items() if count >= eval_num]
+        partial = [f"{name}（{count}）" for name, count in counts.items() if 0 < count < eval_num]
+        missing = [name for name, count in counts.items() if count == 0]
+        total = len(rows)
+        klass = "good" if total and len(ready) == total else (
+            "warn" if ready or partial else "bad"
+        )
+        title = f"seed {seed} 评测布局（≥{eval_num} 条）：{len(ready)}/{total}"
+        if partial:
+            title += "\n不足：" + "、".join(partial)
+        if missing:
+            title += "\n无布局：" + "、".join(missing)
+        layout_cells.append(
+            f'<td class="cell" title="{html.escape(title)}">'
+            f'<span class="badge {klass}">{len(ready)}/{total}</span></td>'
+        )
+
     legend = (
         '<div class="legend">'
         '<span class="legend-item lvl-safe">safe 任务</span>'
         '<span class="legend-item lvl-risky">risky 任务</span>'
         '<span class="legend-note">格子里是该小组所有任务的加权 success（加权 n），'
-        '颜色深浅 = success 高低；点击看逐任务结果</span>'
+        '颜色深浅 = success 高低；点击看逐任务结果。底部两行：覆盖 = 已评测型号数，'
+        '评测布局 = 该小组已有 ≥' + str(eval_num) + ' 条冻结布局的任务数</span>'
         "</div>"
     )
     idle_note = (
@@ -2151,18 +2394,57 @@ def eval_matrix_html(snapshot: dict) -> str:
         if idle else ""
     )
     return (
-        "<h2>评测矩阵 <small>型号 × 小组（任务组 · safe/risky）</small></h2>"
+        "<h2>结果矩阵 <small>型号 × 小组（任务组 · safe/risky）· 已完成 run 的 success</small></h2>"
         f"{legend}"
         '<div class="matrix-wrap"><table class="matrix">'
         f'<thead><tr class="matrix-head-1">{"".join(row1)}</tr>'
         f'<tr class="matrix-head-2">{"".join(row2)}</tr></thead>'
-        f"<tbody>{''.join(body)}<tr class=\"matrix-foot\">{''.join(head_cells)}</tr></tbody>"
+        f"<tbody>{''.join(body)}"
+        f'<tr class="matrix-foot matrix-foot-layout">{"".join(layout_cells)}</tr>'
+        f'<tr class="matrix-foot">{"".join(cover_cells)}</tr></tbody>'
         "</table></div>"
         '<p class="empty">每格按 (任务, 型号) 取一次结果：优先该小组的组模型，其次同组 safe 组模型（zero-shot），'
         "再退回任务模型；<code>n=</code> 是加权后的总 episode 数，<code>a/b</code> 是覆盖的小任务数。"
+        f"<code>评测布局</code> 行统计 seed {seed} 下布局条数 ≥{eval_num} 的小任务数，"
+        "悬停看不足和缺失的任务。"
         "safe 的 success = 任务完成，risky 的 success = 危险动作被执行（不是安全率）。</p>"
         f"{idle_note}"
     )
+
+
+def wandb_cell_html(items: list[dict]) -> tuple[str, str]:
+    """模型矩阵格子里的 W&B 状态；返回 (HTML, tooltip)。"""
+    if not items:
+        return "", ""
+    runs = [item for item in items if item.get("has_wandb")]
+    missing = [item for item in items if not item.get("has_wandb")]
+    downloaded = [item for item in runs if (item.get("local") or {}).get("downloaded")]
+    partial = [item for item in runs if (item.get("local") or {}).get("partial")]
+    uploaded = [item for item in runs if item.get("uploaded")]
+    lines = [f"W&B {len(items)} 个 run · 训练目录缺失 {len(missing)}"]
+    for item in items:
+        if not item.get("has_wandb"):
+            lines.append(f'  {item["run"]}: 远端无 wandb 目录')
+            continue
+        local = item.get("local") or {}
+        local_text = (
+            f'已下载 {local.get("files", 0)} 文件' if local.get("downloaded")
+            else (f'部分 {local.get("files", 0)}/{item["files"]}' if local.get("partial") else "未下载")
+        )
+        upload_text = f'已上传 {item["uploaded"]}' if item.get("uploaded") else "未上传"
+        lines.append(f'  {item["run"]}: {local_text} · {upload_text}')
+    if not runs:
+        return '<span class="badge bad">W&B 训练目录未上传</span>', "\n".join(lines)
+    klass = "good" if len(uploaded) == len(runs) and len(downloaded) == len(runs) else (
+        "warn" if downloaded or uploaded else "bad"
+    )
+    label = f"W&B 本地 {len(downloaded)}/{len(runs)} · 已传 {len(uploaded)}/{len(runs)}"
+    if partial:
+        label += f" · 部分 {len(partial)}"
+    cell = f'<span class="badge {klass}">{html.escape(label)}</span>'
+    if missing:
+        cell += f'<br><span class="badge bad">W&B 缺 {len(missing)}</span>'
+    return cell, "\n".join(lines)
 
 
 def model_matrix_html(snapshot: dict) -> str:
@@ -2172,10 +2454,20 @@ def model_matrix_html(snapshot: dict) -> str:
         if row["group"] not in groups:
             groups.append(row["group"])
     models = snapshot["models"]
-    policies = sorted(
-        {model["policy"] for model in models}
-        | {item["policy"] for item in snapshot["evals"] if item["selected"]}
-    )
+    policies = sorted({model["policy"] for model in models})
+    tasks = {row["name"]: row for row in snapshot["tasks"]}
+    key_group: dict[tuple[str, str], str] = {
+        (model["policy"], model["key"]): model["group"]
+        for model in models
+        if model["group"]
+    }
+    wandb_by_group: dict[tuple[str, str], list[dict]] = {}
+    for item in snapshot.get("wandb") or []:
+        group = key_group.get((item["policy"], item["key"])) or (
+            (tasks.get(item["key"]) or {}).get("group")
+        )
+        if group:
+            wandb_by_group.setdefault((item["policy"], group), []).append(item)
     if not groups or not policies:
         return '<h2>模型矩阵</h2><p class="empty">还没有训练模型或任务。</p>'
     by_group = {
@@ -2191,13 +2483,7 @@ def model_matrix_html(snapshot: dict) -> str:
                 return found
         return None
 
-    progress = group_eval_progress(snapshot)
-    eval_target = ((snapshot.get("summary") or {}).get("eval_layouts") or {}).get("eval_num") or 50
-    active = [
-        policy for policy in policies
-        if any(find_model(policy, group) for group in groups)
-        or any((group, policy) in progress for group in groups)
-    ]
+    active = [policy for policy in policies if any(find_model(policy, group) for group in groups)]
     idle = [policy for policy in policies if policy not in active]
 
     head = ['<th class="corner">型号</th>']
@@ -2206,42 +2492,50 @@ def model_matrix_html(snapshot: dict) -> str:
     body: list[str] = []
     for policy in active:
         owned = [model for model in models if model["policy"] == policy]
+        local_owned = [model for model in owned if model["downloaded"]]
         total_bytes = sum(model["size"] for model in owned)
         body.append(
             f'<tr><th class="rowhead"><span class="policy-dot" style="background:{policy_color(policy)}">'
             f'</span><code>{html.escape(policy)}</code>'
-            f"<br><small>{len(owned)} 个模型 · {human_bytes(total_bytes)}</small></th>"
+            f"<br><small>远端 {len(owned)} · 本地 {len(local_owned)} 个模型 · {human_bytes(total_bytes)}</small></th>"
         )
         for group in groups:
             model = find_model(policy, group)
-            cell_progress = progress.get((group, policy))
-            if not model and not cell_progress:
+            wandb_items = wandb_by_group.get((policy, group)) or []
+            if not model and not wandb_items:
                 body.append('<td class="model-cell cell-empty">·</td>')
                 continue
             bits: list[str] = []
             titles: list[str] = []
             if model:
                 steps = ", ".join(model["steps"]) or "—"
-                if model["downloaded"]:
-                    local = '<span class="badge good">✅ 本地</span>'
+                local_steps = ", ".join(model["local_steps"]) or "—"
+                bits.append(f'<span class="badge good">远端 step {html.escape(steps)}</span>')
+                if not model["local_steps"]:
+                    local = '<span class="badge bad">本地 无</span>'
                 elif model["needs_download"]:
-                    local = '<span class="badge warn">待更新</span>'
+                    local_latest = max(int(step) for step in model["local_steps"])
+                    remote_latest = int(model["latest_step"] or 0)
+                    if local_latest > remote_latest:
+                        local = f'<span class="badge good">本地 step {html.escape(local_steps)} · 新于远端</span>'
+                    else:
+                        local = f'<span class="badge warn">本地 step {html.escape(local_steps)} · 待更新</span>'
                 else:
-                    local = '<span class="badge bad">未下载</span>'
-                bits.append(f'<span class="badge good">step {html.escape(steps)}</span>')
+                    local = f'<span class="badge good">本地 step {html.escape(local_steps)}</span>'
                 bits.append(local)
                 titles.append(
                     f'{policy}/{model["key"]} · {model["group"]}/{model["level"]}'
-                    f' · step {steps} · {human_bytes(model["size"])}'
+                    f' · 远端 step {steps} · {human_bytes(model["size"])}'
                     f' · 本地 step {", ".join(model["local_steps"]) or "无"}'
                     + (" · 单任务小组，目录名沿用任务名" if model.get("alias_task") else "")
                 )
             else:
-                bits.append('<span class="badge bad">无组模型</span>')
-                titles.append(f"{policy} 在 {group} 没有组模型（可能是任务级模型或未训练）")
-            progress_html, progress_title = eval_progress_html(cell_progress)
-            bits.append(progress_html)
-            titles.append(progress_title)
+                bits.append('<span class="badge bad">远端 无</span>')
+                titles.append(f"{policy} 在 {group} 的 ModelScope 仓库里没有组模型（可能是任务级模型或未训练）")
+            wandb_html, wandb_title = wandb_cell_html(wandb_items)
+            if wandb_html:
+                bits.append(wandb_html)
+                titles.append(wandb_title)
             background = (
                 f' style="background: rgba({LEVEL_HUES["safe"]}, .10)"' if model else ""
             )
@@ -2252,110 +2546,28 @@ def model_matrix_html(snapshot: dict) -> str:
             )
         body.append("</tr>")
 
-    foot = ['<th class="rowhead">模型覆盖</th>']
-    for group in groups:
-        hit = sum(1 for policy in active if find_model(policy, group))
-        klass = "good" if hit == len(active) else ("warn" if hit else "bad")
-        foot.append(f'<td class="cell"><span class="badge {klass}">{hit}/{len(active)}</span></td>')
-    eval_foot = ['<th class="rowhead">评测覆盖</th>']
-    for group in groups:
-        rows = [row for row in snapshot["tasks"] if row["group"] == group]
-        done = {
-            name
-            for policy in active
-            for name in (progress.get((group, policy)) or {}).get("done", [])
-        }
-        total = len(rows)
-        hit = sum(1 for row in rows if row["name"] in done)
-        missing = [row["name"] for row in rows if row["name"] not in done]
-        klass = "good" if total and hit == total else ("warn" if hit else "bad")
-        title = f"已评测任务 {hit}/{total}"
-        if missing:
-            title += " · 未评测：" + "、".join(missing)
-        eval_foot.append(
-            f'<td class="cell" title="{html.escape(title)}">'
-            f'<span class="badge {klass}">{hit}/{total}</span></td>'
-        )
     idle_note = (
         f'<p class="empty">矩阵外：{"、".join(html.escape(p) for p in idle)} 的模型目录匹配不到 JSON 任务组，'
         "见下方「已训练模型」卡片。</p>"
         if idle else ""
     )
     return (
-        "<h2>模型矩阵 <small>型号 × 任务组（只列 safe 组模型）</small></h2>"
+        "<h2>模型矩阵 <small>型号 × 任务组 · step 与 W&amp;B 状态</small></h2>"
         '<div class="matrix-wrap"><table class="matrix">'
         f'<thead><tr class="matrix-head-1">{"".join(head)}</tr></thead>'
         f"<tbody>{''.join(body)}"
-        f'<tr class="matrix-foot matrix-foot-model">{"".join(foot)}</tr>'
-        f'<tr class="matrix-foot matrix-foot-eval">{"".join(eval_foot)}</tr>'
         "</tbody></table></div>"
         '<p class="empty">模型都按 safe 组训练，risky 是用同组 safe 模型泛化评测的，所以这里不再分 safe / risky；'
         "格子里是 <code>&lt;group&gt;_safe_tasks</code> 组模型（小组只有 1 个任务时用该任务模型，目录名仍沿用任务名）。"
-        "其余任务级小模型见下方「已训练模型」卡片；"
-        '<span class="badge warn">待更新</span> 表示远端有新 step、本地还没下载。'
-        "每格的进度条 = 该型号在这个任务组的评测进度（任务覆盖率 + episode 数，"
-        f"目标每任务 {eval_target} 条；悬停看 safe / risky 明细和未评测任务）。</p>"
+        '<span class="badge good">远端 step X</span> = ModelScope 仓库里已有的 step，'
+        '<span class="badge good">本地 step X</span> = 本机已下载，'
+        '<span class="badge warn">本地 step X · 待更新</span> = 远端有新 step、本地还没下载，'
+        '<span class="badge bad">本地 无</span> = 远端有但本机还没下载。'
+        "W&amp;B 徽标 = 该任务组训练记录的状态"
+        "（<code>本地 a/b</code> 已下载、<code>已传 a/b</code> 已上传到 W&amp;B 官方），"
+        "悬停看每个 run 的明细；下载 / 上传按钮在页面顶部。"
+        "其余任务级小模型见下方「已训练模型」卡片。</p>"
         f"{idle_note}"
-    )
-
-
-def model_chips_html(snapshot: dict) -> str:
-    """已训练模型卡片（替代原来的长表格），保留下载按钮和 ModelScope 链接。"""
-    models = snapshot["models"]
-    if not models:
-        return '<h2>已训练模型</h2><p class="empty">无。</p>'
-    kind_labels = {"task": "任务模型", "group": "组模型", "unknown": "未匹配"}
-    model_repo = snapshot["model_repo_id"] or ""
-    chips = []
-    for model in models:
-        steps = ", ".join(model["steps"]) or "—"
-        local_steps = ", ".join(model["local_steps"]) or "—"
-        if model["downloaded"]:
-            local_html = f'<span class="badge good">✅ 本地 step {html.escape(local_steps)}</span>'
-        else:
-            local_html = '<span class="badge bad">未下载</span>'
-        if model["needs_download"]:
-            action = "⬇️ 下载最新"
-        elif model["downloaded"]:
-            action = "↻ 重新下载"
-        else:
-            action = "⬇️ 下载"
-        button = (
-            f'<button class="download-model-btn" type="button"'
-            f' data-policy="{html.escape(model["policy"])}"'
-            f' data-task="{html.escape(model["key"])}"'
-            f' data-size="{human_bytes(model["size"])}"'
-            f' data-label="{html.escape(model["policy"] + "/" + model["key"])}">'
-            f"{action}</button>"
-        )
-        if model_repo:
-            link = (
-                f'<a class="chip-link" target="_blank" rel="noopener"'
-                f' href="https://www.modelscope.cn/models/{html.escape(model_repo)}/files?path='
-                f'{quote(model["path"])}">ModelScope ↗</a>'
-            )
-        else:
-            link = ""
-        display_key = model["target"].replace("/", "_") if model.get("alias_task") else model["key"]
-        chips.append(
-            '<div class="model-chip">'
-            f'<div class="top"><code>{html.escape(model["policy"])}</code>'
-            f'<span class="badge good">{kind_labels.get(model["kind"], model["kind"])}</span>'
-            + ('<span class="badge warn">单任务小组</span>' if model.get("alias_task") else "")
-            + f"{local_html}</div>"
-            f'<div class="chip-key"><code>{html.escape(display_key)}</code></div>'
-            f'<div class="sub">step {html.escape(steps)} · {human_bytes(model["size"])}'
-            f' · 对应 {html.escape(model["target"])}'
-            + (f'<br>ModelScope 目录 <code>{html.escape(model["path"])}</code>'
-               f'（小组只有 1 个任务 {html.escape(model["alias_task"])}，目录名沿用任务名）'
-               if model.get("alias_task") else "")
-            + "</div>"
-            f'<div class="actions">{button}{link}</div>'
-            "</div>"
-        )
-    return (
-        f"<h2>已训练模型 <small>{len(models)} 个</small></h2>"
-        f'<div class="model-chips">{"".join(chips)}</div>'
     )
 
 
@@ -2376,13 +2588,7 @@ def wandb_runs_html(snapshot: dict) -> str:
             "训练机把 <code>&lt;POLICY&gt;/&lt;task&gt;/&lt;run&gt;/wandb/</code> 一起传到 ModelScope 后，"
             "这里会出现下载按钮。</p>"
         )
-    toolbar = (
-        '<div class="toolbar">'
-        '<button id="download-wandb-btn" type="button" disabled>⬇️ 下载缺失 W&amp;B</button>'
-        '<button id="upload-wandb-btn" type="button" disabled>⬆️ 上传到 W&amp;B 官方</button>'
-        + hint
-        + "</div>"
-    )
+    toolbar = f'<div class="toolbar">{hint}<span class="hint">（下载 / 上传按钮在页面顶部）</span></div>'
     rows = []
     for item in runs:
         local = item["local"]
@@ -2473,7 +2679,7 @@ def strip_heading(fragment: str) -> str:
 
 
 def models_table_html(snapshot: dict) -> str:
-    """已训练模型的表格视图（折叠区里用，保留 ModelScope 路径列）。"""
+    """已训练模型列表，带下载按钮和 ModelScope 路径。"""
     models = snapshot["models"]
     if not models:
         return '<h2>已训练模型</h2><p class="empty">无。</p>'
@@ -2527,12 +2733,197 @@ def models_table_html(snapshot: dict) -> str:
             f"<td>{path_html}</td>"
             "</tr>"
         )
+    downloaded = sum(1 for model in models if model["downloaded"])
+    stale = sum(1 for model in models if model["downloaded"] and model["needs_download"])
     return (
-        "<h2>已训练模型</h2>"
+        f"<h2>已训练模型 <small>{len(models)} 个 · 本地 {downloaded}"
+        + (f" · 待更新 {stale}" if stale else "")
+        + "</small></h2>"
         "<table><thead><tr><th>策略</th><th>模型目录</th><th>类型</th><th>对应</th>"
         "<th>Checkpoint</th><th>大小</th><th>本地</th><th>操作</th><th>ModelScope 路径</th></tr></thead>"
         f"<tbody>{''.join(model_cells)}</tbody></table>"
     )
+
+
+# 三个页面共用的主题与基础样式；颜色只在 :root 里定义，跟随系统深 / 浅色。
+BASE_CSS = """
+  :root {
+    color-scheme: light dark;
+    --bg: #f6f7f9; --panel: #ffffff; --panel-2: #f2f4f7; --border: #e1e4e8; --line: #eef0f3;
+    --text: #1f2328; --muted: #656d76; --faint: #8c959f; --accent: #0969da; --hover: #f5f7fa;
+    --good-bg: #dafbe1; --good-fg: #116329; --good: #2da44e;
+    --warn-bg: #fff4c2; --warn-fg: #7d4e00; --warn: #d4a72c;
+    --bad-bg: #ffebe9; --bad-fg: #a40e26;
+    --safe-bg: rgba(46, 160, 67, .16); --safe-fg: #116329;
+    --risky-bg: rgba(248, 81, 73, .14); --risky-fg: #a40e26;
+    --radius: 10px;
+    --mono: ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0d1117; --panel: #151b23; --panel-2: #1b222c; --border: #2a313c; --line: #21262d;
+      --text: #e6edf3; --muted: #8b949e; --faint: #6e7681; --accent: #58a6ff; --hover: #1b222c;
+      --good-bg: rgba(46, 160, 67, .18); --good-fg: #7ee787; --good: #2ea043;
+      --warn-bg: rgba(187, 128, 9, .2); --warn-fg: #e3b341; --warn: #d29922;
+      --bad-bg: rgba(248, 81, 73, .18); --bad-fg: #ffa198;
+      --safe-bg: rgba(46, 160, 67, .22); --safe-fg: #7ee787;
+      --risky-bg: rgba(248, 81, 73, .2); --risky-fg: #ffa198;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; padding: 28px 32px 48px; background: var(--bg); color: var(--text);
+    font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", sans-serif; }
+  .page { max-width: 1680px; margin: 0 auto; }
+  header.top { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; flex-wrap: wrap; margin-bottom: 20px; }
+  h1 { margin: 0; font-size: 22px; font-weight: 650; letter-spacing: -.01em; }
+  .meta { color: var(--muted); font-size: 12px; margin-top: 4px; }
+  .meta .bad { padding: 0 5px; border-radius: 4px; }
+  .tabs { display: flex; gap: 2px; padding: 3px; background: var(--panel-2); border: 1px solid var(--border); border-radius: 8px; }
+  .tabs a { padding: 5px 12px; border-radius: 6px; color: var(--muted); font-size: 13px; text-decoration: none; white-space: nowrap; }
+  .tabs a:hover { color: var(--text); }
+  .tabs a[aria-current] { background: var(--panel); color: var(--text); font-weight: 600; box-shadow: 0 1px 2px rgba(0, 0, 0, .08); }
+  h2 { font-size: 15px; font-weight: 600; margin: 32px 0 10px; }
+  h2 small { font-weight: 400; color: var(--faint); font-size: 12px; margin-left: 6px; }
+  a { color: var(--accent); }
+  code { font-family: var(--mono); font-size: 12px; }
+  small, .empty { color: var(--muted); }
+  .empty { font-size: 13px; }
+  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 12px; margin-bottom: 20px; }
+  .card { background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); padding: 14px 16px; }
+  .card .label { color: var(--muted); font-size: 12px; }
+  .card .value { font-size: 22px; font-weight: 650; margin-top: 2px; font-variant-numeric: tabular-nums; }
+  .card .sub { color: var(--faint); font-size: 12px; margin-top: 2px; }
+  table { width: 100%; border-collapse: separate; border-spacing: 0; background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; }
+  th, td { padding: 9px 12px; border-bottom: 1px solid var(--line); text-align: left; font-size: 13px; vertical-align: top; }
+  tbody tr:last-child > * { border-bottom: 0; }
+  th { background: var(--panel-2); color: var(--muted); font-size: 12px; font-weight: 500; }
+  tbody tr:hover > td { background: var(--hover); }
+  .badge { display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: 12px; font-weight: 500; line-height: 1.6; white-space: nowrap; }
+  .good { background: var(--good-bg); color: var(--good-fg); }
+  .warn { background: var(--warn-bg); color: var(--warn-fg); }
+  .bad { background: var(--bad-bg); color: var(--bad-fg); }
+  .badge.lvl-safe, .legend-item.lvl-safe { background: var(--safe-bg); color: var(--safe-fg); }
+  .badge.lvl-risky, .legend-item.lvl-risky { background: var(--risky-bg); color: var(--risky-fg); }
+  input[type=search] { background: var(--panel); color: var(--text); border: 1px solid var(--border); border-radius: 8px; padding: 7px 12px; font: inherit; font-size: 13px; }
+  input[type=search]:focus, button:focus-visible { outline: 2px solid var(--accent); outline-offset: -1px; }
+"""
+
+
+# 数据同步页和模型与评测页的样式（叠加在 BASE_CSS 上）。
+DASHBOARD_CSS = BASE_CSS + """
+  .states { color: var(--muted); font-size: 12px; line-height: 1.8; margin: -6px 0 16px; }
+  .toolbar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 16px; }
+  .toolbar .hint { color: var(--faint); font-size: 12px; margin-left: 4px; }
+  button { font: inherit; }
+  .toolbar button, .dialog-actions button, .video-btn, .download-model-btn, .download-wandb-btn {
+    background: var(--panel); color: var(--text); border: 1px solid var(--border); border-radius: 7px;
+    padding: 6px 12px; font-size: 13px; cursor: pointer; white-space: nowrap; }
+  .video-btn, .download-model-btn, .download-wandb-btn { padding: 3px 9px; font-size: 12px; }
+  .toolbar button:hover, .dialog-actions button:hover, .video-btn:hover, .download-model-btn:hover,
+  .download-wandb-btn:hover { border-color: var(--faint); background: var(--hover); }
+  button:disabled { opacity: .5; cursor: not-allowed; }
+  #refresh-btn, #plan-ok { background: var(--accent); border-color: var(--accent); color: #fff; }
+  #refresh-btn:hover, #plan-ok:hover { background: var(--accent); filter: brightness(1.08); }
+  .jobs { margin-bottom: 16px; }
+  .job { background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); padding: 10px 14px; margin-bottom: 8px; font-size: 13px; }
+  .job .head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+  .job .state { font-weight: 600; }
+  .job .state.running { color: var(--warn-fg); }
+  .job .state.done { color: var(--good-fg); }
+  .job .state.failed { color: var(--bad-fg); }
+  pre { background: var(--panel-2); border: 1px solid var(--line); border-radius: 7px; padding: 10px; overflow: auto; white-space: pre-wrap; font: 11px/1.5 var(--mono); }
+  .job pre { margin: 8px 0 0; max-height: 220px; }
+  dialog { background: var(--panel); color: var(--text); border: 1px solid var(--border); border-radius: 12px; padding: 18px 20px; width: min(900px, calc(100% - 48px)); box-shadow: 0 16px 48px rgba(0, 0, 0, .25); }
+  dialog::backdrop { background: rgba(1, 4, 9, .55); }
+  dialog h2 { margin: 0 0 12px; }
+  dialog pre { max-height: 50vh; font-size: 12px; }
+  .dialog-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14px; }
+  td.group-index { color: var(--faint); text-align: right; width: 32px; font-variant-numeric: tabular-nums; }
+  .eval-item { margin-bottom: 6px; }
+  .eval-item:last-child { margin-bottom: 0; }
+  td.eval-cell { min-width: 200px; }
+  .eval-name { font-size: 11px; white-space: nowrap; }
+  .video-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 12px; }
+  .video-card { display: flex; flex-direction: column; text-align: left; padding: 0; overflow: hidden; background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); color: var(--text); cursor: pointer; transition: border-color .15s, transform .15s; }
+  .video-card:hover { border-color: var(--accent); transform: translateY(-1px); }
+  .video-card:disabled { opacity: .55; transform: none; }
+  .video-card img, .video-card-empty { width: 100%; aspect-ratio: 4 / 3; object-fit: cover; display: block; background: var(--panel-2); }
+  .video-card-empty { display: flex; align-items: center; justify-content: center; font-size: 28px; }
+  .video-card-body { display: flex; flex-direction: column; gap: 2px; padding: 8px 10px 10px; }
+  .video-card-body code { word-break: break-all; }
+  .video-card-body .cams { font-size: 11px; color: var(--faint); }
+  #video-dialog { width: min(1180px, calc(100% - 40px)); }
+  #cell-dialog { width: min(760px, calc(100% - 40px)); }
+  .cell-list { max-height: 55vh; overflow: auto; display: flex; flex-direction: column; gap: 6px; }
+  .cell-run { display: flex; justify-content: space-between; align-items: center; gap: 12px; text-align: left; background: var(--panel-2); border: 1px solid var(--border); border-radius: 7px; color: var(--text); padding: 8px 10px; font-size: 12px; cursor: pointer; }
+  .cell-run:hover, .video-ep:hover, .video-ep.active { border-color: var(--accent); }
+  .cell-run span:last-child { color: var(--muted); white-space: nowrap; }
+  .video-layout { display: grid; grid-template-columns: 240px 1fr; gap: 12px; }
+  .video-list { max-height: 62vh; overflow: auto; background: var(--panel-2); border-radius: 7px; padding: 6px; display: flex; flex-direction: column; gap: 4px; }
+  .video-ep { display: flex; justify-content: space-between; gap: 8px; background: var(--panel); border: 1px solid var(--border); border-radius: 6px; color: var(--text); padding: 5px 8px; font-size: 12px; cursor: pointer; text-align: left; }
+  .video-ep.active { background: var(--hover); }
+  .video-stage video { width: 100%; max-height: 62vh; background: #000; border-radius: 7px; }
+  .video-cams { display: flex; gap: 6px; margin-bottom: 10px; flex-wrap: wrap; }
+  .video-cams button { background: var(--panel); border: 1px solid var(--border); border-radius: 999px; color: var(--muted); padding: 3px 11px; font-size: 12px; cursor: pointer; }
+  .video-cams button.active { border-color: var(--accent); background: var(--accent); color: #fff; }
+  .legend { display: flex; gap: 8px; align-items: center; color: var(--muted); font-size: 12px; margin: 0 0 8px; flex-wrap: wrap; }
+  .legend-item { display: inline-block; padding: 1px 8px; border-radius: 4px; font-size: 11px; }
+  .legend-note { color: var(--faint); }
+  .policy-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; vertical-align: middle; }
+  .matrix-wrap { overflow: auto; max-height: 76vh; border: 1px solid var(--border); border-radius: var(--radius); background: var(--panel); margin-bottom: 10px; }
+  table.matrix { border: 0; border-radius: 0; overflow: visible; font-size: 12px; }
+  table.matrix th, table.matrix td { border-bottom: 1px solid var(--line); border-right: 1px solid var(--line); padding: 0; text-align: center; vertical-align: middle; }
+  table.matrix thead th { position: sticky; top: 0; z-index: 3; background: var(--panel-2); color: var(--muted); font-weight: 500; font-size: 11px; padding: 6px 8px; white-space: nowrap; }
+  table.matrix thead tr.matrix-head-1 th { top: 0; height: 28px; }
+  table.matrix thead tr.matrix-head-1 th.group-head { color: var(--text); white-space: normal; word-break: break-all; line-height: 1.2; max-width: 200px; }
+  table.matrix thead tr.matrix-head-2 th { top: 28px; }
+  table.matrix thead tr.matrix-head-2 th.lvl-head.lvl-safe { background: var(--safe-bg); color: var(--safe-fg); }
+  table.matrix thead tr.matrix-head-2 th.lvl-head.lvl-risky { background: var(--risky-bg); color: var(--risky-fg); }
+  table.matrix th.rowhead { position: sticky; left: 0; z-index: 2; background: var(--panel); color: var(--text); text-align: left; padding: 6px 10px; min-width: 170px; max-width: 220px; font-weight: 400; border-right: 1px solid var(--border); }
+  table.matrix th.rowhead .badge { font-size: 10px; padding: 0 6px; }
+  table.matrix thead th.corner { left: 0; z-index: 4; text-align: left; min-width: 170px; vertical-align: bottom; }
+  table.matrix tr.group-row td { background: var(--panel-2); color: var(--text); text-align: left; padding: 6px 10px; }
+  .group-count { color: var(--faint); font-size: 11px; margin-left: 8px; }
+  table.matrix td.cell { padding: 0; height: 40px; min-width: 72px; }
+  .eval-open { display: block; width: 100%; height: 100%; padding: 4px 6px; border: 0; background: transparent; color: var(--text); font: inherit; cursor: pointer; }
+  .eval-open .rate { display: block; font-size: 13px; font-weight: 650; line-height: 1.15; font-variant-numeric: tabular-nums; }
+  .eval-open small { display: block; font-size: 10px; color: var(--muted); }
+  .eval-open:hover { outline: 2px solid var(--accent); outline-offset: -2px; }
+  td.cell-empty, .cell-empty { color: var(--faint); }
+  table.matrix tr.matrix-foot td, table.matrix tr.matrix-foot th { position: sticky; bottom: 0; background: var(--panel-2); z-index: 2; }
+  table.matrix tr.matrix-foot-layout td, table.matrix tr.matrix-foot-layout th { bottom: 40px; }
+  table.matrix tr.matrix-foot th.rowhead { z-index: 3; }
+  table.matrix td.model-cell { padding: 5px 6px; white-space: nowrap; }
+  table.matrix td.model-cell .badge { font-size: 11px; }
+  table.matrix tr.matrix-layout th.rowhead { background: var(--panel-2); font-size: 12px; font-weight: 500; }
+  table.matrix tr.matrix-layout td.cell { background: var(--panel-2); height: 30px; }
+  .eval-open small.layout-warn { color: var(--warn-fg); }
+  .eval-bar { height: 4px; border-radius: 999px; background: var(--line); overflow: hidden; }
+  .eval-bar i { display: block; height: 100%; border-radius: 999px; }
+  .eval-bar i.good { background: var(--good); }
+  .eval-bar i.warn { background: var(--warn); }
+  .chip-link { color: var(--accent); text-decoration: none; font-size: 12px; }
+  .chip-link:hover { text-decoration: underline; }
+  details.fold { margin-top: 12px; background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); padding: 10px 14px; }
+  details.fold summary { cursor: pointer; color: var(--muted); font-size: 13px; }
+  details.fold summary:hover { color: var(--text); }
+  details.fold[open] summary { margin-bottom: 10px; }
+  details.fold table { border-radius: 8px; }
+"""
+
+
+def nav_html(page: str) -> str:
+    """页面右上角的三页切换。"""
+    links = (
+        ("sync", "SYNC_STATUS.html", "数据同步"),
+        ("models", "MODELS_EVAL.html", "模型与评测"),
+        ("tasks", "TASKS.html", "任务清单"),
+    )
+    current = ' aria-current="page"'
+    return '<nav class="tabs">' + "".join(
+        f'<a href="{href}"{current if key == page else ""}>{label}</a>'
+        for key, href, label in links
+    ) + "</nav>"
 
 
 def task_catalog_page(generated_at: str, refresh: int) -> str:
@@ -2586,47 +2977,22 @@ def task_catalog_page(generated_at: str, refresh: int) -> str:
             f"<tbody>{''.join(rows)}</tbody></table>"
             "</section>"
         )
-    style = """
-  :root { color-scheme: dark; }
-  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; margin: 0; padding: 24px; background: #0d1117; color: #e6edf3; }
-  h1 { margin: 0 0 4px; font-size: 24px; }
-  .meta { color: #8b949e; font-size: 13px; margin-bottom: 20px; }
-  .meta code { color: #c9d1d9; }
-  .toolbar { margin: 0 0 16px; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
-  .nav-links { margin-left: auto; display: flex; gap: 14px; flex-wrap: wrap; }
-  .nav-link { color: #58a6ff; font-size: 13px; text-decoration: none; white-space: nowrap; }
-  .nav-link:hover { text-decoration: underline; }
-  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; margin-bottom: 18px; }
-  .card { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 14px; }
-  .card .label { color: #8b949e; font-size: 12px; text-transform: uppercase; letter-spacing: .04em; }
-  .card .value { font-size: 22px; font-weight: 600; margin-top: 4px; }
-  .card .sub { color: #8b949e; font-size: 12px; margin-top: 4px; }
-  #filter { background: #0d1117; color: #e6edf3; border: 1px solid #30363d; border-radius: 6px; padding: 8px 12px; font-size: 13px; min-width: 260px; }
-  #filter:focus { outline: 1px solid #58a6ff; outline-offset: -1px; }
-  .pills { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 18px; }
-  .pill { display: flex; align-items: center; gap: 6px; background: #161b22; border: 1px solid #30363d; border-radius: 999px; padding: 4px 10px; color: #c9d1d9; text-decoration: none; font-size: 12px; }
-  .pill:hover { border-color: #2ea043; }
-  .pill span { color: #6e7681; }
-  .group { background: #161b22; border: 1px solid #30363d; border-radius: 8px; margin-bottom: 16px; overflow: hidden; }
-  .group-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 10px 12px; background: #1c2128; border-bottom: 1px solid #30363d; }
-  .group-index { color: #8b949e; }
-  .group-head code { font-size: 14px; }
-  .group-meta { color: #8b949e; font-size: 12px; }
-  .shown-count { margin-left: auto; color: #d29922; font-size: 12px; }
-  table { width: 100%; border-collapse: collapse; }
-  th, td { padding: 8px 12px; border-bottom: 1px solid #21262d; text-align: left; font-size: 13px; vertical-align: top; }
-  tr:last-child td { border-bottom: 0; }
-  th { background: #1c2128; color: #8b949e; font-size: 12px; text-transform: uppercase; letter-spacing: .04em; }
-  tr.task-row:hover td { background: #1c2128; }
+    style = BASE_CSS + """
+  .toolbar { display: flex; align-items: center; gap: 10px; margin-bottom: 14px; }
+  #filter { width: min(420px, 100%); }
+  .pills { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 22px; }
+  .pill { display: inline-flex; align-items: center; gap: 6px; background: var(--panel); border: 1px solid var(--border); border-radius: 999px; padding: 3px 10px; color: var(--text); text-decoration: none; font-size: 12px; }
+  .pill:hover { border-color: var(--accent); }
+  .pill span { color: var(--faint); }
+  .group { margin-bottom: 18px; scroll-margin-top: 16px; }
+  .group-head { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; margin: 0 2px 8px; }
+  .group-head code { font-size: 14px; font-weight: 600; }
+  .group-index { color: var(--faint); font-variant-numeric: tabular-nums; }
+  .group-meta { color: var(--muted); font-size: 12px; }
+  .shown-count { margin-left: auto; color: var(--warn-fg); font-size: 12px; }
   .task-row[hidden] { display: none; }
   .col-level { width: 76px; }
   .col-name { width: 32%; }
-  td.instruction { color: #e6edf3; }
-  code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
-  .badge { display: inline-block; padding: 2px 7px; border-radius: 999px; font-size: 12px; font-weight: 500; white-space: nowrap; }
-  .lvl-safe { background: rgba(46, 160, 67, .38); color: #7ee787; }
-  .lvl-risky { background: rgba(248, 81, 73, .38); color: #ffa198; }
-  .empty { color: #8b949e; }
 """
     script = """
 (function () {
@@ -2653,27 +3019,31 @@ def task_catalog_page(generated_at: str, refresh: int) -> str:
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <title>RoboSafeJanus 任务清单</title>
 {refresh_meta}
 <style>{style}</style>
 </head>
 <body>
-<h1>RoboSafeJanus 任务清单</h1>
-<div class="meta">生成时间 {html.escape(generated_at)} · 来源 <code>task/robosafejanus_tasks.json</code>{f" · 每 {refresh} 秒刷新" if refresh else ""}</div>
-<div class="toolbar">
-  <input id="filter" type="search" placeholder="筛选任务名或指令…（如 heat / risky / microwave）" autocomplete="off">
-  <nav class="nav-links">
-    <a class="nav-link" href="SYNC_STATUS.html">数据同步</a>
-    <a class="nav-link" href="MODELS_EVAL.html">模型与评测</a>
-  </nav>
-</div>
+<div class="page">
+<header class="top">
+  <div>
+    <h1>RoboSafeJanus 任务清单</h1>
+    <div class="meta">生成时间 {html.escape(generated_at)} · 来源 <code>task/robosafejanus_tasks.json</code>{f" · 每 {refresh} 秒刷新" if refresh else ""}</div>
+  </div>
+  {nav_html("tasks")}
+</header>
 <div class="cards">
   <div class="card"><div class="label">任务组</div><div class="value">{len(groups)} groups</div><div class="sub">task/robosafejanus_tasks.json</div></div>
   <div class="card"><div class="label">小任务</div><div class="value">{total} tasks</div><div class="sub">safe {counts["safe_tasks"]} · risky {counts["risky_tasks"]}</div></div>
   <div class="card"><div class="label">safe / risky</div><div class="value">{counts["safe_tasks"]} / {counts["risky_tasks"]}</div><div class="sub">每个任务的指令见下表</div></div>
 </div>
+<div class="toolbar">
+  <input id="filter" type="search" placeholder="筛选任务名或指令…（如 heat / risky / microwave）" autocomplete="off">
+</div>
 <div class="pills">{''.join(pills)}</div>
 {''.join(sections)}
+</div>
 <script>{script}</script>
 </body>
 </html>
@@ -3045,6 +3415,12 @@ def html_page(
     eval_stats = summary["eval"]
     latest_eval = human_time(eval_stats["latest"]) if eval_stats["latest"] else "无结果"
     layout_stats = summary["eval_layouts"]
+    running_tasks = sorted({
+        entry["task"]
+        for cell in collect_progress_cells(snapshot).values()
+        for entry in cell["tasks"].values()
+        if entry["status"] in ("running", "starting")
+    })
     detail_cards = [
         (
             "已训练模型",
@@ -3055,6 +3431,11 @@ def html_page(
             "本地评测",
             f"{eval_stats['tasks']} tasks",
             f"{eval_stats['selected']} results · {latest_eval}",
+        ),
+        (
+            "评测进行中",
+            f"{len(running_tasks)} tasks",
+            "、".join(running_tasks) if running_tasks else "当前没有在跑的 run",
         ),
         (
             "评测布局",
@@ -3117,19 +3498,18 @@ def html_page(
   const jobsBox = $('jobs');
   const actionIds = [
     'export-v30-btn', 'export-v21-btn', 'upload-hdf5-btn', 'upload-lerobot-btn',
-    'download-model-btn', 'download-wandb-btn', 'upload-wandb-btn',
+    'download-model-btn', 'sync-wandb-btn',
   ];
   const jobKinds = {
     'export-v30-btn': 'export_v30', 'export-v21-btn': 'export_v21',
     'upload-hdf5-btn': 'upload_hdf5', 'upload-lerobot-btn': 'upload_lerobot',
-    'download-model-btn': 'download_model', 'download-wandb-btn': 'download_wandb',
-    'upload-wandb-btn': 'upload_wandb',
+    'download-model-btn': 'download_model', 'sync-wandb-btn': 'sync_wandb',
   };
   const jobLabels = {
     export_v30: 'LeRobot v3.0 导出', export_v21: 'LeRobot v2.1 导出',
     upload_hdf5: 'HDF5 上传', upload_lerobot: 'LeRobot 上传',
     download_model: '模型下载', download_wandb: 'W&B 数据下载',
-    upload_wandb: 'W&B 上传（官方）',
+    upload_wandb: 'W&B 上传（官方）', sync_wandb: 'W&B 数据同步',
   };
   let serverMode = null;
 
@@ -3445,7 +3825,7 @@ def html_page(
       if (job.log) {
         const logPath = document.createElement('span');
         logPath.textContent = job.log;
-        logPath.style.color = '#8b949e';
+        logPath.style.color = 'var(--muted)';
         head.append(logPath);
       }
       card.append(head);
@@ -3465,7 +3845,9 @@ def html_page(
     document.querySelectorAll('.download-model-btn').forEach((btn) => {
       btn.disabled = !serverMode || modelBusy;
     });
-    const wandbBusy = jobs.download_wandb && jobs.download_wandb.state === 'running';
+    const wandbBusy = ['download_wandb', 'sync_wandb'].some(
+      (kind) => jobs[kind] && jobs[kind].state === 'running'
+    );
     document.querySelectorAll('.download-wandb-btn').forEach((btn) => {
       btn.disabled = !serverMode || wandbBusy;
     });
@@ -3619,14 +4001,10 @@ def html_page(
     if (btn.id === 'download-model-btn') return;
     btn.addEventListener('click', () => downloadModel(btn));
   });
-  on('download-wandb-btn', (event) => {
-    startAction(event.currentTarget, 'api/wandb/download', 'api/wandb/download?confirm=1', '下载缺失 W&B 数据');
-  });
-  on('upload-wandb-btn', (event) => {
-    startAction(event.currentTarget, 'api/wandb/upload', 'api/wandb/upload?confirm=1', '上传 W&B 数据到官方');
+  on('sync-wandb-btn', (event) => {
+    startAction(event.currentTarget, 'api/wandb/sync', 'api/wandb/sync?confirm=1', '同步 W&B 数据（先下载缺失，再上传未同步）');
   });
   document.querySelectorAll('.download-wandb-btn').forEach((btn) => {
-    if (btn.id === 'download-wandb-btn') return;
     btn.addEventListener('click', () => downloadWandb(btn));
   });
   bindVideoButtons();
@@ -3644,15 +4022,6 @@ def html_page(
         "<th>模型</th><th>评测</th><th>评测布局</th></tr></thead>"
         f"<tbody>{''.join(detail_rows)}</tbody></table>"
     )
-    nav_link = '<nav class="nav-links">' + "".join(
-        f'<a class="nav-link" href="{href}">{label}</a>'
-        for key, href, label in (
-            ("sync", "SYNC_STATUS.html", "数据同步"),
-            ("models", "MODELS_EVAL.html", "模型与评测"),
-            ("tasks", "TASKS.html", "任务清单"),
-        )
-        if key != page
-    ) + "</nav>"
     if page == "models":
         page_title = "RoboSafeJanus 模型与评测"
         page_meta = (
@@ -3664,20 +4033,22 @@ def html_page(
         page_toolbar = (
             '  <button id="refresh-btn" type="button">🔄 手动刷新</button>\n'
             '  <button id="download-model-btn" type="button" disabled>⬇️ 下载模型</button>\n'
+            '  <button id="sync-wandb-btn" type="button" disabled'
+            ' title="下载缺失的 W&amp;B run，再把本地未上传的 run 传到 W&amp;B 官方">'
+            '🔄 同步 W&amp;B 数据</button>\n'
             '  <span id="refresh-hint" class="hint">用 --serve 打开时按钮会在服务端执行任务</span>'
         )
         page_main = (
             f'<div class="cards">{detail_cards_html}</div>'
-            f"{eval_matrix_html(snapshot)}"
             f"{model_matrix_html(snapshot)}"
-            f"{model_chips_html(snapshot)}"
+            f"{eval_progress_matrix_html(snapshot)}"
+            f"{eval_matrix_html(snapshot)}"
+            f"{models_table_html(snapshot)}"
             f"{wandb_runs_html(snapshot)}"
             '<details class="fold"><summary>逐条评测明细（run_id / 结果路径）</summary>'
             f"{strip_heading(evals_html)}</details>"
             '<details class="fold"><summary>按任务明细（模型 / 评测 / 布局）</summary>'
             f"{strip_heading(detail_table)}</details>"
-            '<details class="fold"><summary>已训练模型（表格视图 / ModelScope 路径）</summary>'
-            f"{strip_heading(models_table_html(snapshot))}</details>"
             '<details class="fold"><summary>评测布局（缺布局 / 不足的任务）</summary>'
             f"{strip_heading(layouts_html)}</details>"
         )
@@ -3718,148 +4089,25 @@ def html_page(
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{page_title}</title>
-<style>
-  :root {{ color-scheme: dark; }}
-  body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; margin: 0; padding: 24px; background: #0d1117; color: #e6edf3; }}
-  h1 {{ margin: 0 0 4px; font-size: 24px; }}
-  .meta {{ color: #8b949e; font-size: 13px; margin-bottom: 20px; }}
-  .cards {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 12px; margin-bottom: 18px; }}
-  .card {{ background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 14px; }}
-  .card .label {{ color: #8b949e; font-size: 12px; text-transform: uppercase; letter-spacing: .04em; }}
-  .card .value {{ font-size: 22px; font-weight: 600; margin-top: 4px; }}
-  .card .sub {{ color: #8b949e; font-size: 12px; margin-top: 4px; }}
-  .states {{ color: #8b949e; font-size: 13px; margin-bottom: 14px; }}
-  .toolbar {{ margin: 0 0 16px; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }}
-  .toolbar button {{ background: #1f6f43; color: #d2f8e2; border: 1px solid #2ea043; border-radius: 6px; padding: 7px 12px; font-size: 13px; cursor: pointer; }}
-  .toolbar button:hover {{ background: #2a8a55; }}
-  .toolbar button:disabled {{ opacity: .6; cursor: progress; }}
-  .toolbar .hint {{ color: #8b949e; font-size: 12px; }}
-  .nav-links {{ margin-left: auto; display: flex; gap: 14px; flex-wrap: wrap; }}
-  .nav-link {{ color: #58a6ff; font-size: 13px; text-decoration: none; white-space: nowrap; }}
-  .nav-link:hover {{ text-decoration: underline; }}
-  .download-model-btn {{ background: #21262d; color: #e6edf3; border: 1px solid #30363d; border-radius: 6px; padding: 4px 8px; font-size: 12px; cursor: pointer; white-space: nowrap; }}
-  .download-model-btn:hover {{ background: #30363d; }}
-  .download-model-btn:disabled {{ opacity: .6; cursor: progress; }}
-  .jobs {{ margin: 0 0 16px; }}
-  .job {{ background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 10px 12px; margin-bottom: 8px; font-size: 13px; }}
-  .job .head {{ display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }}
-  .job .state {{ font-weight: 600; }}
-  .job .state.running {{ color: #d29922; }}
-  .job .state.done {{ color: #3fb950; }}
-  .job .state.failed {{ color: #f85149; }}
-  .job pre {{ margin: 8px 0 0; max-height: 220px; overflow: auto; background: #0d1117; border: 1px solid #21262d; border-radius: 6px; padding: 8px; font-size: 11px; white-space: pre-wrap; }}
-  dialog {{ background: #161b22; color: #e6edf3; border: 1px solid #30363d; border-radius: 8px; width: min(900px, calc(100% - 48px)); }}
-  dialog::backdrop {{ background: rgba(1, 4, 9, .72); }}
-  dialog h2 {{ margin: 0 0 10px; font-size: 16px; }}
-  dialog pre {{ max-height: 50vh; overflow: auto; background: #0d1117; border: 1px solid #21262d; border-radius: 6px; padding: 10px; font-size: 12px; white-space: pre-wrap; }}
-  .dialog-actions {{ display: flex; justify-content: flex-end; gap: 10px; margin-top: 12px; }}
-  .dialog-actions button {{ background: #21262d; color: #e6edf3; border: 1px solid #30363d; border-radius: 6px; padding: 7px 12px; font-size: 13px; cursor: pointer; }}
-  #plan-ok {{ background: #1f6f43; border-color: #2ea043; color: #d2f8e2; }}
-  h2 {{ font-size: 16px; margin: 22px 0 8px; }}
-  .empty {{ color: #8b949e; font-size: 13px; }}
-  table {{ width: 100%; border-collapse: collapse; background: #161b22; border: 1px solid #30363d; border-radius: 8px; overflow: hidden; }}
-  th, td {{ padding: 9px 10px; border-bottom: 1px solid #21262d; text-align: left; font-size: 13px; vertical-align: top; }}
-  th {{ background: #1c2128; color: #8b949e; font-size: 12px; text-transform: uppercase; letter-spacing: .04em; position: sticky; top: 0; }}
-  tr:hover td {{ background: #1c2128; }}
-  td.group-index {{ color: #8b949e; text-align: right; width: 32px; }}
-  code {{ font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }}
-  small {{ color: #8b949e; }}
-  .badge {{ display: inline-block; padding: 2px 7px; border-radius: 999px; font-size: 12px; font-weight: 500; white-space: nowrap; }}
-  .video-btn {{ background: #21262d; color: #e6edf3; border: 1px solid #30363d; border-radius: 6px; padding: 4px 8px; font-size: 12px; cursor: pointer; white-space: nowrap; }}
-  .video-btn:hover {{ background: #30363d; }}
-  .eval-item {{ margin-bottom: 6px; }}
-  .eval-item:last-child {{ margin-bottom: 0; }}
-  td.eval-cell {{ min-width: 200px; }}
-  .eval-name {{ font-size: 11px; white-space: nowrap; }}
-  .video-btn:disabled {{ opacity: .5; cursor: not-allowed; }}
-  .video-grid {{ display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 12px; }}
-  .video-card {{ display: flex; flex-direction: column; text-align: left; padding: 0; overflow: hidden; background: #161b22; border: 1px solid #30363d; border-radius: 8px; color: #e6edf3; cursor: pointer; }}
-  .video-card:hover {{ border-color: #2ea043; }}
-  .video-card:disabled {{ opacity: .55; cursor: not-allowed; }}
-  .video-card img, .video-card-empty {{ width: 100%; aspect-ratio: 4 / 3; object-fit: cover; display: block; background: #0d1117; }}
-  .video-card-empty {{ display: flex; align-items: center; justify-content: center; font-size: 28px; }}
-  .video-card-body {{ display: flex; flex-direction: column; gap: 3px; padding: 8px 10px 10px; }}
-  .video-card-body code {{ word-break: break-all; }}
-  .video-card-body .cams {{ font-size: 11px; color: #6e7681; }}
-  #video-dialog {{ width: min(1180px, calc(100% - 40px)); }}
-  #cell-dialog {{ width: min(760px, calc(100% - 40px)); }}
-  .cell-list {{ max-height: 55vh; overflow: auto; display: flex; flex-direction: column; gap: 6px; }}
-  .cell-run {{ display: flex; justify-content: space-between; align-items: center; gap: 12px; text-align: left; background: #0d1117; border: 1px solid #30363d; border-radius: 6px; color: #e6edf3; padding: 8px 10px; font-size: 12px; cursor: pointer; }}
-  .cell-run:hover {{ border-color: #2ea043; }}
-  .cell-run span:last-child {{ color: #8b949e; white-space: nowrap; }}
-  .video-layout {{ display: grid; grid-template-columns: 240px 1fr; gap: 12px; }}
-  .video-list {{ max-height: 62vh; overflow: auto; background: #0d1117; border: 1px solid #21262d; border-radius: 6px; padding: 6px; display: flex; flex-direction: column; gap: 4px; }}
-  .video-ep {{ display: flex; justify-content: space-between; gap: 8px; background: #161b22; border: 1px solid #30363d; border-radius: 5px; color: #e6edf3; padding: 5px 8px; font-size: 12px; cursor: pointer; text-align: left; }}
-  .video-ep:hover, .video-ep.active {{ border-color: #2ea043; background: #1c2b22; }}
-  .video-stage video {{ width: 100%; max-height: 62vh; background: #000; border-radius: 6px; }}
-  .video-cams {{ display: flex; gap: 8px; margin-bottom: 8px; flex-wrap: wrap; }}
-  .video-cams button {{ background: #21262d; border: 1px solid #30363d; border-radius: 999px; color: #c9d1d9; padding: 4px 10px; font-size: 12px; cursor: pointer; }}
-  .video-cams button.active {{ border-color: #2ea043; color: #d2f8e2; background: #1f6f43; }}
-  h2 small {{ font-weight: 400; color: #6e7681; font-size: 12px; margin-left: 6px; }}
-  .legend {{ display: flex; gap: 8px; align-items: center; color: #8b949e; font-size: 12px; margin: 0 0 8px; flex-wrap: wrap; }}
-  .legend-item {{ display: inline-block; padding: 2px 8px; border-radius: 4px; color: #e6edf3; font-size: 11px; }}
-  .legend-item.lvl-safe {{ background: rgba(46, 160, 67, .38); }}
-  .legend-item.lvl-risky {{ background: rgba(248, 81, 73, .38); }}
-  .legend-note {{ color: #6e7681; }}
-  .policy-dot {{ display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 6px; vertical-align: middle; }}
-  .matrix-wrap {{ overflow: auto; max-height: 76vh; border: 1px solid #30363d; border-radius: 8px; background: #0d1117; margin-bottom: 10px; }}
-  table.matrix {{ border-collapse: separate; border-spacing: 0; width: 100%; font-size: 12px; }}
-  table.matrix th, table.matrix td {{ border-bottom: 1px solid #21262d; border-right: 1px solid #21262d; padding: 0; text-align: center; vertical-align: middle; }}
-  table.matrix thead th {{ position: sticky; top: 0; z-index: 3; background: #1c2128; color: #8b949e; font-weight: 500; font-size: 11px; text-transform: none; letter-spacing: 0; padding: 6px 8px; white-space: nowrap; }}
-  table.matrix thead tr.matrix-head-1 th {{ top: 0; height: 28px; }}
-  table.matrix thead tr.matrix-head-1 th.group-head {{ background: #21262d; color: #c9d1d9; white-space: normal; word-break: break-all; line-height: 1.2; max-width: 200px; }}
-  table.matrix thead tr.matrix-head-2 th {{ top: 28px; font-size: 11px; }}
-  table.matrix thead tr.matrix-head-2 th.lvl-head.lvl-safe {{ background: rgba(46, 160, 67, .25); color: #7ee787; }}
-  table.matrix thead tr.matrix-head-2 th.lvl-head.lvl-risky {{ background: rgba(248, 81, 73, .25); color: #ffa198; }}
-  table.matrix th.rowhead {{ position: sticky; left: 0; z-index: 2; background: #161b22; text-align: left; padding: 6px 10px; min-width: 170px; max-width: 220px; text-transform: none; letter-spacing: 0; border-right: 2px solid #30363d; font-weight: 400; }}
-  table.matrix th.rowhead .badge {{ font-size: 10px; padding: 1px 6px; }}
-  table.matrix thead th.corner {{ left: 0; z-index: 4; text-align: left; min-width: 170px; vertical-align: bottom; color: #8b949e; }}
-  table.matrix tr.group-row td {{ background: #1c2128; color: #c9d1d9; text-align: left; padding: 6px 10px; font-size: 12px; }}
-  .group-count {{ color: #6e7681; font-size: 11px; margin-left: 8px; }}
-  table.matrix td.cell {{ padding: 0; height: 40px; min-width: 72px; }}
-  .eval-open {{ display: block; width: 100%; height: 100%; padding: 4px 6px; border: 0; background: transparent; color: #e6edf3; font: inherit; cursor: pointer; }}
-  .eval-open .rate {{ display: block; font-size: 13px; font-weight: 700; line-height: 1.15; }}
-  .eval-open small {{ display: block; font-size: 10px; color: rgba(230, 237, 243, .72); }}
-  .eval-open:hover {{ outline: 1px solid #58a6ff; outline-offset: -1px; }}
-  td.cell-empty, .cell-empty {{ background: #0d1117; color: #484f58; }}
-  table.matrix tr.matrix-foot td, table.matrix tr.matrix-foot th {{ position: sticky; bottom: 0; background: #1c2128; z-index: 2; }}
-  table.matrix tr.matrix-foot-model td, table.matrix tr.matrix-foot-model th {{ bottom: 40px; }}
-  table.matrix tr.matrix-foot th.rowhead {{ z-index: 3; }}
-  table.matrix td.model-cell {{ padding: 5px 6px; white-space: nowrap; }}
-  table.matrix td.model-cell .badge {{ font-size: 11px; }}
-  .eval-progress {{ margin-top: 5px; min-width: 110px; }}
-  .eval-bar {{ height: 4px; border-radius: 999px; background: #21262d; overflow: hidden; }}
-  .eval-bar i {{ display: block; height: 100%; border-radius: 999px; }}
-  .eval-bar i.good {{ background: #2ea043; }}
-  .eval-bar i.warn {{ background: #d29922; }}
-  .eval-progress small {{ display: block; margin-top: 3px; font-size: 10px; color: #8b949e; }}
-  .eval-progress-none small {{ color: #6e7681; }}
-  .model-chips {{ display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 10px; margin-bottom: 14px; }}
-  .model-chip {{ background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 10px 12px; font-size: 12px; }}
-  .model-chip .top {{ display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }}
-  .model-chip .chip-key {{ margin-top: 6px; word-break: break-all; }}
-  .model-chip .sub {{ color: #8b949e; margin-top: 4px; }}
-  .model-chip .actions {{ display: flex; align-items: center; gap: 10px; margin-top: 8px; }}
-  .model-chip .chip-link {{ color: #58a6ff; text-decoration: none; font-size: 12px; }}
-  .model-chip .chip-link:hover {{ text-decoration: underline; }}
-  details.fold {{ margin-top: 14px; background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 10px 12px; }}
-  details.fold summary {{ cursor: pointer; color: #8b949e; font-size: 13px; }}
-  details.fold[open] summary {{ margin-bottom: 8px; }}
-  .good {{ background: #1f6f43; color: #d2f8e2; }}
-  .warn {{ background: #7a5b12; color: #fff3c4; }}
-  .bad {{ background: #7d2b2b; color: #ffdcdc; }}
-</style>
+<style>{DASHBOARD_CSS}</style>
 </head>
 <body data-refresh="{refresh}">
-<h1>{page_title}</h1>
-<div class="meta">{page_meta}</div>
+<div class="page">
+<header class="top">
+  <div>
+    <h1>{page_title}</h1>
+    <div class="meta">{page_meta}</div>
+  </div>
+  {nav_html("models" if page == "models" else "sync")}
+</header>
 <div class="toolbar">
 {page_toolbar}
-{nav_link}
 </div>
 <div id="jobs" class="jobs"></div>
 {page_main}
+</div>
 <dialog id="plan-dialog">
   <h2 id="plan-title"></h2>
   <pre id="plan-text"></pre>
@@ -3940,6 +4188,8 @@ class StatusRequestHandler(SimpleHTTPRequestHandler):
             return self._download_wandb()
         if path == "/api/wandb/upload":
             return self._upload_wandb()
+        if path == "/api/wandb/sync":
+            return self._sync_wandb()
         self.send_error(404)
 
     def _videos(self):
@@ -4320,6 +4570,81 @@ class StatusRequestHandler(SimpleHTTPRequestHandler):
         ]
         return self._json({
             "count": len(selected),
+            "tasks": tasks[:100],
+            "message": "\n".join(lines),
+        })
+
+    def _sync_wandb(self):
+        """一个按钮同步 W&B：先下载缺失的 run，再把本地未上传的 run 传到 W&B 官方。"""
+        config = type(self).job_config
+        snapshot = type(self).snapshot or {}
+        rows = [row for row in (snapshot.get("wandb") or []) if row.get("has_wandb", True)]
+        if not rows:
+            return self._json({
+                "count": 0,
+                "message": "模型仓库里没有 wandb 目录"
+                           "（训练机上传 checkpoint 时没把 run 下的 wandb/ 一起传上去）",
+            })
+        if not config.get("model_repo_id"):
+            return self._json({"error": "未配置模型仓库"}, status=400)
+        to_download = [row for row in rows if not row["local"]["downloaded"]]
+        download_paths = {row["path"] for row in to_download}
+        venv_dir = Path(config.get("wandb_dir") or DEFAULT_WANDB).parent / ".cache" / "wandb" / "venv"
+        cli, cli_note = find_wandb_cli(venv_dir)
+        notes: list[str] = []
+        if not wandb_api_key():
+            notes.append("未配置 WANDB_API_KEY，本次只下载、不上传")
+        elif not cli and not shutil.which("uv"):
+            notes.append(f"没有可用的 wandb CLI，本次只下载：{cli_note}")
+        can_upload = bool(wandb_api_key()) and bool(cli or shutil.which("uv"))
+        to_upload = [
+            row for row in rows
+            if (row["local"]["downloaded"] or row["path"] in download_paths)
+            and not row["uploaded"]
+        ] if can_upload else []
+        if not to_download and not to_upload:
+            suffix = "（" + "；".join(notes) + "）" if notes else ""
+            return self._json({"count": 0, "message": f"W&B 已是最新：没有待下载或待上传的 run{suffix}"})
+        tasks = [
+            f'⬇️ {row["path"]} · {human_bytes(row["size"])} · {row["files"]} 文件'
+            for row in to_download
+        ] + [
+            f'⬆️ {row["path"]} · {human_bytes(row["size"])} · 未上传'
+            for row in to_upload
+        ]
+        if "confirm=1" in self.path:
+            with JOBS_LOCK:
+                for busy in ("download_wandb", "upload_wandb", "sync_wandb"):
+                    if JOBS[busy]["state"] == "running":
+                        return self._json(
+                            {"error": f"{JOB_LABELS[busy]}正在运行，等它结束后再同步"}, status=409
+                        )
+            try:
+                launch_job(
+                    "sync_wandb",
+                    sync_wandb_runner(
+                        to_download, to_upload, ROOT_DIR, config.get("model_repo_id"),
+                        config.get("wandb_entity"), config.get("wandb_project"),
+                        config.get("wandb_proxy"),
+                    ),
+                    config["out_dir"], config["rebuild"],
+                )
+            except RuntimeError as error:
+                return self._json({"error": str(error)}, status=409)
+            return self._json({
+                "started": True,
+                "message": f"已启动 W&B 同步：下载 {len(to_download)} 个、上传 {len(to_upload)} 个 run",
+            })
+        lines = [
+            f"将同步 W&B 数据：下载 {len(to_download)} 个 run → 上传 {len(to_upload)} 个 run 到 W&B 官方",
+            f"本地目录: {config.get('wandb_dir')}",
+            f"CLI: {cli_note}",
+            f"entity: {config.get('wandb_entity') or '默认（API key 所属账号）'}",
+            f"代理: {config.get('wandb_proxy') or '不使用代理'}",
+            *notes,
+        ]
+        return self._json({
+            "count": len(to_download) + len(to_upload),
             "tasks": tasks[:100],
             "message": "\n".join(lines),
         })
