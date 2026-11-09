@@ -8,6 +8,13 @@
 #   bash scripts/export_lerobot.sh 'pour_water_*' --format v21       # 只从已有 v3.0 派生 v2.1
 #   bash scripts/export_lerobot.sh 'pour_water_*' --format v30 --max_episode 50
 #
+# 导出别处的数据(如 data/official_limits/RoboSafeJanus-Benchmark):
+#   ROBOSAFEJANUS_LEROBOT_SOURCE=data/official-limits-flat \
+#   ROBOSAFEJANUS_LEROBOT_BENCH=official-limits-flat \
+#   ROBOSAFEJANUS_LEROBOT_V30_ROOT=data/official_limits/RoboSafeJanus-Benchmark-Lerobot/v30 \
+#   ROBOSAFEJANUS_LEROBOT_V21_ROOT=data/official_limits/RoboSafeJanus-Benchmark-Lerobot/v21 \
+#     bash scripts/export_lerobot.sh
+#
 # v3.0 从 HDF5 导出(XPolicyLab/scripts/transform_lerobot_v30_format.py);v2.1 不再从 HDF5
 # 重新导出,而是由 src/data_collect/lerobot_v30_to_v21.py 从同一任务的 v3.0 派生
 # (按帧切片 + CRF 30 重编码,比直接导出快一个数量级),所以 --format v21 要求 v3.0 已导出。
@@ -73,7 +80,12 @@ env_cfg_type=${ROBOSAFEJANUS_LEROBOT_ENV_CFG:-arx_x5}
 lerobot_root=${PROJECT_ROOT}/data/RoboSafeJanus-Benchmark-Lerobot
 out_root_v30=${ROBOSAFEJANUS_LEROBOT_V30_ROOT:-${lerobot_root}/v30}
 out_root_v21=${ROBOSAFEJANUS_LEROBOT_V21_ROOT:-${lerobot_root}/v21}
-flat_bench="RoboSafeJanus-Benchmark-flat"
+# 源数据默认走 data/RoboSafeJanus-Benchmark-flat 扁平软链接视图;要导出别处的数据(例如
+# data/official_limits/RoboSafeJanus-Benchmark)时,先用同样的方式建一个扁平视图,再用
+# ROBOSAFEJANUS_LEROBOT_SOURCE 指向它、ROBOSAFEJANUS_LEROBOT_BENCH 给出视图目录名
+# (转换器按 data/<bench>/<task>/<config>/data 解析路径)。自定义视图不会自动重建。
+flat_bench=${ROBOSAFEJANUS_LEROBOT_BENCH:-RoboSafeJanus-Benchmark-flat}
+source_view=${ROBOSAFEJANUS_LEROBOT_SOURCE:-data/${flat_bench}}
 
 # shellcheck disable=SC1091
 source "$(conda info --base)/etc/profile.d/conda.sh"
@@ -94,10 +106,14 @@ fi
 first_env=${env_name_v30}
 [[ "${formats[0]}" == "v21" ]] && first_env=${env_name_v21}
 conda activate "${first_env}"
-python src/data_collect/benchmark_layout.py --flat_view
+if [[ -z "${ROBOSAFEJANUS_LEROBOT_SOURCE:-}" ]]; then
+  python src/data_collect/benchmark_layout.py --flat_view
+else
+  echo "[export_lerobot] 使用自定义扁平视图 ${source_view} (bench=${flat_bench})"
+fi
 
 failed=()
-for task_link in "data/${flat_bench}"/${task_glob}; do
+for task_link in "${source_view}"/${task_glob}; do
   task_name=$(basename "${task_link}")
   [[ "${task_name}" == *_failed || ! -d "${task_link}/${env_cfg_type}/data" ]] && continue
   # 输出放在 <out_root>/<group>/<level>/ 下,repo_id 为任务名
