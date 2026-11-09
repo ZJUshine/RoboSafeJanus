@@ -620,27 +620,22 @@ python src/data_collect/eval_layouts.py derive --source make_toast --task make_t
 ```bash
 pip install -U "modelscope>=1.40"
 modelscope login --token <token>     # 账号需要有这个私有仓库的权限
-bash scripts/init_assets.sh          # 下载到 .cache/robosafejanus_assets/,Assets 软链到那里
+bash scripts/init_assets.sh          # 下载到 data/RoboSafeJanus-Asset/,Assets、ext_assets 软链到那里
 ```
 
 - 约 47 GB(Assets 39 GB + ext_assets 8 GB),中断后重跑同一条命令即续传。
-- 包装物体的 `object.usd` / `metadata.json` 和 `Robots/*/curobo.yml` 里写着上传机的绝对路径 `/mnt/hierophant-1/xuancun/RoboSafeJanus/`。下载完脚本会把它替换成 `.cache/robosafejanus_assets/`,重复执行不会改坏;上传机路径变了时用 `MS_SOURCE_PREFIX=<旧路径>/` 指定。
+- 包装物体的 `object.usd` / `metadata.json` 和 `Robots/*/curobo.yml` 里写着上传机的绝对路径(目前是 `/mnt/hierophant-1/xuancun/RoboSafeJanus/`)。下载完脚本会从文件里**自动识别**这个前缀并替换成 `data/RoboSafeJanus-Asset/`,换一台机器构建的资产也能用,重复执行不会改坏;需要强制指定时用 `MS_SOURCE_PREFIX=<旧路径>/`。
+- 本地目录 `data/RoboSafeJanus-Asset/` 与远端结构相同(`Assets/` + `ext_assets/`),仓库根目录的 `Assets`、`ext_assets` 都是指向它的软链接;`ASSET_ROOT=<目录>` 可换位置。
 - `Assets/`(含 Robots / Object / Material / Eval_Layout)已完整时直接跳过;要重新下载,先删掉或改名 `Assets` 软链接。
 - `ASSET_SOURCE=hf bash scripts/init_assets.sh` 走原来的 Hugging Face 稀疏克隆,拿到的是**官方原版**,没有上面的 RoboSafeJanus 改动。
-- 改了资产后要重新上传,其他机器才拿得到。只传有变化的文件,内容相同的 LFS 文件服务端复用;不会删除远端多出来的文件:
+- 改了资产后要重新上传,其他机器才拿得到。上传 `data/RoboSafeJanus-Asset/` 下的 `Assets/`、`ext_assets/robodojo_format/`、`ext_assets/integrate/`,只传新增 / 修改的文件(按 路径 + mtime + 大小 记在 `.cache/modelscope/upload_RoboSafeJanus-Asset.json`),不会删除远端多出来的文件:
 
   ```bash
-  python - <<'EOF'
-  from modelscope_hub import HubApi
-  api = HubApi()
-  api.upload_folder("zjushine/RoboSafeJanus-Asset", "dataset", ".cache/robodojo_assets_repo",
-                    allow_patterns=["Assets/*"])
-  api.upload_folder("zjushine/RoboSafeJanus-Asset", "dataset", "ext_assets", path_in_repo="ext_assets",
-                    allow_patterns=["robodojo_format/*", "integrate/*"])
-  EOF
+  python scripts/internal/upload_assets.py --dry_run   # 先看要传哪些文件
+  python scripts/internal/upload_assets.py
   ```
 
-  本机的 `Assets` 软链到 `.cache/robodojo_assets_repo/Assets`(HF 克隆,路径就是 `/mnt/hierophant-1/xuancun/RoboSafeJanus/`);在别的机器上传时,把第一个目录换成该机器 `Assets` 的父目录。
+  资产里的绝对路径(目前是 `/mnt/hierophant-1/xuancun/RoboSafeJanus/Assets/...`、`.../ext_assets/...`)经软链接指向 `data/RoboSafeJanus-Asset/`,原样上传即可,下载端会自动替换。
 
 ## 8.5 上传到 ModelScope 私有仓库
 

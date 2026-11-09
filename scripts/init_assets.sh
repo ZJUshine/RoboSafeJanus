@@ -18,16 +18,21 @@ error() { echo -e "\e[1;31m[ERROR] $*\e[0m"; exit 1; }
 ASSET_SOURCE="${ASSET_SOURCE:-modelscope}"
 MS_REPO_ID="${MS_REPO_ID:-zjushine/RoboSafeJanus-Asset}"
 MS_REVISION="${MS_REVISION:-master}"
-MS_CACHE_DIR="${CURRENT_DIR}/.cache/robosafejanus_assets"
+# Local copy of the dataset, same layout as the repo (Assets/ + ext_assets/); the repo-root
+# Assets and ext_assets are symlinks into it. scripts/internal/upload_assets.py uploads it back.
+ASSET_ROOT="${ASSET_ROOT:-${CURRENT_DIR}/data/RoboSafeJanus-Asset}"
 # Wrapped objects (GenieSim/ArtVIP/SimReady object.usd, metadata.json) and curobo.yml in that
-# dataset hold absolute paths of the machine they were built on; they are rewritten after download.
-MS_SOURCE_PREFIX="${MS_SOURCE_PREFIX:-/Users/xuancun/RoboSafeJanus/}"
+# dataset hold absolute paths of the machine they were built on; after download they are
+# rewritten to ASSET_ROOT. The old prefix is detected from the files themselves; set
+# MS_SOURCE_PREFIX only to force a specific one.
+MS_SOURCE_PREFIX="${MS_SOURCE_PREFIX:-}"
 
 HF_REPO_ID="${HF_REPO_ID:-RoboDojo-Benchmark/RoboDojo}"
 HF_REVISION="${HF_REVISION:-main}"
 HF_REPO_URL="${HF_REPO_URL:-https://huggingface.co/datasets/${HF_REPO_ID}}"
 
 TARGET_DIR="${CURRENT_DIR}/Assets"
+EXT_TARGET_DIR="${CURRENT_DIR}/ext_assets"
 ASSET_CACHE_DIR="${CURRENT_DIR}/.cache/robodojo_assets_repo"
 REQUIRED_ASSET_SUBDIRS=(Robots Object Material Eval_Layout)
 
@@ -81,29 +86,80 @@ archive_asset_cache() {
   mv "${cache_dir}" "${partial_dir}"
 }
 
+detect_source_prefixes() {
+  # Absolute directory prefixes that sit in front of ext_assets/ or Assets/ inside the
+  # dataset (e.g. /Users/xuancun/RoboSafeJanus/ or /mnt/.../RoboSafeJanus/). Prints one
+  # unique prefix per line, so assets built on different machines are all handled.
+  grep -rhoI --include='*.usd' --include='*.usda' --include='*.json' --include='*.yml' --include='*.yaml' \
+      -E '/[^"@[:space:]]*/(ext_assets|Assets)/' "$@" 2>/dev/null \
+    | sed -E 's#/(ext_assets|Assets)/$##' \
+    | sort -u || true
+}
+
+rewrite_source_prefixes() {
+  local new_prefix="$1"
+  shift
+  local -a prefixes=()
+  local prefix
+
+  if [[ -n "${MS_SOURCE_PREFIX}" ]]; then
+    prefixes=("${MS_SOURCE_PREFIX%/}/")
+  else
+    info "Detecting absolute asset paths baked into the dataset..."
+    while IFS= read -r prefix; do
+      [[ -n "${prefix}" ]] && prefixes+=("${prefix}/")
+    done < <(detect_source_prefixes "$@")
+  fi
+
+  if [[ ${#prefixes[@]} -eq 0 ]]; then
+    info "No absolute asset paths found; nothing to rewrite."
+    return 0
+  fi
+
+  for prefix in "${prefixes[@]}"; do
+    # Idempotent: paths already pointing into the cache are left alone, even when the cache
+    # sits under the source prefix.
+    if [[ "${prefix}" == "${new_prefix}" ]]; then
+      continue
+    fi
+    info "Rewriting '${prefix}' -> '${new_prefix}' in asset text files..."
+    grep -rlIZ --include='*.usd' --include='*.usda' --include='*.json' --include='*.yml' --include='*.yaml' \
+        -F "${prefix}" "$@" \
+      | OLD="${prefix}" NEW="${new_prefix}" xargs -0 -r perl -pi -e \
+          'BEGIN { $r = index($ENV{NEW}, $ENV{OLD}) == 0 ? substr($ENV{NEW}, length $ENV{OLD}) : "\0" }
+           s/\Q$ENV{OLD}\E(?!\Q$r\E)/$ENV{NEW}/g'
+  done
+}
+
 download_assets_modelscope() {
   info "ModelScope dataset: ${MS_REPO_ID} (revision=${MS_REVISION})"
-  mkdir -p "${MS_CACHE_DIR}"
+  mkdir -p "${ASSET_ROOT}"
   # Assets/ plus ext_assets/ (originals referenced by wrapped objects).
   # Re-running resumes: files already present in --local_dir are skipped.
   if ! modelscope download --dataset "${MS_REPO_ID}" --revision "${MS_REVISION}" \
-      --include "Assets/*" "ext_assets/*" --local_dir "${MS_CACHE_DIR}"; then
+      --include "Assets/*" "ext_assets/*" --local_dir "${ASSET_ROOT}"; then
     error "ModelScope download failed. The dataset is private: run 'modelscope login --token <token>' with an account that has access, then re-run this script."
   fi
 
-  # Point the absolute paths at this cache, which has the same Assets/ + ext_assets/ layout.
-  # Idempotent: paths already pointing into the cache are left alone, even when the cache
-  # sits under the source prefix.
-  local new_prefix="${MS_CACHE_DIR}/"
-  if [[ "${new_prefix}" != "${MS_SOURCE_PREFIX}" ]]; then
-    info "Rewriting '${MS_SOURCE_PREFIX}' -> '${new_prefix}' in asset text files..."
-    grep -rlIZ --include='*.usd' --include='*.usda' --include='*.json' --include='*.yml' --include='*.yaml' \
-        -F "${MS_SOURCE_PREFIX}" "${MS_CACHE_DIR}/Assets" "${MS_CACHE_DIR}/ext_assets" \
-      | OLD="${MS_SOURCE_PREFIX}" NEW="${new_prefix}" xargs -0 -r perl -pi -e \
-          'BEGIN { $r = index($ENV{NEW}, $ENV{OLD}) == 0 ? substr($ENV{NEW}, length $ENV{OLD}) : "\0" }
-           s/\Q$ENV{OLD}\E(?!\Q$r\E)/$ENV{NEW}/g'
+  # Point the baked-in absolute paths at ASSET_ROOT, which has the same Assets/ + ext_assets/
+  # layout. The source prefix is detected from the files, so it works for any build machine.
+  rewrite_source_prefixes "${ASSET_ROOT}/" "${ASSET_ROOT}/Assets" "${ASSET_ROOT}/ext_assets"
+  ln -s "${ASSET_ROOT}/Assets" "${TARGET_DIR}"
+  link_ext_assets
+}
+
+link_ext_assets() {
+  # ext_assets/ (originals of the wrapped objects, integrate/ scripts) next to Assets.
+  if [[ ! -d "${ASSET_ROOT}/ext_assets" ]]; then
+    return 0
   fi
-  ln -s "${MS_CACHE_DIR}/Assets" "${TARGET_DIR}"
+  if [[ -L "${EXT_TARGET_DIR}" ]]; then
+    rm "${EXT_TARGET_DIR}"
+  elif [[ -e "${EXT_TARGET_DIR}" ]]; then
+    warn "'${EXT_TARGET_DIR}' is a real directory; leaving it alone (assets use ${ASSET_ROOT}/ext_assets)."
+    return 0
+  fi
+  ln -s "${ASSET_ROOT}/ext_assets" "${EXT_TARGET_DIR}"
 }
 
 download_assets_hf() {
