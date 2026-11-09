@@ -70,7 +70,7 @@ TOP_APPROACH_Z = (-1.0, -0.7)  # top:接近方向单位向量 z 分量的范围
 # top:TCP 离物体包围盒中心(水平)不超过这么远:抓在长物体(三明治)一头时,转平后物体往下垂,炉腔里放不下
 TOP_CENTER_TOL = 0.025
 AXISYM_STEP = 10.0  # axisym:绕物体 z 轴每隔这么多度复制一份抓取
-MAX_GRASPS = 40
+MAX_GRASPS = 200
 MW_INFLATE = 0.003  # 微波炉碰撞盒子交给 cuRobo 前各向外扩这么多
 
 
