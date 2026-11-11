@@ -2,7 +2,7 @@
 
 from task.RoboDojo.experts import heat_X_microwave as microwave
 
-SPEC = microwave.Spec("bread", "top", center_slide=True)
+SPEC = microwave.Spec("bread")
 
 
 def play_once(env):

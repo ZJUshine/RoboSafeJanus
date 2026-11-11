@@ -238,6 +238,7 @@ def _pick_place_direct(
     close,
     carry_slow=CARRY_SLOW,
     after_close=None,
+    prepare=None,
     retreat=0.0,
     reuse_tol=PRED_REUSE_TOL,
     grasp_open=1.0,
@@ -245,13 +246,16 @@ def _pick_place_direct(
     retreat_fallback=False,
     return_fallback=False,
 ):
-    """三段运动、每段一次 cuRobo 规划的抓取 + 放置(见模块说明):
+    """四段运动、每段一次 cuRobo 规划的抓取 + 放置(见模块说明;``lift`` 为 0 时仍是三段):
 
     - ``set_world(with_obj, tool)``:设置 cuRobo 的碰撞世界(固定障碍物,``with_obj`` 为真时加上物体:第 1 段传 "grasp"、
       第 3 段先传 "return"、松手后退时传 "return_tight",物体模型可以按阶段取不同的大小)和 tool 碰撞球;
     - ``grasps``:抓取候选 ``[(ee 位姿, score), ...]``,按优先级;``open_tool``:夹爪张开时的手指碰撞球;
     - ``held_tool(ee_T_obj)``:夹住物体后的 tool 碰撞球(手指 + 物体);
     - ``releases(ee, ee_T_obj)``:松手位姿候选 ``[ee 位姿, ...]``(``ee`` 是抓取时的 ee 位姿矩阵);
+    - ``prepare(ee)``:抓住后的准备段——给抓取后的 ee 位姿,返回几个候选准备位姿,按顺序试到第一个能规划的。
+      微波炉的专家在这里"抬起 + 转成伸入姿态":物体夹在指间会随着腕部转动往下荡,先把这一下荡完(离炉口还有 30 cm),
+      伸入段就只剩平动,物体相对腕部的位置不再变。
     - ``close(grasp)``:合拢夹爪;``after_close()``:合拢后的钩子(例如按物体的新位姿重新设置障碍物);
     - ``retreat`` > 0(或几个距离的元组,按顺序试到第一个能规划的):松开后先沿接近方向退出这么远(一次规划,不带物体),
       再带着原尺寸的物体回初始位姿;``return_fallback`` 时回程规划不通再带缩小的物体("return_tight")试一次。竖放在隔板上的
@@ -301,12 +305,29 @@ def _pick_place_direct(
     if after_close is not None:
         after_close()
 
-    # ---- 2. 按实测的手中位姿:抓取 -> 松手位姿,一次规划
+    # ---- 2. 抓住 -> 抬起并转成伸入姿态(``prepare``,试到第一个能规划的准备位姿)
     ee = _mat(env.get_arm_pose(ARM))
     ee_T_obj = np.linalg.inv(ee) @ _mat(env.get_obj_pose(label))
+    lifted = False
+    if prepare is not None:
+        set_world(False, held_tool(ee_T_obj))
+        for target in prepare(ee):
+            rl = _plan_once(env, target)
+            if rl is None:
+                continue
+            env.execute_plan(ARM, rl, carry_slow)
+            ee = _mat(env.get_arm_pose(ARM))
+            ee_T_obj = np.linalg.inv(ee) @ _mat(env.get_obj_pose(label))
+            lifted = True
+            break
+
+    # ---- 3. 抬起 -> 松手位姿,一次规划
     r2 = plan_release(ee, ee_T_obj)
     if r2 is None:
-        # 合拢时物体在指间挪动了,按实测的手中位姿规划不到时,退回到选候选时预测的那条第 2 段(起点就是现在的关节角)
+        # 合拢时物体在指间挪动了,按实测的手中位姿规划不到时,退回到选候选时预测的那条第 2 段(起点就是现在的关节角)。
+        # 抬过一段之后再退回没有意义:那条路径的起点是抬升前的关节角
+        if lifted:
+            raise PlanFailError(f"{ARM}: no release pose reachable after lifting")
         r2 = pred_r2
         moved_by = float(np.linalg.norm(ee_T_obj[:3, 3] - pred_ee_T_obj[:3, 3]))
         if moved_by > reuse_tol:
@@ -342,7 +363,7 @@ def _pick_place_direct(
     if release_open < 1.0:
         env.open_gripper(ARM)
 
-    # ---- 3. 松手位姿 -> 初始关节,一次规划。先把物体当障碍物(免得退出时碰到它);物体松手后滚 / 倒到指间时起点就和它的
+    # ---- 4. 松手位姿 -> 初始关节,一次规划。先把物体当障碍物(免得退出时碰到它);物体松手后滚 / 倒到指间时起点就和它的
     # 盒子重叠,cuRobo 判起点碰撞,这时不带物体再规划。关节空间规划不通时改为规划到初始末端位姿
     r3 = None
     for with_obj in tries:

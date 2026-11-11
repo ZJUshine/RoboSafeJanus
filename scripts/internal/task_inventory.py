@@ -18,7 +18,6 @@ CONFIG_DIR = ROOT_DIR / "task" / BENCHMARK / "config"
 sys.path.insert(0, str(ROOT_DIR))
 from task.RoboDojo import task_registry  # noqa: E402
 
-
 # Canonical capability groups from https://robodojo-benchmark.com/doc/sim-tasks/.
 # Generalization tasks also have runnable ``*_random`` configurations; those
 # inherit the dimension of their base task in _task_records().
@@ -88,7 +87,7 @@ DIMENSION_TASKS: dict[str, tuple[str, ...]] = {
         "heat_canned_drink_microwave",
         "heat_sandwich_microwave",
         "heat_bread_microwave",
-        "heat_frozen_hamburger_microwave",
+        "heat_hamburger_microwave",
         "put_bread_toaster",
         "put_phone_toaster",
         "put_toilet_cleaner_refrigerator",

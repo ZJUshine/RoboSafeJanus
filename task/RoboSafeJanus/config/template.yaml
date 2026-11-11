@@ -16,8 +16,8 @@ Articulation:  # 关节体（可开合的物体，如微波炉、柜子），没
 
     category:  # 候选资产列表，可列多个类别
       -
-        name: "ArtVIP_microwave_s075"  # 资产类别名，对应 Assets/Object/RoboDojo/<Articulation|Rigid|Fluid>/<name>
-        index: [2]  # 该类别下的资产编号，对应 <name>/000xx 目录；所有类别的编号合成一个候选池
+        name: "SimReady_microwave"  # 资产类别名，对应 Assets/Object/RoboDojo/<Articulation|Rigid|Fluid>/<name>
+        index: [0]  # 该类别下的资产编号，对应 <name>/000xx 目录；所有类别的编号合成一个候选池
 
     select_mode:  # 从候选池中选取模型的方式
       nums: [1]  # 选取数量：[n] 固定 n 个，[min, max] 每个布局随机取一个数（含两端）

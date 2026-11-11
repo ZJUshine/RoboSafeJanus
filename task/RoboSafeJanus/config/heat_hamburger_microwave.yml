@@ -1,0 +1,50 @@
+Articulation:
+  -
+    common:
+      # 正面（门一侧）朝向机器人（-y）。SimReady 微波炉（ext_assets SimReady D00516，原尺寸）：body 0.51 x
+      # 0.37 x 0.30 m，铰链在左边缘，关节 0 度就是门开 90 度的状态（door 的 part 已经在 -y 侧立着），
+      # open_door() 把它置到下限 0 度即可；门打开后立在 x ~= center - 0.27、y ~= center - 0.56 ..
+      # center - 0.16。桌上相机支架底板占 y -0.515..-0.425、x +-0.15，所以中心 y 要 >= 0.14 门才不会压到它。
+      # 中心同时在左臂导轨（x ~= -0.3，+-0.09）右侧，右臂才能伸进炉腔。
+      # 微波炉位置不变 ：中心 (0.05, 0.16)、朝 -y，不再随机。
+      xlim: [0.05, 0.05]
+      ylim: [0.16, 0.16]
+      rotate_rand: False
+      # 资产的 bbox 把开着的门（伸到 y -0.56）也算进去，占地圆会大到手放不下汉堡；
+      # 这里显式给 body 的占地尺寸。
+      footprint: [0.508, 0.367]
+      margin: -0.05
+      relative_plane: "Table"
+
+    category:
+      -
+        name: "SimReady_microwave"
+        index: [0]
+
+    select_mode:
+      nums: [1]
+      mode: "unique"
+      label: ["microwave"]
+
+Rigid:
+  -
+    common:
+      # 同 heat_sandwich_microwave:微波炉前方偏右(在打开的门那块竖板 x ~= -0.22 的右侧),右臂自上而下抓。
+      xlim: [0.10, 0.30]
+      ylim: [-0.35, -0.22]
+      rotate_rand: True
+      rotate_deg: [0, 180]
+      relative_plane: "Table"
+      physics:
+        static_friction: 1.0
+
+    category:
+      -
+        # SimReady 汉堡 0.85 倍(6.8 x 6.8 x 4.7 cm,184 g,质量取 metadata)
+        name: "SimReady_hamburger_s085"
+        index: [0]
+
+    select_mode:
+      nums: [1]
+      mode: "unique"
+      label: ["hamburger"]

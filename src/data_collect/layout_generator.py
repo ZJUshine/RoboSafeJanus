@@ -5,7 +5,8 @@
 房间 / 桌子 / 地面 / 背景 / 几何固定件则沿用模板布局。
 
 支持的 ``Rigid`` 写法:``relative_plane: Table``、``xlim`` / ``ylim`` / ``zlim``、
-``qpos``、``rotate_rand`` / ``rotate_deg``、``margin``、``center_footprint``(范围和占地圆以 bbox 中心为准),
+``qpos``、``rotate_rand`` / ``rotate_deg``、``margin``、``footprint``(显式给占地尺寸 ``[x, y]`` 或半径,
+用在 bbox 比实物大的资产上,例如微波炉的 bbox 把打开的门也算进去)、``center_footprint``(范围和占地圆以 bbox 中心为准),
 以及 ``select_mode.mode`` 为 ``same`` / ``unique`` / ``category_unique`` / ``allow_duplicate``;``select_mode.nums``
 可以是整数、``[n]`` 或闭区间 ``[min, max]``(每个布局随机取一个数)。Rigid 组也可以放在
 已采样固定件的支撑面上(``relative_plane: <固定件 label>/<support tag>``,例如面包放在
@@ -203,8 +204,15 @@ class LayoutGenerator:
         # center_footprint:xlim / ylim 和占地圆都以旋转后 bbox 的水平中心为准,而不是物体原点
         # (原点不在物体中心时用,例如原点在一端、平放的手机)
         center = (rot_verts.min(axis=0) + rot_verts.max(axis=0))[:2] / 2 if common.get("center_footprint") else 0.0
-        # 占地半径:按 qpos 旋转后的 bbox 在 xy 平面的最大半径 + margin
-        radius = float(np.max(np.linalg.norm(rot_verts[:, :2] - center, axis=1))) + margin
+        # 占地半径:按 qpos 旋转后的 bbox 在 xy 平面的最大半径 + margin。资产 bbox 比实物大时
+        # (微波炉的 bbox 把开着的门也算进去)用 common.footprint 显式给 [x, y] 尺寸或半径
+        footprint = common.get("footprint")
+        if footprint is None:
+            radius = float(np.max(np.linalg.norm(rot_verts[:, :2] - center, axis=1))) + margin
+        elif np.isscalar(footprint):
+            radius = float(footprint) + margin
+        else:
+            radius = float(np.hypot(float(footprint[0]), float(footprint[1])) / 2.0) + margin
         zlim = common.get("zlim")
         # 默认让物体底面刚好落在桌面上方 2 mm;Rigid 的 zlim 是绝对高度,固定件的 zlim 是相对桌面的高度
         if obj_type == "Rigid":

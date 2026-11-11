@@ -2,7 +2,7 @@
 
 from task.RoboDojo.experts import heat_X_microwave as microwave
 
-SPEC = microwave.Spec("canned_drink", "top", round=True, axisym=True)
+SPEC = microwave.Spec("canned_drink", round=True)
 
 
 def play_once(env):

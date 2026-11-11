@@ -1,23 +1,15 @@
-from pxr import Usd, UsdPhysics
-
 from env.reward_manager.reward_manager import RewardManager
 
-
-def door_joint(obj):
-    """子 link 是门的那个转动关节的名字(ArtVIP 的门 link 名为 ``E_door_<n>``)。"""
-    # obj.prim 是关节体的根 link(ext_anchor),所以要在整个物体里搜索
-    for prim in Usd.PrimRange(obj.stage.GetPrimAtPath(obj.usd_prim_path)):
-        if not prim.IsA(UsdPhysics.RevoluteJoint) or prim.GetName() not in obj.dof_names:
-            continue
-        body1 = UsdPhysics.Joint(prim).GetBody1Rel().GetTargets()
-        if body1 and "door" in body1[0].name.lower():
-            return prim.GetName()
-    raise ValueError(f"{obj.prim_path} has no door joint")
+# SimReady 台式微波炉(D00516)的门关节;门 link 是 part_21,关节 0 度(下限)就是门开 90 度
+DOOR_JOINT = "piv_door_hinge"
 
 
 class HeatMicrowaveCommon:
     """heat_X_microwave 组:把物体放进开着门的微波炉。各 heat_<物体>_microwave 任务只设置
-    ``LABEL``(物体在 YAML 中的 label)和 ``INSTRUCTION``。"""
+    ``LABEL``(物体在 YAML 中的 label)和 ``INSTRUCTION``。
+
+    ``INSTRUCTION`` 可以是一条字符串,也可以是多条同义指令的列表(与设计文件里的 ``S1.instruction`` 一致):
+    ``gen_instruction`` 返回全部候选,采集(``save_episode`` 按 seed)和评测(``DescriptionManager``)各自随机抽一条。"""
 
     LABEL = None
     INSTRUCTION = None
@@ -42,15 +34,15 @@ class HeatMicrowaveCommon:
         lm = self.scene_manager.layout_manager
         for env_idx in range(self.num_envs):
             mw = lm.get_scene_object(env_idx, lm.get_instance_name(env_idx, "microwave"))
-            idx = mw.dof_names.index(door_joint(mw))
+            idx = mw.dof_names.index(DOOR_JOINT)
             q = mw.initial_joint_positions.clone()
-            q[idx] = float(mw.lower_joint_positions[idx])  # ArtVIP 的门朝关节下限方向打开(-90 度)
+            q[idx] = float(mw.lower_joint_positions[idx])
             mw.initial_joint_positions = q
             mw.set_current_joint_positions(q)
 
     def run_reward(self):
-        # 物体停在微波炉的 bbox 内,同时夹爪已松开、双臂回到初始位姿、微波炉没被
-        # 推动。四个条件须在同一步同时满足:check 一旦满足就锁存,物体还在夹爪里、或夹爪后退时把物体带出来,都不能算。
+        # 物体停在微波炉的 bbox 内,同时夹爪已松开、双臂回到初始位姿、微波炉没被推动。
+        # 四个条件须在同一步同时满足:check 一旦满足就锁存,物体还在夹爪里、或夹爪后退时把物体带出来,都不能算。
         self.reward_manager.check(
             [
                 self.reward_manager.is_A_root_point_in_B_bbox(label_A=self.LABEL, label_B="microwave"),
@@ -61,4 +53,4 @@ class HeatMicrowaveCommon:
         )
 
     def gen_instruction(self, env_idx):
-        return [self.INSTRUCTION]
+        return [self.INSTRUCTION] if isinstance(self.INSTRUCTION, str) else list(self.INSTRUCTION)

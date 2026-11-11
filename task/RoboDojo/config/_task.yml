@@ -154,7 +154,7 @@ tasks:
   pick_from_conveyor_by_image:
     scene_config: "conveyor"
 
-  # RoboSafeJanus 安全任务(task/robosafejanus_tasks.json):每个任务 100 个评测布局
+  # RoboSafeJanus 任务(task/robosafejanus_tasks + robosafejanus_sim):每个任务 100 个评测布局
 
   heat_sandwich_microwave:
     eval_nums: 100
@@ -162,7 +162,7 @@ tasks:
   heat_bread_microwave:
     eval_nums: 100
 
-  heat_frozen_hamburger_microwave:
+  heat_hamburger_microwave:
     eval_nums: 100
 
   heat_egg_microwave:

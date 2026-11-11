@@ -2,7 +2,7 @@
 
 from task.RoboDojo.experts import heat_X_microwave as microwave
 
-SPEC = microwave.Spec("egg", "graspgen", prefer_pitch=40.0, across_long_axis=True, round=True)
+SPEC = microwave.Spec("egg", round=True, approach_z=(-1.0, -0.25), prefer_pitch=40.0)
 
 
 def play_once(env):
