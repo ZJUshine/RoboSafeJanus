@@ -94,9 +94,10 @@
 ```bash
 # bash scripts/collect_data.sh <task> [episode_num=50] [gpu_id=0] [expert_collection.py 额外参数...]
 
-# 1) 冒烟:采 1 条,最多试 5 个 seed,打开专家日志
+# 1) 冒烟:采 1 条,最多试 5 个 seed,打开专家日志;失败视频落到 data/debug/ 下方便回看
 ROBODOJO_COLLECT_LOG=INFO ROBODOJO_COLLECT_CHUNK=5 \
-  bash scripts/collect_data.sh pour_water_bowl 1 0 --max_tries 5 --save_fail_video
+  bash scripts/collect_data.sh pour_water_bowl 1 0 --max_tries 5 --save_fail_video \
+  --save_dir data/debug/$(date +%Y%m%d)_pour_water_bowl_smoke
 
 # 2) 批量
 bash scripts/collect_data.sh pour_water_bowl 100 0
@@ -210,6 +211,30 @@ data/RoboSafeJanus-Benchmark/<group>/<level>/<task>/<config>/
   collect_info.json                             success / fail_this_run / tries_this_run / fail_types_this_run
   video_fail/seed_<seed>_<camera>.mp4           仅 --save_fail_video
 ```
+
+### 2.7 离线可行性扫描:`scripts/feasibility_scan.sh`
+
+调专家参数之前先看规划本身走不走得通。对每个 seed 照常载入布局,但专家的运动**不执行物理**(关节直接置到规划终点,
+夹爪合拢时物体刚性挂到 TCP 上),每个 seed 约 10 秒:
+
+```bash
+# bash scripts/feasibility_scan.sh <task> [num_seeds=50] [gpu_id=0] [feasibility_scan.py 额外参数...]
+bash scripts/feasibility_scan.sh heat_sandwich_microwave 50 0
+bash scripts/feasibility_scan.sh heat_sandwich_microwave 50 0 --funnel_grasps 20   # 漏斗看更多抓取候选
+python src/data_collect/feasibility_scan.py --task_name heat_sandwich_microwave --summarize  # 只重新汇总
+```
+
+- **干跑**:`play_once` 原样运行,不报 `PlanFailError` 就算 `plan_ok`,失败按段归类(`no_grasp_candidate` /
+  `grasp_or_release_pred` / `release_after_prepare` / `retreat` / `return` …)。
+- **漏斗**(只对用 `common._pick_place_direct` 的专家):前 `--funnel_grasps` 个抓取候选逐段规划
+  `grasp → release_pred → prepare → release → retreat → return`,并对每个松手位姿单独解带碰撞的 IK,
+  区分"松手位姿本身到不了"和"到得了但路径规划不出来"。
+- **布局**:按 `plan_ok` / 失败分别列出各物体的 xy 范围,用来收窄 YAML 的 `xlim` / `ylim`。
+- 输出 `data/debug/feasibility/<task>/scan.jsonl`(可续跑,换参数重扫前删掉或换 `--out_dir`)和 `summary.json`。
+
+怎么读:干跑通过率低 → 是可达性 / 布局 / 资产问题,先改布局或资产,调专家常数没用;干跑通过率高、真实采集
+成功率低 → 是物理问题(物体在指间滑动 / 下荡、推动固定件),用 `--save_fail_video` 看是哪一段。
+直接用 `env.execute` 发关节序列的专家(`pour_common`)干跑结果不可信。
 
 ---
 
