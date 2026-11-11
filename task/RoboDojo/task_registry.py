@@ -9,7 +9,8 @@ from pathlib import Path
 
 def is_group_module(module_name: str) -> bool:
     """Task-group modules (``heat_X_microwave``) hold the Common class shared by a group's tasks; they are not tasks.
-    Like the group names in ``task/robosafejanus_tasks.json``, exactly one ``_``-separated segment is ``X``."""
+    Exactly one ``_``-separated segment is ``X``. Module names are independent of the task-group names in
+    ``task/robosafejanus_tasks/<group>.json`` (several risk groups can share one module)."""
     return module_name.split("_").count("X") == 1
 
 

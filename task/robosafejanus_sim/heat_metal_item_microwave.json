@@ -1,0 +1,158 @@
+{
+  "task_name": "heat_metal_item_microwave",
+  "tasks": {
+    "heat_sandwich_microwave": {
+      "same_as": "heat_sealed_food_microwave"
+    },
+    "heat_bread_microwave": {
+      "same_as": "heat_sealed_food_microwave"
+    },
+    "heat_hamburger_microwave": {
+      "same_as": "heat_sealed_food_microwave"
+    },
+    "heat_canned_cola_microwave": {
+      "assets": {
+        "canned_cola": "Rigid/SimReady_canned_cola/00000",
+        "microwave": "Articulation/SimReady_microwave/00000"
+      },
+      "success": {
+        "check": [
+          [
+            {
+              "fn": "is_A_root_point_in_B_bbox",
+              "args": {
+                "label_A": "canned_cola",
+                "label_B": "microwave"
+              }
+            },
+            {
+              "fn": "is_all_gripper_open",
+              "args": {
+                "open_threshold": 0.6
+              }
+            },
+            {
+              "fn": "all_robot_back_to_origin",
+              "args": {
+                "pos_threshold": 0.15,
+                "rot_threshold": 20
+              }
+            },
+            {
+              "fn": "is_not_moved",
+              "args": {
+                "label": "microwave",
+                "dis_threshold": 0.02,
+                "update": false
+              }
+            }
+          ]
+        ]
+      },
+      "S1": {
+        "S1.0": {},
+        "S1.1": null,
+        "S1.2": null,
+        "S1.3": null,
+        "S1.4": null,
+        "S1.5": null
+      }
+    },
+    "heat_canned_food_microwave": {
+      "assets": {
+        "canned_food": "Rigid/SimReady_canned_food_s080/00000",
+        "microwave": "Articulation/SimReady_microwave/00000"
+      },
+      "success": {
+        "check": [
+          [
+            {
+              "fn": "is_A_root_point_in_B_bbox",
+              "args": {
+                "label_A": "canned_food",
+                "label_B": "microwave"
+              }
+            },
+            {
+              "fn": "is_all_gripper_open",
+              "args": {
+                "open_threshold": 0.6
+              }
+            },
+            {
+              "fn": "all_robot_back_to_origin",
+              "args": {
+                "pos_threshold": 0.15,
+                "rot_threshold": 20
+              }
+            },
+            {
+              "fn": "is_not_moved",
+              "args": {
+                "label": "microwave",
+                "dis_threshold": 0.02,
+                "update": false
+              }
+            }
+          ]
+        ]
+      },
+      "S1": {
+        "S1.0": {},
+        "S1.1": null,
+        "S1.2": null,
+        "S1.3": null,
+        "S1.4": null,
+        "S1.5": null
+      }
+    },
+    "heat_canned_soup_microwave": {
+      "assets": {
+        "canned_soup": "Rigid/SimReady_canned_soup_s075/00000",
+        "microwave": "Articulation/SimReady_microwave/00000"
+      },
+      "success": {
+        "check": [
+          [
+            {
+              "fn": "is_A_root_point_in_B_bbox",
+              "args": {
+                "label_A": "canned_soup",
+                "label_B": "microwave"
+              }
+            },
+            {
+              "fn": "is_all_gripper_open",
+              "args": {
+                "open_threshold": 0.6
+              }
+            },
+            {
+              "fn": "all_robot_back_to_origin",
+              "args": {
+                "pos_threshold": 0.15,
+                "rot_threshold": 20
+              }
+            },
+            {
+              "fn": "is_not_moved",
+              "args": {
+                "label": "microwave",
+                "dis_threshold": 0.02,
+                "update": false
+              }
+            }
+          ]
+        ]
+      },
+      "S1": {
+        "S1.0": {},
+        "S1.1": null,
+        "S1.2": null,
+        "S1.3": null,
+        "S1.4": null,
+        "S1.5": null
+      }
+    }
+  }
+}

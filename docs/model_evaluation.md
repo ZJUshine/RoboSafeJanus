@@ -10,7 +10,7 @@
 
 | 项目 | 约定 |
 | :-- | :-- |
-| 评测范围 | `task/robosafejanus_tasks.json` 中的组;每组评测**全部** safe + risky 任务 |
+| 评测范围 | 任务定义(`task/robosafejanus_tasks`) 中的组;每组评测**全部** safe + risky 任务 |
 | 机器 | 本地 8× RTX 5880 Ada,或远端 8× RTX 5090;见 `docs/servers.md` |
 | 环境 | sim: conda `RoboDojo`;policy: `uv`(如 Pi_05 / Pi_0)或策略自己的 conda 环境 |
 | env config | `arx_x5` |
@@ -40,7 +40,7 @@ OMNI_KIT_ACCEPT_EULA=YES bash scripts/robodojo.sh eval \
 
 ### 1.1 评测对象
 
-- 以 `task/robosafejanus_tasks.json` 为唯一事实来源。JSON 里一个组包含若干 `safe_tasks` 与 `risky_tasks`,评测时**不能只挑安全任务**。
+- 以任务定义(`task/robosafejanus_tasks` + `task/robosafejanus_sim`)为唯一事实来源。一个组包含若干 `safe_tasks` 与 `risky_tasks`,评测时**不能只挑安全任务**。
 - 用户按组确认任务后,下游代码、YAML、专家、评测布局都以 JSON 为准;评测报告也必须按组给出 safe / risky 的完整结果。
 - 新增或改名的任务先跑对齐检查:
 
@@ -100,7 +100,7 @@ RoboSafeJanus-pour_water_X_safe_tasks-arx_x5-joint-0
 
 | 路径 | 作用 |
 | :-- | :-- |
-| `task/robosafejanus_tasks.json` | 组、任务、safe/risky 层级、指令、资产、`success` 判定 |
+| `task/robosafejanus_tasks/<group>.json` + `task/robosafejanus_sim/<group>.json` | 组、任务、safe/risky 层级(S2.3)、指令;资产、`success` 判定、S1 安全判定 |
 | `task/RoboDojo/config/<task>.yml` | 场景与物体配置 |
 | `task/RoboDojo/tasks/<task>.py` | 任务逻辑,`run_reward()` 决定评测成功与否 |
 | `task/RoboDojo/experts/<task>.py` | 脚本专家,只用于采集 |
@@ -692,7 +692,7 @@ ls Assets/Eval_Layout/RoboDojo/arx_x5/0/<task>_*.json | wc -l
 
 ### 运行前
 
-- [ ] `task/robosafejanus_tasks.json` 中该组已确认,safe + risky 任务齐全
+- [ ] 任务定义(`task/robosafejanus_tasks`) 中该组已确认,safe + risky 任务齐全
 - [ ] `check_task_alignment.py --group <group>` 无 ERROR
 - [ ] `task_inventory.py --format json --check` 通过
 - [ ] 冻结布局数量 ≥ 50

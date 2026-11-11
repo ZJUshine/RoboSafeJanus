@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""检查任务代码、采集数据、上传仓库等是否与 ``task/robosafejanus_tasks.json`` 对齐。
+"""检查任务代码、采集数据、上传仓库等是否与任务定义(``task/robosafejanus_tasks`` + ``task/robosafejanus_sim``)对齐。
 
-``robosafejanus_tasks.json`` 决定 ``<group>/<safe_tasks|risky_tasks>/<task>`` 的数据布局
+任务定义决定 ``<group>/<safe_tasks|risky_tasks>/<task>`` 的数据布局
 (``src/data_collect/benchmark_layout.py``),也记录每个任务的指令、资产和成功判定。本脚本只读,
 不导入 Isaac,逐项对照::
 
-    json        JSON 自身:任务名唯一、资产路径存在、成功判定引用的 label 都在 assets 中、expanded 不含基础版的组 / 任务
+    json        JSON 自身:任务名唯一、资产路径存在、成功判定引用的 label 都在 assets 中
     code        task/<BENCHMARK>/{tasks,config,experts}/<task> 是否齐全;task/RoboSafeJanus 镜像是否一致;
                 代码里的指令 / reward 函数与 JSON 是否一致
     config      任务 YAML 的 label 与资产(类别 / 编号)是否与 JSON 的 assets 一致
@@ -37,8 +37,8 @@ import filecmp
 import glob
 import json
 import os
-import re
 from pathlib import Path
+import re
 import sys
 from typing import Any
 
@@ -49,6 +49,8 @@ from src.data_collect.benchmark_layout import (  # noqa: E402
     LEVELS,
     REMOTE_PREFIX,
     TASKS_JSON,
+    instruction_candidates,
+    load_tasks,
     task_dir,
     task_groups,
 )
@@ -63,9 +65,8 @@ import yaml  # noqa: E402
 from task.RoboDojo.task_registry import is_group_module  # noqa: E402
 
 sys.path.insert(0, str(Path(__file__).parent))
-from task_success_spec import spec_for, strip_desc  # noqa: E402
+from task_success_spec import spec_for  # noqa: E402
 
-EXPANDED_JSON = Path(TASKS_JSON).with_name(Path(TASKS_JSON).stem + "_expanded.json")
 TASK_ROOT = ROOT_DIR / "task" / BENCHMARK
 MIRROR_ROOT = ROOT_DIR / "task" / "RoboSafeJanus"
 OBJECTS_DIR = ROOT_DIR / "Assets" / "Object" / BENCHMARK
@@ -179,10 +180,11 @@ def first_diff(actual, expected, path="success"):
 # ---------------------------------------------------------------------------
 
 
-def load_json_tasks(path) -> dict[str, dict[str, Any]]:
-    """``{task: {"group", "level", "instruction", "assets": {label: set}, "success"}}``。"""
-    with open(path, encoding="utf-8") as fp:
-        groups = json.load(fp)
+def load_json_tasks(path=None) -> dict[str, dict[str, Any]]:
+    """``{task: {"group", "level", "instruction", "candidates", "assets": {label: set}, "success"}}``(``load_tasks``
+    合成的任务定义;``candidates`` 为设计文件里的 ``S1.instruction`` 列表)。"""
+    groups = load_tasks()
+    candidates = instruction_candidates()
     tasks = {}
     for group, levels in groups.items():
         for level in LEVELS:
@@ -191,6 +193,7 @@ def load_json_tasks(path) -> dict[str, dict[str, Any]]:
                     "group": group,
                     "level": level,
                     "instruction": spec.get("instruction"),
+                    "candidates": list(candidates.get(name, ())),
                     "raw_assets": spec.get("assets", {}),
                     "assets": {label: parse_asset(a["asset"]) for label, a in spec.get("assets", {}).items()},
                     "success": spec.get("success", {}),
@@ -323,14 +326,12 @@ def check_json(report: Report, tasks: dict) -> None:
     except ValueError as e:
         report.error(sec, str(e))
     for name, spec in tasks.items():
-        # 组名是 <动作>_<交互物体>_<被交互物体>,其中恰好一段是 X(安全 / 危险任务之间变化的那一项),
-        # 任务名 = 组名把 X 换成具体名字
-        words = spec["group"].split("_")
+        # 组按核心风险命名(如 heat_sealed_food_microwave、heat_metal_item_microwave),与代码里的组模块
+        # (heat_X_microwave.py)无关:几个风险组可以共用一个组模块。组名只要求是小写 snake_case
+        # (还没按风险改名的旧组可以保留一段大写 X)
         group = spec["group"]
-        if words.count("X") != 1:
-            report.error(sec, f"组名 {group} 中应恰好有一段 X", name)
-        elif not re.fullmatch("_".join(r"[a-z0-9]+(?:_[a-z0-9]+)*" if w == "X" else re.escape(w) for w in words), name):
-            report.error(sec, f"任务名与组名 {group} 不符(把 X 换成具体名字应得到任务名)", name)
+        if not all(re.fullmatch(r"[a-z0-9]+", w) or w == "X" for w in group.split("_")):
+            report.error(sec, f"组名 {group} 应为小写 snake_case", name)
         for label, paths in spec["assets"].items():
             for path in paths:
                 if not asset_exists(path):
@@ -343,21 +344,6 @@ def check_json(report: Report, tasks: dict) -> None:
                 label = (check.get("args") or {}).get(key)
                 if isinstance(label, str) and label not in spec["assets"]:
                     report.error(sec, f"success{path}.{check.get('fn')} 的 {key}={label!r} 不在 assets 中", name)
-    if EXPANDED_JSON.exists():
-        with open(TASKS_JSON, encoding="utf-8") as fp:
-            base = json.load(fp)
-        with open(EXPANDED_JSON, encoding="utf-8") as fp:
-            expanded = json.load(fp)
-        # expanded 只放基础版之外的扩展任务:组名和任务名都不能与基础版重复
-        base_tasks = {t for levels in base.values() for lv in ("safe_tasks", "risky_tasks") for t in levels.get(lv, {})}
-        for group, levels in expanded.items():
-            if group in base:
-                report.error(sec, f"组 {group} 已在基础版中,不应再出现在 {EXPANDED_JSON.name}", group)
-            for lv in ("safe_tasks", "risky_tasks"):
-                for task in levels.get(lv, {}):
-                    if task in base_tasks:
-                        report.error(sec, f"任务 {task} 已在基础版中,不应再出现在 {EXPANDED_JSON.name}", task)
-
 
 def check_code(report: Report, tasks: dict, src: TaskSource) -> set[str]:
     """返回已实现(tasks/*.py 中有同名类且有 YAML)的 JSON 任务。"""
@@ -396,26 +382,30 @@ def check_code(report: Report, tasks: dict, src: TaskSource) -> set[str]:
             report.info(sec, "无法从代码静态解析指令,跳过指令比对", name)
         elif spec["instruction"] not in found:
             report.warn(sec, f"指令不一致: JSON {spec['instruction']!r} vs 代码 {found}", name)
-        # 成功判定:与 run_reward 实际调用逐项比较(不比 desc)
+        elif found != spec["candidates"]:
+            extra = [t for t in found if t not in spec["candidates"]]
+            if extra:
+                report.warn(sec, f"代码里的指令不在 S1.instruction 中: {extra}", name)
+            else:
+                report.info(sec, f"代码 {len(found)} 条指令,S1.instruction 有 {len(spec['candidates'])} 条", name)
+        # 成功判定:与 run_reward 实际调用逐项比较
         if not have["config"]:
             continue
         try:
-            expected = spec_for(name, spec["raw_assets"], with_desc=False)
+            expected = spec_for(name, spec["raw_assets"])
         except Exception as e:  # noqa: BLE001 - 代码无法静态执行时只提示
             report.info(sec, f"无法从 run_reward 提取成功判定({type(e).__name__}: {e}),跳过比对", name)
             continue
-        diff = first_diff(strip_desc(spec["success"]), expected)
+        diff = first_diff(spec["success"], expected)
         if diff:
             fix = f"python scripts/internal/task_success_spec.py --task {name} --write"
             report.warn(sec, f"success 与 run_reward 不一致: {diff};可用 {fix} 按代码重写", name)
     # 镜像里有、JSON 里没有的任务:benchmark_layout 会把它们的数据放在扁平目录
-    groups = {spec["group"] for spec in tasks.values()}
     for path in sorted((MIRROR_ROOT / "tasks").glob("*.py")):
         rel = path.relative_to(ROOT_DIR)
         if is_group_module(path.stem):
-            # 任务组公共模块(heat_X_microwave.py):不是任务,但组员通过 task.<BENCHMARK>.tasks.<组名> 导入它
-            if path.stem not in groups:
-                report.warn(sec, f"{rel} 不是 {Path(TASKS_JSON).name} 中的组名", path.stem)
+            # 任务组公共模块(heat_X_microwave.py):不是任务,组员通过 task.<BENCHMARK>.tasks.<模块名> 导入它;
+            # 模块名与 JSON 组名无关(几个风险组可共用一个模块)
             link = TASK_ROOT / "tasks" / path.name
             if not link.exists():
                 report.error(sec, f"缺少 {link.relative_to(ROOT_DIR)},组员无法导入", path.stem)
@@ -610,13 +600,13 @@ def check_data(
             if layouts:
                 compare_layouts(report, sec, name, tasks[name]["assets"], layouts, where)
             if h5py is not None and n_h5:
-                check_hdf5_instruction(report, sec, name, tasks[name]["instruction"], cdir, where, h5py)
+                check_hdf5_instruction(report, sec, name, tasks[name]["candidates"], cdir, where, h5py)
     for name in sorted(implemented - collected):
         report.info(sec, "已实现但还没有采集数据", name)
     return local_files
 
 
-def check_hdf5_instruction(report, sec, task, instruction, cdir, where, h5py) -> None:
+def check_hdf5_instruction(report, sec, task, candidates, cdir, where, h5py) -> None:
     mismatched = Counter()
     files = sorted((cdir / "data").glob("*.hdf5"))
     for path in files:
@@ -627,10 +617,11 @@ def check_hdf5_instruction(report, sec, task, instruction, cdir, where, h5py) ->
             report.error(sec, f"{where}: 无法读取 {path.name} 的 instruction: {e}", task)
             continue
         value = value.decode() if isinstance(value, bytes) else str(value)
-        if value != instruction:
+        if value not in candidates:
             mismatched[value] += 1
     for value, n in mismatched.items():
-        report.warn(sec, f"{where}: {n}/{len(files)} 个 hdf5 的指令为 {value!r},JSON 为 {instruction!r}", task)
+        msg = f"{where}: {n}/{len(files)} 个 hdf5 的指令 {value!r} 不在 S1.instruction {candidates} 中"
+        report.warn(sec, msg, task)
 
 
 def check_flat(report: Report, tasks: dict, data_dir: Path, flat_dir: Path) -> None:

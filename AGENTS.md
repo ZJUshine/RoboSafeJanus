@@ -12,13 +12,19 @@
 
 ## 1. 任务定义与同步
 
-- **`task/robosafejanus_tasks.json`是唯一事实来源**。任务名、group、safe/risky 层级、指令、资产、成功判定都以它为准。
+- **任务定义是唯一事实来源**,按组各一个 `<group>.json`,两处任务名一一对应:
+  - `task/robosafejanus_tasks/`:设计。`core_risk`、指令、S2 题目、S1.0–S1.5 变体(只写物体名);S2.3 的 `ground_truth` 决定 safe / risky 层级。
+  - `task/robosafejanus_sim/`:仿真细节。资产路径、`setup`、`success`,以及 S1.x 新增的资产、布置和安全判定(`safety`,`impl: todo` 表示判定函数还没实现)。S1.x 通过 = `success` 满足且没有触发 `safety`。
+  - 一个任务只归属一个组(数据目录、上传、`success` 写回都按归属组)。别的组也要列这个任务时,设计文件照常写(S2 可不同,指令 / S1 指令 / safe-risky 必须与归属组一致),sim 文件里只写 `{"same_as": "<归属组>"}`,如 `heat_metal_item_microwave` 的三明治 / 面包 / 汉堡。`load_tasks()` 默认不把引用列进本组,`load_tasks(include_shared=True)` 才列。
+  - 下游脚本统一用 `src/data_collect/benchmark_layout.py` 的 `load_tasks()` 读取(合成旧的 `{group: {safe_tasks, risky_tasks}}` 结构),不要再单独读文件;`task_success_spec.py --write` 写回 `robosafejanus_sim`。
+  - `task/robosafejanus_assets.json` 只记资产来源(如 `hf download` 命令),仿真加载的本地路径写在 `robosafejanus_sim`。
 - 用户**按组确认**。只同步已确认的组;未确认的组发现代码与 JSON 不一致时只报告,不要改代码去迁就,也不要改 JSON 去迁就代码。
-- 一个组确认后,下游全部对齐到 JSON:`_expanded.json` → 任务代码 / YAML / 专家 → 评测布局 → 本地数据(指令)→ 远端仓库。
+- 一个组确认后,下游全部对齐到 JSON:任务代码 / YAML / 专家 → 评测布局 → 本地数据(指令)→ 远端仓库。
 - 文件位置:真实文件放在 `task/RoboSafeJanus/{tasks,config,experts}/`,`task/RoboDojo/` 下只放相对软链接(`../../RoboSafeJanus/tasks/<x>.py`)。新文件先建在 RoboSafeJanus,再在 RoboDojo 建链接。写完后检查链接没有被工具写成普通文件。
-- 组内共享代码放在 `task/RoboSafeJanus/tasks/<group>.py`(名字与 JSON 组名完全相同,含大写 `X`,如 `pour_water_X.py`);单个任务文件只继承组的 `Common` 类并覆盖 `LABEL` / `TARGET` / `INSTRUCTION` 等属性。
+- 任务组按**核心风险**命名(小写 snake_case,如 `heat_sealed_food_microwave`、`heat_metal_item_microwave`);还没按风险改名的旧组暂时保留 `X`(如 `pour_water_X`)。
+- 组内共享代码放在 `task/RoboSafeJanus/tasks/<模块>.py`,模块名恰好含一段大写 `X`(如 `heat_X_microwave.py`、`pour_water_X.py`),**与任务组名无关**:同一个动作 / 场景的几个风险组可以共用一个模块。单个任务文件只继承模块的 `Common` 类并覆盖 `LABEL` / `TARGET` / `INSTRUCTION` 等属性。
 - 每个物体只用**一个**资产模型:JSON 里一个 `Section/name/<index>`,YAML 里一个 `index`,优先使用RoboDojo自带的资产，然后再是SimReady资产库最后是其他。
-- 改了 `run_reward` 后运行 `python scripts/internal/task_success_spec.py --task <task>` 对照 JSON 的 `success`;语义有变化时先问用户,确认后再 `--write`。重构组模块前后对比提取结果,必须一致。
+- 改了 `run_reward` 后运行 `python scripts/internal/task_success_spec.py --task <task>` 对照 JSON 的 `success`;语义有变化时先问用户,确认后再 `--write`。重构组模块前后对比提取结果,必须一致。JSON 里不写 `desc`,判定含义统一维护在 `docs/task_success_specs.md`,语义有变化时同步改它。
 - 指令变更后,已采集数据用 `sync_instructions.py` 同步(先预览,再 `--apply`),不要重新采集。
 
 ## 2. 数据采集
@@ -34,7 +40,7 @@
 
 ## 3. 策略评测
 
-评测目标固定为:按 `task/robosafejanus_tasks.json` 的组,评测该组**全部** safe + risky 任务;每个任务 50 个 episode,`--seed 0`,env config `arx_x5`,action type `joint`。
+评测目标固定为:按任务定义(`task/robosafejanus_tasks`)的组,评测该组**全部** safe + risky 任务;每个任务 50 个 episode,`--seed 0`,env config `arx_x5`,action type `joint`。
 
 - **模型**:优先用同名单任务 checkpoint;远端还有组级 cotrain(`<group>_safe_tasks`,如 `RoboSafeJanus-heat_X_microwave_safe_tasks-arx_x5-joint-0`)时,safe 和 risky 两个层级都要评。
 - **risky 没有自己的 checkpoint 时**,用同组 safe checkpoint zero-shot 评测,并在报告里注明是 zero-shot,不要当成该任务训练模型的成绩。

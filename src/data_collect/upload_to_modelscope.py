@@ -2,7 +2,7 @@
 
 远端沿用扁平布局:``data/RoboSafeJanus-Benchmark/<group>/<level>/<task>[_failed]/<config>/...``
 → ``<repo>/RoboSafeJanus/<task>[_failed]/<config>/...``(``--prefix`` 可改顶层目录名)。只上传
-``task/robosafejanus_tasks.json`` 中的任务;映射见 ``benchmark_layout.upload_files``。
+任务定义(``task/robosafejanus_tasks`` + ``task/robosafejanus_sim``)中的任务;映射见 ``benchmark_layout.upload_files``。
 每次运行做两步,可以反复执行:
     1. 上传:在 ``<local_dir 的父目录>/.cache/upload_view/`` 下按远端路径建硬链接,再用
        ``HubApi.upload_folder`` 多线程、分批 commit、可断点续传。已提交文件按 (路径, mtime, size)
@@ -95,7 +95,7 @@ local_sizes = {path: os.path.getsize(src) for path, src in local_files.items()}
 print(f"[upload_to_modelscope] local: {len(local_files)} files, {sum(local_sizes.values()) / 1e9:.1f} GB "
       f"under {local_dir}")
 for name in unmapped_dirs(local_dir):
-    print(f"[upload_to_modelscope] skip {name}/: not a group in task/robosafejanus_tasks.json")
+    print(f"[upload_to_modelscope] skip {name}/: not a group in task/robosafejanus_tasks")
 web_endpoint = (args.endpoint or os.environ.get("MODELSCOPE_ENDPOINT") or "https://www.modelscope.cn").rstrip("/")
 repo_url = f"{web_endpoint}/{'datasets' if args.repo_type == 'dataset' else 'models'}/{args.repo_id}"
 print(f"[upload_to_modelscope] remote: {repo_url} ({prefix}/)")

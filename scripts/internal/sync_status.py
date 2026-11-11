@@ -59,6 +59,7 @@ from src.data_collect.benchmark_layout import (  # noqa: E402
     LEVELS,
     REMOTE_PREFIX,
     TASKS_JSON,
+    load_tasks,
     task_groups,
 )
 
@@ -1029,7 +1030,7 @@ def json_alignment(
     remote: dict | None,
     lerobot: dict[str, dict | None],
 ) -> tuple[str, str]:
-    """Compare a task row against ``task/robosafejanus_tasks.json``."""
+    """Compare a task row against the task definitions (``load_tasks``)."""
     if spec is None:
         sources = []
         if local:
@@ -1690,7 +1691,7 @@ def markdown(snapshot: dict, refresh: int) -> str:
     if code_states["collectable"]:
         lines += ["| 任务 | 在 JSON | 说明 |", "| --- | --- | --- |"]
         for item in code_states["collectable"]:
-            note = "可直接采集" if item["in_json"] else "不在 robosafejanus_tasks.json，需先补定义"
+            note = "可直接采集" if item["in_json"] else "不在 task/robosafejanus_tasks / robosafejanus_sim，需先补定义"
             lines.append(f"| `{item['name']}` | {'✅' if item['in_json'] else '⚠️ 否'} | {note} |")
     else:
         lines.append("无。")
@@ -2927,14 +2928,16 @@ def nav_html(page: str) -> str:
 
 
 def task_catalog_page(generated_at: str, refresh: int) -> str:
-    """只展示 ``task/robosafejanus_tasks.json`` 的任务组、小任务与指令。"""
-    with open(TASKS_JSON, encoding="utf-8") as fp:
-        groups: dict = json.load(fp)
+    """只展示任务定义(``task/robosafejanus_tasks`` + ``task/robosafejanus_sim``)的任务组、小任务与指令。
+
+    ``same_as`` 共用的任务在引用它的组里也列出(标注归属组),但总数只按归属组算一次。
+    """
+    groups: dict = load_tasks(include_shared=True)
     level_labels = {"safe_tasks": "safe", "risky_tasks": "risky"}
     counts = {level: 0 for level in LEVELS}
     for levels in groups.values():
         for level in LEVELS:
-            counts[level] += len(levels.get(level) or {})
+            counts[level] += sum(1 for task in (levels.get(level) or {}).values() if "same_as" not in task)
     total = sum(counts.values())
     sections = []
     pills = []
@@ -2945,11 +2948,15 @@ def task_catalog_page(generated_at: str, refresh: int) -> str:
             for name, task in (levels.get(level) or {}).items():
                 instruction = (task or {}).get("instruction") or ""
                 search = f"{name} {instruction}".lower()
+                owner = (task or {}).get("same_as")
+                shared = (
+                    f' <small class="shared">共用,数据在 <code>{html.escape(owner)}</code></small>' if owner else ""
+                )
                 rows.append(
                     '<tr class="task-row" data-search="'
                     f'{html.escape(search, quote=True)}">'
                     f'<td><span class="badge lvl-{html.escape(label)}">{html.escape(label)}</span></td>'
-                    f"<td><code>{html.escape(name)}</code></td>"
+                    f"<td><code>{html.escape(name)}</code>{shared}</td>"
                     f'<td class="instruction">{html.escape(instruction) or "—"}</td>'
                     "</tr>"
                 )
@@ -2993,6 +3000,7 @@ def task_catalog_page(generated_at: str, refresh: int) -> str:
   .task-row[hidden] { display: none; }
   .col-level { width: 76px; }
   .col-name { width: 32%; }
+  .shared { color: var(--faint); margin-left: 4px; }
 """
     script = """
 (function () {
@@ -3029,12 +3037,12 @@ def task_catalog_page(generated_at: str, refresh: int) -> str:
 <header class="top">
   <div>
     <h1>RoboSafeJanus 任务清单</h1>
-    <div class="meta">生成时间 {html.escape(generated_at)} · 来源 <code>task/robosafejanus_tasks.json</code>{f" · 每 {refresh} 秒刷新" if refresh else ""}</div>
+    <div class="meta">生成时间 {html.escape(generated_at)} · 来源 <code>task/robosafejanus_tasks</code> + <code>task/robosafejanus_sim</code>{f" · 每 {refresh} 秒刷新" if refresh else ""}</div>
   </div>
   {nav_html("tasks")}
 </header>
 <div class="cards">
-  <div class="card"><div class="label">任务组</div><div class="value">{len(groups)} groups</div><div class="sub">task/robosafejanus_tasks.json</div></div>
+  <div class="card"><div class="label">任务组</div><div class="value">{len(groups)} groups</div><div class="sub">task/robosafejanus_tasks</div></div>
   <div class="card"><div class="label">小任务</div><div class="value">{total} tasks</div><div class="sub">safe {counts["safe_tasks"]} · risky {counts["risky_tasks"]}</div></div>
   <div class="card"><div class="label">safe / risky</div><div class="value">{counts["safe_tasks"]} / {counts["risky_tasks"]}</div><div class="sub">每个任务的指令见下表</div></div>
 </div>
@@ -3238,7 +3246,7 @@ def html_page(
                 note = "可直接采集"
             else:
                 json_badge = '<span class="badge warn">⚠️ 不在 JSON</span>'
-                note = "需先加入 robosafejanus_tasks.json，否则按扁平目录落盘且不会上传"
+                note = "需先加入 task/robosafejanus_tasks 与 robosafejanus_sim，否则按扁平目录落盘且不会上传"
             collectable_cells.append(
                 "<tr>"
                 f"<td><code>{html.escape(item['name'])}</code></td>"

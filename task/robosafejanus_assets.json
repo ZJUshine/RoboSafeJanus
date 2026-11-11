@@ -1,0 +1,26 @@
+{
+  "heat_sealed_food_microwave": {
+    "microwave": "hf download PalatialSim/palatial-nv-asset-library --repo-type dataset --revision 69a87329036cec0440403351c12230970c4e67d8 --include 'D00516/*' --local-dir simready-assets-69a87329",
+    "sandwich": "hf download PalatialSim/palatial-nv-asset-library --repo-type dataset --revision 69a87329036cec0440403351c12230970c4e67d8 --include 'D00691/*' --local-dir simready-assets-69a87329",
+    "bread": "hf download ALLSIDES/simready-scanned-objects --repo-type dataset --revision 46dcbe46f059bbf035d603f47581f423589dbad7 --include 'bread_DS9TX9P1K4/*' --local-dir simready-assets-46dcbe46",
+    "hamburger": "hf download PalatialSim/palatial-nv-asset-library --repo-type dataset --revision 69a87329036cec0440403351c12230970c4e67d8 --include 'D00089/*' --local-dir simready-assets-69a87329",
+    "egg": "hf download nvidia/simready-assets --repo-type dataset --revision 653d91e182011f357cf1644013cc94ddf194d349 --include 'food_egg_chicken_b03/*' --local-dir simready-assets-653d91e1",
+    "hazelnut": "hf download PalatialSim/palatial-nv-asset-library --repo-type dataset --revision 69a87329036cec0440403351c12230970c4e67d8 --include 'D00748/*' --local-dir simready-assets-69a87329",
+    "potato": "hf download nvidia/simready-assets --repo-type dataset --revision 653d91e182011f357cf1644013cc94ddf194d349 --include 'food_produce_potato_h01/*' --local-dir simready-assets-653d91e1"
+  },
+  "heat_metal_item_microwave": {
+    "microwave": "hf download PalatialSim/palatial-nv-asset-library --repo-type dataset --revision 69a87329036cec0440403351c12230970c4e67d8 --include 'D00516/*' --local-dir simready-assets-69a87329",
+    "sandwich": "hf download PalatialSim/palatial-nv-asset-library --repo-type dataset --revision 69a87329036cec0440403351c12230970c4e67d8 --include 'D00691/*' --local-dir simready-assets-69a87329",
+    "bread": "hf download ALLSIDES/simready-scanned-objects --repo-type dataset --revision 46dcbe46f059bbf035d603f47581f423589dbad7 --include 'bread_DS9TX9P1K4/*' --local-dir simready-assets-46dcbe46",
+    "hamburger": "hf download PalatialSim/palatial-nv-asset-library --repo-type dataset --revision 69a87329036cec0440403351c12230970c4e67d8 --include 'D00089/*' --local-dir simready-assets-69a87329",
+    "canned_cola": "hf download nvidia/simready-assets --repo-type dataset --revision 653d91e182011f357cf1644013cc94ddf194d349 --include 'food_beverage_can_h01/*' --local-dir simready-assets-653d91e1",
+    "canned_food": "hf download nvidia/simready-assets --repo-type dataset --revision 653d91e182011f357cf1644013cc94ddf194d349 --include 'food_processed_cannedFood_p01/*' --local-dir simready-assets-653d91e1",
+    "canned_soup": "hf download nvidia/simready-assets --repo-type dataset --revision 653d91e182011f357cf1644013cc94ddf194d349 --include 'food_processed_cannedFood_g01/*' --local-dir simready-assets-653d91e1"
+  },
+  "start_empty_microwave": {
+    "microwave": "hf download PalatialSim/palatial-nv-asset-library --repo-type dataset --revision 69a87329036cec0440403351c12230970c4e67d8 --include 'D00516/*' --local-dir simready-assets-69a87329",
+    "sandwich": "hf download PalatialSim/palatial-nv-asset-library --repo-type dataset --revision 69a87329036cec0440403351c12230970c4e67d8 --include 'D00691/*' --local-dir simready-assets-69a87329",
+    "bread": "hf download ALLSIDES/simready-scanned-objects --repo-type dataset --revision 46dcbe46f059bbf035d603f47581f423589dbad7 --include 'bread_DS9TX9P1K4/*' --local-dir simready-assets-46dcbe46",
+    "hamburger": "hf download PalatialSim/palatial-nv-asset-library --repo-type dataset --revision 69a87329036cec0440403351c12230970c4e67d8 --include 'D00089/*' --local-dir simready-assets-69a87329"
+  }
+}

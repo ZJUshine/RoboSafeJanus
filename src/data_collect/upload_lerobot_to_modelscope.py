@@ -123,7 +123,7 @@ def main() -> int:
     parser.add_argument("--num_workers", type=int, default=None)
     parser.add_argument("--no_delete", action="store_true", help="不删除远端多出来的文件")
     parser.add_argument("--include_non_json", action="store_true",
-                        help="也上传不在 task/robosafejanus_tasks.json 中的任务")
+                        help="也上传不在任务定义(task/robosafejanus_tasks)中的任务")
     parser.add_argument("--dry_run", action="store_true", help="只列出要上传 / 删除的文件")
     parser.add_argument("--force", action="store_true", help="即使有 LeRobot 转换进程在运行也继续")
     args = parser.parse_args()
@@ -149,7 +149,7 @@ def main() -> int:
         skipped = [dataset for dataset in datasets if dataset["task"] not in json_tasks]
         datasets = [dataset for dataset in datasets if dataset["task"] in json_tasks]
         for dataset in skipped:
-            print(f"[upload_lerobot] skip {dataset['path']}: not in robosafejanus_tasks.json")
+            print(f"[upload_lerobot] skip {dataset['path']}: not in task/robosafejanus_tasks")
         if not datasets:
             sys.exit(f"[upload_lerobot] no datasets for JSON tasks under {local_dir}; refusing to sync")
 

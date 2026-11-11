@@ -1,6 +1,7 @@
 """RoboSafeJanus-Benchmark 数据目录布局。
 
-``data/RoboSafeJanus-Benchmark`` 按 ``task/robosafejanus_tasks.json`` 的组与 safe / risky 细分::
+``data/RoboSafeJanus-Benchmark`` 按任务定义(``task/robosafejanus_tasks`` + ``task/robosafejanus_sim``,见 ``load_tasks``)
+的组与 safe / risky 细分::
 
     <save_dir>/<group>/<safe_tasks|risky_tasks>/<task>/<config>/
 
@@ -28,7 +29,12 @@ import os
 import shutil
 
 ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
-TASKS_JSON = os.path.join(ROOT_DIR, "task", "robosafejanus_tasks.json")
+# 任务定义分两处,按组各一个 <group>.json,任务名一一对应:
+#   task/robosafejanus_tasks/  设计:指令、S2 题目、S1 变体(只写物体名);S2.3 的 ground_truth 决定 safe / risky
+#   task/robosafejanus_sim/    仿真细节:资产路径、setup、success,以及 S1.x 新增的资产 / 布置 / 安全判定
+DESIGN_DIR = os.path.join(ROOT_DIR, "task", "robosafejanus_tasks")
+SIM_DIR = os.path.join(ROOT_DIR, "task", "robosafejanus_sim")
+TASKS_JSON = SIM_DIR  # 旧名,报错信息里指向任务定义所在位置
 BENCHMARK_NAME = "RoboSafeJanus-Benchmark"
 DEFAULT_SAVE_DIR = os.path.join("data", BENCHMARK_NAME)
 FLAT_VIEW_DIR = os.path.join(ROOT_DIR, "data", f"{BENCHMARK_NAME}-flat")
@@ -36,17 +42,129 @@ LEVELS = ("safe_tasks", "risky_tasks")
 REMOTE_PREFIX = "RoboSafeJanus"
 
 
+def _read_group_dir(path):
+    groups = {}
+    for name in sorted(os.listdir(path)):
+        if name.endswith(".json"):
+            with open(os.path.join(path, name), encoding="utf-8") as fp:
+                data = json.load(fp)
+            groups[data["task_name"]] = data
+    return groups
+
+
+def _level(design_task):
+    return "risky_tasks" if design_task["S2"]["S2.3"]["ground_truth"] == "unsafe" else "safe_tasks"
+
+
+def _check_shared(group, task, owner, design, sim):
+    """``sim`` 里写 ``{"same_as": <owner 组>}`` 的任务:资产 / success / S1 细节取自 owner 组,数据只存在 owner 组下。
+
+    两组的设计可以各写各的 S2(场景物体不同),但指令、S1 指令和 safe / risky 必须一致。
+    """
+    where = f"{group}/{task}: same_as {owner!r}"
+    if owner == group or owner not in sim:
+        raise ValueError(f"{where} is not another group")
+    if task not in sim[owner]["tasks"] or task not in design[owner]["tasks"]:
+        raise ValueError(f"{where} does not define this task")
+    if "same_as" in sim[owner]["tasks"][task]:
+        raise ValueError(f"{where} is itself a same_as reference")
+    d, d_owner = design[group]["tasks"][task], design[owner]["tasks"][task]
+    for name, get in (
+        ("instruction", lambda t: t["instruction"]),
+        ("S1.instruction", lambda t: t.get("S1", {}).get("instruction")),
+        ("level", _level),
+    ):
+        if get(d) != get(d_owner):
+            raise ValueError(f"{where}: {name} differs ({get(d)!r} vs {get(d_owner)!r})")
+
+
+def load_tasks(include_shared=False):
+    """``{group: {"safe_tasks" | "risky_tasks": {task: {"instruction", "assets", ["setup"], "success", "S1"}}}}``。
+
+    由 ``task/robosafejanus_tasks``(指令、safe / risky)和 ``task/robosafejanus_sim``(资产、setup、success、S1 细节)
+    合成,``assets`` 为 ``{label: {"asset": path}}``。两边的组和任务必须一一对应,否则报错。
+
+    一个任务只归属一个组(数据目录、上传、success 写回都按归属组)。别的组要把它列进来时,在自己的 sim 文件里
+    写 ``{"same_as": <归属组>}``(见 ``_check_shared``):默认不出现在本组里;``include_shared=True`` 时也列在
+    本组,内容取自归属组,并多一个 ``"same_as"`` 字段(任务目录页用)。
+    """
+    design, sim = _read_group_dir(DESIGN_DIR), _read_group_dir(SIM_DIR)
+    if set(design) != set(sim):
+        only_design, only_sim = sorted(set(design) - set(sim)), sorted(set(sim) - set(design))
+        raise ValueError(f"groups differ: only in design {only_design}, only in sim {only_sim}")
+    out = {}
+    for group in sorted(design, key=lambda g: list(sim).index(g)):
+        d_tasks, s_tasks = design[group]["tasks"], sim[group]["tasks"]
+        if set(d_tasks) != set(s_tasks):
+            diff = sorted(set(d_tasks) ^ set(s_tasks))
+            raise ValueError(f"{group}: tasks differ between {DESIGN_DIR} and {SIM_DIR}: {diff}")
+        levels = {level: {} for level in LEVELS}
+        for task, d in d_tasks.items():
+            s = s_tasks[task]
+            owner = s.get("same_as")
+            if owner is not None:
+                _check_shared(group, task, owner, design, sim)
+                if not include_shared:
+                    continue
+                s = sim[owner]["tasks"][task]
+            spec = {"instruction": d["instruction"], "assets": {k: {"asset": v} for k, v in s["assets"].items()}}
+            if "setup" in s:
+                spec["setup"] = s["setup"]
+            spec["success"] = s["success"]
+            spec["S1"] = s.get("S1", {})
+            if owner is not None:
+                spec["same_as"] = owner
+            levels[_level(d)][task] = spec
+        out[group] = levels
+    return out
+
+
+def save_success(task_name, success):
+    """把 ``success`` 写回 ``task/robosafejanus_sim/<group>.json`` 中的该任务(其余内容不动)。
+
+    ``same_as`` 引用不算:写回任务的归属组。
+    """
+    for name in sorted(os.listdir(SIM_DIR)):
+        path = os.path.join(SIM_DIR, name)
+        if not name.endswith(".json"):
+            continue
+        with open(path, encoding="utf-8") as fp:
+            data = json.load(fp)
+        if task_name in data["tasks"] and "same_as" not in data["tasks"][task_name]:
+            data["tasks"][task_name]["success"] = success
+            with open(path, "w", encoding="utf-8") as fp:
+                fp.write(json.dumps(data, indent=2, ensure_ascii=False) + "\n")
+            return path
+    raise KeyError(f"{task_name} not in {SIM_DIR}")
+
+
+@lru_cache(maxsize=1)
+def instruction_candidates():
+    """设计上的指令候选 ``{task: (指令, ...)}``:设计文件里的 ``S1.instruction`` 列表,没写时只有顶层 ``instruction``。
+
+    运行时的候选在任务代码里(``INSTRUCTION`` / ``gen_instruction``);``check_task_alignment.py`` 用这里核对两者。
+    ``same_as`` 共享任务两组的 S1 指令必须一致(见 ``_check_shared``),取哪组都一样。
+    """
+    out = {}
+    for data in _read_group_dir(DESIGN_DIR).values():
+        for task, d in data["tasks"].items():
+            cands = (d.get("S1") or {}).get("instruction") or [d["instruction"]]
+            out[task] = (cands,) if isinstance(cands, str) else tuple(cands)
+    return out
+
+
 @lru_cache(maxsize=1)
 def task_groups():
-    """``{task_name: (group, level)}``,来自 ``task/robosafejanus_tasks.json``。"""
-    with open(TASKS_JSON) as fp:
-        groups = json.load(fp)
+    """``{task_name: (group, level)}``,来自 ``task/robosafejanus_tasks`` + ``task/robosafejanus_sim``。
+
+    组是任务的归属组;别的组里的 ``same_as`` 引用不在这里(同一任务只有一个数据目录)。
+    """
     mapping = {}
-    for group, levels in groups.items():
+    for group, levels in load_tasks().items():
         for level in LEVELS:
             for task_name in levels.get(level, {}):
                 if task_name in mapping:
-                    raise ValueError(f"{TASKS_JSON}: task {task_name!r} appears in more than one group")
+                    raise ValueError(f"task {task_name!r} appears in more than one group")
                 mapping[task_name] = (group, level)
     return mapping
 
