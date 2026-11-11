@@ -23,6 +23,12 @@
 就直接是规划器要的 ``ee_link`` 位姿,无需额外标定;此时 ``link6`` 的 x 轴即接近方向、y 轴即手指方向,
 与 ``CollectEnv`` 的约定相同。
 
+桌面:GraspGenX 只看孤立物体的点云,不知道物体放在桌上,会生成从底下抓或手指 / 掌心插进桌面的抓取
+(未过滤时 54 个资产平均约 58% 的缓存抓取穿桌,扁平物体接近 100%)。这里假设物体按自身坐标系直立放在
+桌上(任务只做绕 z 的随机旋转,与偏航无关),在网格最低点 ``z_min`` 放一个虚拟桌面,丢弃夹爪碰撞网格
+(``coll_mesh.obj``,张开状态)任一顶点低于 ``z_min + --table_clear`` 的抓取;每轮推理 ``--num_grasps``
+个,最多 ``--max_passes`` 轮,直到攒够 ``--topk`` 个。
+
 网格从 ``object.usdz`` 读取。为防止 USD 单位 / 朝上轴与 Isaac 中的物体坐标系不一致,生成前会把网格包围盒
 与 ``metadata.json`` 的 ``aligned_bbox`` 比对,超出容差就报错跳过该资产,不会写入缓存。
 """
@@ -67,6 +73,19 @@ def _parse():
     parser.add_argument("--topk", type=int, default=200, help="grasps kept per asset")
     parser.add_argument("--num_points", type=int, default=3500, help="points sampled from the mesh surface")
     parser.add_argument("--bbox_tol", type=float, default=0.005, help="max mesh vs metadata bbox mismatch (m)")
+    parser.add_argument(
+        "--table_clear",
+        type=float,
+        default=0.005,
+        help="min height (m) of every gripper collision vertex above the virtual table at the mesh bottom; "
+        "negative disables the table filter",
+    )
+    parser.add_argument(
+        "--max_passes", type=int, default=10, help="inference passes to collect --topk table-free grasps"
+    )
+    parser.add_argument(
+        "--min_keep", type=int, default=10, help="fail (keep any old cache) if fewer table-free grasps survive"
+    )
     parser.add_argument("--vis_topk", type=int, default=30, help="grasps drawn in the per-asset .png")
     parser.add_argument("--no_vis", action="store_true", help="do not write the .png visualizations")
     parser.add_argument("--overwrite", action="store_true")
@@ -128,7 +147,14 @@ def _segment_mesh(a, b, radius):
     return trimesh.creation.cylinder(radius=radius, segment=np.stack([a, b]), sections=8)
 
 
-def _visualize(mesh, ee_poses, scores, to_link6, gripper_dir, out_png, title, topk, size=480):
+def _table_free(grasps, gripper_verts, table_z):
+    """``grasps`` (K, 4, 4) 抓取坐标系位姿(物体坐标系)中,夹爪碰撞网格全部顶点都在 ``table_z`` 之上的掩码。"""
+    # 只需世界 z:z_k,m = R_k[2, :] . v_m + t_k[2]
+    z = np.einsum("kj,mj->km", grasps[:, 2, :3], gripper_verts) + grasps[:, 2, 3:4]
+    return z.min(axis=1) >= table_z
+
+
+def _visualize(mesh, ee_poses, scores, to_link6, gripper_dir, out_png, title, topk, size=480, table_z=None):
     """按 GraspGenX ``scripts/demo_object_mesh.py`` 的画法离线渲染:灰色物体网格;前 ``topk`` 个抓取画成
     夹爪扫掠体的控制点折线,颜色由分数决定(红 = 低、绿 = 高,同 ``viser_utils.get_color_from_score``);
     分数最高的抓取叠加蓝色夹爪网格。四个视角拼成一张 png。``ee_poses`` 为 link6 位姿,先换回抓取坐标系。"""
@@ -160,7 +186,14 @@ def _visualize(mesh, ee_poses, scores, to_link6, gripper_dir, out_png, title, to
         )
 
     scene = pyrender.Scene(ambient_light=[0.45, 0.45, 0.45, 1.0], bg_color=[1.0, 1.0, 1.0, 1.0])
-    scene.add(pyrender.Mesh.from_trimesh(mesh, material=material([169 / 255] * 3)))
+    # smooth=False:部分网格带面颜色(如 bread/0),pyrender 不允许平滑着色
+    scene.add(pyrender.Mesh.from_trimesh(mesh, material=material([169 / 255] * 3), smooth=False))
+    if table_z is not None:  # 虚拟桌面:物体底部的浅色薄板(顶面在 table_z)
+        lo, hi = mesh.bounds
+        ext = max(hi[0] - lo[0], hi[1] - lo[1]) + 0.12
+        slab = trimesh.creation.box(extents=[ext, ext, 0.002])
+        slab.apply_translation([(lo[0] + hi[0]) / 2, (lo[1] + hi[1]) / 2, table_z - 0.001])
+        scene.add(pyrender.Mesh.from_trimesh(slab, material=material([0.85, 0.78, 0.65])))
     radius = 0.0012
     for j, (T, score) in enumerate(zip(grasps, scores[:n])):
         pts = ctrl @ T[:3, :3].T + T[:3, 3]
@@ -225,6 +258,10 @@ def main():
     model_cfg = load_model_cfg(os.path.join(args.checkpoints, "gen"), os.path.join(args.checkpoints, "dis"))
     sampler = GraspGenXSampler(model_cfg, args.gripper, assets_dir=args.gripper_assets)
     symmetric = bool(sampler.get_gripper_info().symmetric)
+    import trimesh
+
+    gripper_verts = np.asarray(trimesh.load(gripper_dir / "coll_mesh.obj", force="mesh").vertices, dtype=float)
+    use_table = args.table_clear >= 0
 
     failed = []
     for item in args.objects.split(","):
@@ -234,7 +271,10 @@ def main():
         png = out.with_suffix(".png")
         cached = out.exists() and not args.overwrite
         if cached and (args.no_vis or png.exists()):
-            print(f"[grasp_gen] {category}/{index}: cached, skipped ({out})")
+            with np.load(out) as f:
+                old_clear = json.loads(str(f["meta"])).get("table_clear")
+            note = "" if old_clear is not None else " [no table filter, regenerate with --overwrite]"
+            print(f"[grasp_gen] {category}/{index}: cached, skipped ({out}){note}")
             continue
         obj_dir = OBJECTS_ROOT / args.obj_type / category / f"{index:05d}"
         usd = obj_dir / "object.usdz"
@@ -247,10 +287,15 @@ def main():
             print(f"[grasp_gen] {category}/{index}: FAILED to load mesh: {type(e).__name__}: {e}")
             failed.append(item)
             continue
+        table_z = float(mesh.bounds[0][2])  # 虚拟桌面:物体直立时网格最低点
         if cached:  # 只补画图
             data = np.load(out)
             name = f"{category}/{index}"
-            _visualize(mesh, data["ee_poses"], data["scores"], to_link6, gripper_dir, png, name, args.vis_topk)
+            old_clear = json.loads(str(data["meta"])).get("table_clear")
+            _visualize(
+                mesh, data["ee_poses"], data["scores"], to_link6, gripper_dir, png, name, args.vis_topk,
+                table_z=table_z if old_clear is not None else None,
+            )  # fmt: skip
             print(f"[grasp_gen] {category}/{index}: cached, visualization written -> {png}")
             continue
 
@@ -260,27 +305,50 @@ def main():
         np.random.seed(seed)
         # 与 GraspGenX 的 demo 一致:点云减去均值后推理,再把抓取平移回物体坐标系
         center = points.mean(axis=0)
-        grasps, scores = GraspGenXSampler.run_inference(
-            points - center,
-            sampler,
-            grasp_threshold=-1.0,
-            num_grasps=args.num_grasps,
-            topk_num_grasps=args.topk,
-            remove_outliers=False,
-        )
-        if len(grasps) == 0:
-            print(f"[grasp_gen] {category}/{index}: FAILED, GraspGenX returned no grasps")
+        kept_g, kept_s, sampled, passes = [], [], 0, 0
+        while passes < max(1, args.max_passes) and sum(len(g) for g in kept_g) < args.topk:
+            passes += 1
+            g, s = GraspGenXSampler.run_inference(
+                points - center,
+                sampler,
+                grasp_threshold=-1.0,
+                num_grasps=args.num_grasps,
+                topk_num_grasps=args.num_grasps,  # 全部保留,过滤桌面后再统一取 topk
+                min_grasps=1,
+                max_tries=1,
+                remove_outliers=False,
+            )
+            if len(g) == 0:
+                continue
+            g = g.cpu().numpy().astype(float)
+            s = s.cpu().numpy().astype(float)
+            g[:, :3, 3] += center
+            sampled += len(g)
+            if use_table:
+                mask = _table_free(g, gripper_verts, table_z + args.table_clear)
+                g, s = g[mask], s[mask]
+            kept_g.append(g)
+            kept_s.append(s)
+            if not use_table:
+                break
+        n_kept = sum(len(g) for g in kept_g)
+        if n_kept < max(1, args.min_keep):
+            why = (
+                f"only {n_kept} of {sampled} grasps clear the table (< --min_keep {args.min_keep})"
+                if sampled
+                else "GraspGenX returned no grasps"
+            )
+            print(f"[grasp_gen] {category}/{index}: FAILED, {why}")
             failed.append(item)
             continue
-        grasps = grasps.cpu().numpy().astype(float)
-        scores = scores.cpu().numpy().astype(float)
-        order = np.argsort(-scores)
+        grasps, scores = np.concatenate(kept_g), np.concatenate(kept_s)
+        order = np.argsort(-scores)[: args.topk]
         grasps, scores = grasps[order], scores[order]
 
         ee_poses = []
         for g in grasps:
             R = g[:3, :3] @ to_link6
-            ee_poses.append(np.concatenate([g[:3, 3] + center, _mat2quat(R)]))
+            ee_poses.append(np.concatenate([g[:3, 3], _mat2quat(R)]))  # 已加回 center
         meta = {
             "gripper": args.gripper,
             "symmetric": symmetric,
@@ -289,6 +357,11 @@ def main():
             "bbox_error_m": bbox_err,
             "num_grasps": args.num_grasps,
             "topk": args.topk,
+            "table_clear": args.table_clear if use_table else None,
+            "table_z": table_z if use_table else None,
+            "passes": passes,
+            "sampled": sampled,
+            "table_free": n_kept,
             "num_points": args.num_points,
             "seed": seed,
             "created": time.strftime("%Y-%m-%d %H:%M:%S"),
@@ -297,10 +370,14 @@ def main():
         np.savez(out, ee_poses=np.asarray(ee_poses), scores=scores, meta=json.dumps(meta))
         if not args.no_vis:
             name = f"{category}/{index}"
-            _visualize(mesh, np.asarray(ee_poses), scores, to_link6, gripper_dir, png, name, args.vis_topk)
+            _visualize(
+                mesh, np.asarray(ee_poses), scores, to_link6, gripper_dir, png, name, args.vis_topk,
+                table_z=table_z if use_table else None,
+            )  # fmt: skip
         print(
             f"[grasp_gen] {category}/{index}: {len(ee_poses)} grasps, scores "
-            f"{scores.min():.3f}-{scores.max():.3f}, bbox err {bbox_err * 1000:.1f} mm -> {out}"
+            f"{scores.min():.3f}-{scores.max():.3f}, table-free {n_kept}/{sampled} in {passes} pass(es), "
+            f"bbox err {bbox_err * 1000:.1f} mm -> {out}"
         )
 
     if failed:
