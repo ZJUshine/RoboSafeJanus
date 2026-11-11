@@ -826,9 +826,9 @@ python scripts/internal/sync_status.py --watch 120 --serve 8765
 - `评测进度矩阵` 是给"实时看进度"用的:行列和 `结果矩阵` 一样,**第一行先给 `评测布局`**(该小组有多少小任务已冻结 ≥`--eval_num` 条 seed `<eval_seed>` 布局,`a/b` 形式,悬停看不足 / 无布局的任务;这是能不能跑满 50 条的前提),格子里的 `⚠ 布局 x/50` 也会标出布局不够的任务。下面的型号行**不看** `eval_time` 谁大,一律显示每个任务**最新一次** run 的 `n/目标`,所以正在跑(或被上一轮 50 条结果压住)的 run 也看得见。⏳ 进行中(`n < 50` 且 `_result.json` 在 20 分钟内有更新)/ ✅ 完成 / ⏸ 未跑满(已超 20 分钟无更新);刚启动、还没写出 `_result.json` 的 run 也会以"刚启动"出现。底部两行:进行中 = 正在跑的任务数,完成 = 已跑满目标条数的任务数。点格子同样能看这次 run 的视频。`_result.json` 每跑完一条 episode 重写一次,所以 `n` 会随之前进,但单条 episode 通常要几分钟。
 - `视频` 列 / `任务头部相机预览` 区块:统计每个任务 `<task>/<config>/preview_video/episode_<episode>_<cam>.mp4` 的头部相机(`cam_head`)条数,并为每个任务抽第 2 秒画面做缩略图(缓存在 `<out_dir>/video_thumbs/`,视频更新后自动重抽);`结果矩阵` 的格子点开就是该 run 目录下的评测视频(带 success/fail 标记)。点卡片或 🎬 打开播放器,可切换 `cam_head` / `cam_left_wrist` / `cam_right_wrist` 并逐个 episode 播放。播放走 `GET /api/videos?scope=local&task=<task>`(或 `scope=eval&run=<run_dir>`)列目录、`GET /media?path=<repo 相对路径>` 流式读文件(支持 Range,可拖动进度条)。**只有 `--serve` 模式能播放**,静态页面会禁用这些按钮。
 - `评测布局`:每个任务行标题里的 `布局 N` 徽章统计 `Assets/Eval_Layout/RoboDojo/arx_x5/<eval_seed>/<task>_<i>.json` 的条数(默认 `--eval_seed 0`,目标 `--eval_num 50`),`布局 50` 表示够跑满 50 条,`布局 N` 标黄表示不足,`无布局` 标红表示还没冻结;页面底部"评测布局"折叠区只列缺布局 / 不足的任务,并提示用 `python src/data_collect/eval_layouts.py check` + `write`(或 `derive`)生成。用 `--eval_layout_dir` 可指向其他 benchmark/config 目录。
-- `JSON 对齐` 列对照 `task/robosafejanus_tasks.json`:`✅ 一致` 表示任务存在且本地/LeRobot 的 group/level 与 JSON 相同;`⚠️ 位置不符` 会给出实际位置;`⚠️ JSON 外` 表示本地、远端或 LeRobot 中有 JSON 之外的任务;`○ 仅定义` 表示 JSON 中有但本地/远端都还没有数据。
-- `HDF5 本地` / `ModelScope HDF5` 两列按 episode 数和总大小逐任务对比:`✅ 同步` 表示条数和总大小都一致,`⚠️ 不一致` 会给出大小差。
-- `JSON 外` 表示本地有数据但不在 `task/robosafejanus_tasks.json` 中(上传脚本会跳过);`仅远端` 表示远端有、本地没有的旧任务。
+- `JSON 对齐` 列对照 任务定义(`task/robosafejanus_tasks`):`✅ 一致` 表示任务存在且本地/LeRobot 的 group/level 与 JSON 相同;`⚠️ 位置不符` 会给出实际位置;`⚠️ JSON 外` 表示本地、远端或 LeRobot 中有 JSON 之外的任务;`○ 仅定义` 表示 JSON 中有但本地/远端都还没有数据。
+- `HDF5（本地 / ModelScope）` 一列按 episode 数和总大小逐任务对比:前半是本地,后半是 ModelScope;`✅ 同步` 表示条数和总大小都一致,`⚠️ 不一致` 会给出大小差。
+- `JSON 外` 表示本地有数据但不在 任务定义(`task/robosafejanus_tasks`) 中(上传脚本会跳过);`仅远端` 表示远端有、本地没有的旧任务。
 - LeRobot 列前半是本地导出(`data/RoboSafeJanus-Benchmark-Lerobot/<v30|v21>/<group>/<level>/<task>/meta/info.json` 的 `total_episodes`),后半是 ModelScope 上的同名数据集。远端支持 `<v30|v21>/<group>/<level>/<task>` 镜像布局,以及旧的 `<prefix>-<task>-<robot>-<action>/` 平铺布局(版本读 `meta/info.json` 的 `codebase_version`)。
 - 总状态新增 `⬆️ LeRobot 待上传`:本地 v30/v21 都已导出、但 ModelScope 上的 LeRobot 数据集条数还不一致。
 

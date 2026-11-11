@@ -1699,8 +1699,8 @@ def markdown(snapshot: dict, refresh: int) -> str:
         "",
         "## 任务明细",
         "",
-        "| # | 组 | 任务 | JSON 对齐 | 专家脚本 | HDF5 本地 | ModelScope HDF5 | LeRobot v30 | LeRobot v21 | 模型 | 评测 | 评测布局 | 视频 | 总状态 |",
-        "| ---: | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
+        "| # | 组 | 任务 | JSON 对齐 | 专家脚本 | HDF5（本地 / ModelScope） | LeRobot v30 | LeRobot v21 | 模型 | 评测 | 评测布局 | 视频 | 总状态 |",
+        "| ---: | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
     ]
     group_numbers: dict[str, int] = {}
     for row in snapshot["tasks"]:
@@ -1708,20 +1708,31 @@ def markdown(snapshot: dict, refresh: int) -> str:
     for row in snapshot["tasks"]:
         local = row["local"]
         remote = row["remote"]
-        local_text = (
-            f"{local['episodes']} 条 / {human_bytes(local['size'])}"
-            if local and local["episodes"]
-            else "—"
-        )
-        if not remote:
-            remote_text = "❌ 无"
-        elif row["status"]["remote"] == "synced":
-            remote_text = f"✅ 同步 / {human_bytes(remote['size'])}"
-        elif row["status"]["remote"] == "remote_only":
-            remote_text = f"⬇️ 仅远端 / {human_bytes(remote['size'])}"
+        local_status = row["status"]["local"]
+        if local and local["episodes"]:
+            hdf5_text = (
+                f"本地 {'✅' if local_status == 'ok' else '⚠️'} "
+                f"{local['episodes']} 条 / {human_bytes(local['size'])}"
+            )
         else:
+            hdf5_text = "本地 ❌ 无"
+        remote_status = row["status"]["remote"]
+        pending_upload = remote_status == "missing" and bool(local and local["episodes"])
+        if pending_upload:
+            remote_status = "local_only"
+        remote_label = {
+            "synced": "✅ 同步",
+            "diff": "⚠️ 不一致",
+            "remote_only": "⬇️ 仅远端",
+            "local_only": "⬆️ 待上传",
+        }.get(remote_status, "❌ 无")
+        remote_text = f"远端 {remote_label}"
+        if remote:
             delta = remote["size"] - (local["size"] if local else 0)
-            remote_text = f"⚠️ {remote['episodes']} 条 / {human_bytes(remote['size'])}（{signed_bytes(delta)}）"
+            remote_text += f" / {remote['episodes']} 条 / {human_bytes(remote['size'])}"
+            if remote_status == "diff":
+                remote_text += f"（{signed_bytes(delta)}）"
+        hdf5_text += f"；{remote_text}"
         lerobot_text = {}
         for version in LEROBOT_VERSIONS:
             export = row["lerobot"][version]
@@ -1796,14 +1807,14 @@ def markdown(snapshot: dict, refresh: int) -> str:
             if head_count else "—"
         )
         lines.append(
-            f"| {group_numbers[row['group']]} | `{row['group']}` | `{row['name']}` | {json_text} | {code_cell} | {local_text} | {remote_text} | "
+            f"| {group_numbers[row['group']]} | `{row['group']}` | `{row['name']}` | {json_text} | {code_cell} | {hdf5_text} | "
             f"{lerobot_text['v30']} | {lerobot_text['v21']} | {model_text} | {eval_text} | {layout_text} | {video_text} | {overall} |"
         )
     lines += [
         "",
-        "> `✅ 同步`：HDF5 本地 episode 数、总大小与 ModelScope HDF5 一致。`⚠️ 不一致`：远端存在但条数或大小不同。",
+        "> `HDF5` 列前半是本地 episode 数 / 总大小，后半是 ModelScope：`✅ 同步` 表示条数和大小都一致，`⚠️ 不一致` 表示远端存在但条数或大小不同。",
         "> LeRobot 列前半是本地导出，后半是 ModelScope 上的 LeRobot 数据集：`本地 ❌ 无` 未导出、`远端 ⬆️ 待上传` 未上传、`远端 ✅ 同步` 条数一致。",
-        "> `JSON 外`：本地有数据但不在 `task/robosafejanus_tasks.json`，上传脚本会跳过。",
+        "> `JSON 外`：本地有数据但不在任务定义（`task/robosafejanus_tasks` / `robosafejanus_sim`）中，上传脚本会跳过。",
         "> `✅ 就绪`：`task/RoboSafeJanus/{tasks,config,experts}/<task>` 三件齐全；`put_*` / `place_*` 别名视为同一任务。",
         "> LeRobot 路径：`data/RoboSafeJanus-Benchmark-Lerobot/<v30|v21>/<group>/<level>/<task>`。",
         "> `视频`：`<task>/<config>/preview_video/episode_*_<cam>.mp4` 的头部相机条数；用 `--serve` 打开看板可点 🎬 播放（缩略图缓存在 `<out_dir>/video_thumbs/`）。",
@@ -3076,19 +3087,35 @@ def html_page(
     for row in snapshot["tasks"]:
         local = row["local"]
         remote = row["remote"]
-        local_text = f"{local['episodes']} 条<br><small>{human_bytes(local['size'])}</small>" if local and local["episodes"] else "—"
-        if not remote:
-            remote_text = '<span class="badge bad">❌ 无</span>'
-        elif row["status"]["remote"] == "synced":
-            remote_text = f'<span class="badge good">✅ 同步</span><br><small>{human_bytes(remote["size"])}</small>'
-        elif row["status"]["remote"] == "remote_only":
-            remote_text = f'<span class="badge warn">⬇️ 仅远端</span><br><small>{human_bytes(remote["size"])}</small>'
-        else:
-            delta = remote["size"] - (local["size"] if local else 0)
-            remote_text = (
-                f'<span class="badge warn">⚠️ 不一致</span><br>'
-                f'<small>{remote["episodes"]} 条 / {human_bytes(remote["size"])}（{signed_bytes(delta)}）</small>'
+        local_status = row["status"]["local"]
+        if local and local["episodes"]:
+            local_class = "good" if local_status == "ok" else "warn"
+            local_mark = "✅" if local_status == "ok" else "⚠️"
+            local_html = (
+                f'<span class="badge {local_class}">本地 {local_mark} {local["episodes"]} 条</span>'
+                f'<br><small>{human_bytes(local["size"])}</small>'
             )
+        else:
+            local_html = '<span class="badge bad">本地 ❌ 无</span>'
+        remote_status = row["status"]["remote"]
+        pending_upload = remote_status == "missing" and bool(local and local["episodes"])
+        if pending_upload:
+            remote_status = "local_only"
+        remote_label = {
+            "synced": "远端 ✅ 同步",
+            "diff": "远端 ⚠️ 不一致",
+            "remote_only": "远端 ⬇️ 仅远端",
+            "local_only": "远端 ⬆️ 待上传",
+        }.get(remote_status, "远端 ❌ 无")
+        remote_class = "good" if remote_status == "synced" else ("bad" if remote_status == "missing" else "warn")
+        remote_html = f'<span class="badge {remote_class}">{remote_label}</span>'
+        if remote:
+            delta = remote["size"] - (local["size"] if local else 0)
+            remote_html += f'<br><small>{remote["episodes"]} 条 / {human_bytes(remote["size"])}'
+            if remote_status == "diff":
+                remote_html += f"（{signed_bytes(delta)}）"
+            remote_html += "</small>"
+        hdf5_cell = local_html + "<br>" + remote_html
         lerobot_cells = []
         for version in LEROBOT_VERSIONS:
             export = row["lerobot"][version]
@@ -3221,7 +3248,7 @@ def html_page(
             f"<td><code>{html.escape(row['name'])}</code></td>"
             f"<td>{json_cell}</td>"
             f"<td>{code_cell}</td>"
-            f"<td>{local_text}</td><td>{remote_text}</td>"
+            f"<td>{hdf5_cell}</td>"
             f"<td>{lerobot_cells[0]}</td><td>{lerobot_cells[1]}</td>"
             f"<td>{video_cell}</td>"
             f'<td><span class="badge {overall_class}">{overall_label}</span></td>'
@@ -4083,7 +4110,7 @@ def html_page(
             f'<div class="cards">{cards_html}</div>'
             f'<div class="states">{states}<br>{json_states_text}<br>{code_states_text}</div>'
             "<table>\n<thead><tr><th>#</th><th>组</th><th>任务</th><th>JSON 对齐</th><th>专家脚本</th>"
-            "<th>HDF5 本地</th><th>ModelScope HDF5</th><th>LeRobot v30</th><th>LeRobot v21</th>"
+            "<th>HDF5（本地 / ModelScope）</th><th>LeRobot v30</th><th>LeRobot v21</th>"
             "<th>视频</th><th>总状态</th></tr></thead>\n<tbody>\n"
             f"{''.join(rows)}"
             "\n</tbody>\n</table>\n"
