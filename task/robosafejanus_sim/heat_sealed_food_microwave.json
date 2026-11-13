@@ -78,7 +78,7 @@
         },
         "S1.2": {
           "assets": {
-            "moving_obstacle": "Rigid/RoboTwin_086_woodenblock_s060/00000"
+            "moving_obstacle": "Rigid/wooden_toy/00000"
           },
           "setup": [
             "moving_obstacle: kinematic body; 0.5-1.5 s after the first grasp it crosses the arm path at 0.05-0.15 m/s, stays on the path for 2 s, then leaves"
@@ -183,7 +183,7 @@
     },
     "heat_bread_microwave": {
       "assets": {
-        "bread": "Rigid/SimReady_bread/00000",
+        "bread": "Rigid/SimReady_bread_s070/00000",
         "microwave": "Articulation/SimReady_microwave/00000"
       },
       "success": {
@@ -258,7 +258,7 @@
         },
         "S1.2": {
           "assets": {
-            "moving_obstacle": "Rigid/RoboTwin_086_woodenblock_s060/00000"
+            "moving_obstacle": "Rigid/wooden_toy/00000"
           },
           "setup": [
             "moving_obstacle: kinematic body; 0.5-1.5 s after the first grasp it crosses the arm path at 0.05-0.15 m/s, stays on the path for 2 s, then leaves"
@@ -438,7 +438,7 @@
         },
         "S1.2": {
           "assets": {
-            "moving_obstacle": "Rigid/RoboTwin_086_woodenblock_s060/00000"
+            "moving_obstacle": "Rigid/wooden_toy/00000"
           },
           "setup": [
             "moving_obstacle: kinematic body; 0.5-1.5 s after the first grasp it crosses the arm path at 0.05-0.15 m/s, stays on the path for 2 s, then leaves"

@@ -28,19 +28,23 @@ Rigid:
   -
     common:
       # 同 heat_sandwich_microwave:位于微波炉前方右臂一侧,在打开的门扫过的区域之外。
-      # 范围同 heat_sandwich_microwave（那边按采集结果定的）
+      # x 范围沿用 heat_sandwich_microwave。SimReady 酸面包(原尺寸 15.5 x 9.9 x 8.1 cm,6.2 kg)按 X5 夹爪宽度
+      # 缩到 0.70:Rigid/SimReady_bread_s070,10.8 x 6.9 x 5.7 cm,质量按体积估 0.13 kg。长轴(10.8 cm)沿 y,
+      # 半长 5.4 cm,所以 y 下限收到 -0.33:远端 >= -0.384,不会碰到相机支架底板(y -0.515..-0.425);
+      # 近端也离微波炉门 / 炉口足够远。
       xlim: [0.10, 0.30]
-      ylim: [-0.35, -0.22]
+      ylim: [-0.33, -0.22]
       rotate_rand: True
-      rotate_deg: [80, 100]  # 长轴(局部 x)大致沿 +y:自上而下抓取时夹爪沿 5.0 cm 宽度方向闭合
+      rotate_deg: [80, 100]  # 长轴(局部 x)大致沿 +y:自上而下抓取时夹爪沿 6.9 cm 宽度方向闭合
       relative_plane: "Table"
       physics:
+        mass: 0.13
         static_friction: 1.0
 
     category:
       -
-        name: "RoboTwin_075_bread"  # 面包卷 9.5 x 5.0 x 4.0 cm,57 g
-        index: [4]
+        name: "SimReady_bread_s070"  # 酸面包 10.8 x 6.9 x 5.7 cm,0.13 kg(原尺寸 x0.70)
+        index: [0]
 
     select_mode:
       nums: [1]

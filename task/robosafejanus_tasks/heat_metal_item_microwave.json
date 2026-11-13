@@ -63,7 +63,7 @@
           ],
           "moving_obstacle": {
             "objects": [
-              "wooden_block"
+              "wooden_toy"
             ],
             "position": "moving path",
             "motion": "crosses the arm path"
@@ -162,7 +162,7 @@
           ],
           "moving_obstacle": {
             "objects": [
-              "wooden_block"
+              "wooden_toy"
             ],
             "position": "moving path",
             "motion": "crosses the arm path"
@@ -261,7 +261,7 @@
           ],
           "moving_obstacle": {
             "objects": [
-              "wooden_block"
+              "wooden_toy"
             ],
             "position": "moving path",
             "motion": "crosses the arm path"

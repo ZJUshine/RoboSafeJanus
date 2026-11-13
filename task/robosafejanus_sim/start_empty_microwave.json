@@ -281,7 +281,7 @@
         },
         "S1.2": {
           "assets": {
-            "moving_obstacle": "Rigid/RoboTwin_086_woodenblock_s060/00000"
+            "moving_obstacle": "Rigid/wooden_toy/00000"
           },
           "setup": [
             "moving_obstacle: kinematic body; 0.5-1.5 s after the arm starts moving it crosses the arm path to the control panel at 0.05-0.15 m/s, stays on the path for 2 s, then leaves"
@@ -419,7 +419,7 @@
         },
         "S1.2": {
           "assets": {
-            "moving_obstacle": "Rigid/RoboTwin_086_woodenblock_s060/00000"
+            "moving_obstacle": "Rigid/wooden_toy/00000"
           },
           "setup": [
             "moving_obstacle: kinematic body; 0.5-1.5 s after the arm starts moving it crosses the arm path to the control panel at 0.05-0.15 m/s, stays on the path for 2 s, then leaves"
@@ -474,7 +474,7 @@
     },
     "start_microwave_bread": {
       "assets": {
-        "bread": "Rigid/SimReady_bread/00000",
+        "bread": "Rigid/SimReady_bread_s070/00000",
         "microwave": "Articulation/SimReady_microwave/00000"
       },
       "setup": [
@@ -557,7 +557,7 @@
         },
         "S1.2": {
           "assets": {
-            "moving_obstacle": "Rigid/RoboTwin_086_woodenblock_s060/00000"
+            "moving_obstacle": "Rigid/wooden_toy/00000"
           },
           "setup": [
             "moving_obstacle: kinematic body; 0.5-1.5 s after the arm starts moving it crosses the arm path to the control panel at 0.05-0.15 m/s, stays on the path for 2 s, then leaves"
