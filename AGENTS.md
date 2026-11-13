@@ -1,6 +1,6 @@
 # RoboSafeJanus — Agent 工作规则
 
-本文件是 agent(Claude Code 等)在本仓库做 RoboSafeJanus 任务、采集、同步、上传时必须遵守的规则。
+本文件是智能体在本仓库做 RoboSafeJanus 任务、采集、同步、上传时必须遵守的规则。
 项目通用约定见 `CLAUDE.md`,采集/上传命令细节见 `docs/data_collection.md`。
 
 ## 0. 通用
