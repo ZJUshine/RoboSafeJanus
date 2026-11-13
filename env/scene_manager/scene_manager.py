@@ -485,7 +485,9 @@ class SceneManager:
         env_root = self.env_roots[env_id]
         if types not in ["Table", "Room", "Light", "Ground"]:
             return
-        prim_path = f"{env_root}/{types}"
+        # layout_manager.select_room spawns rooms under "<env_root>/Rooms/..."; deleting "<env_root>/Room"
+        # left every previous room (and its built-in RectLight) on stage, so each episode got brighter.
+        prim_path = f"{env_root}/Rooms" if types == "Room" else f"{env_root}/{types}"
         if is_prim_path_valid(prim_path):
             delete_prim(prim_path)
 
