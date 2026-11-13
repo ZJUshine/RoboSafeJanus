@@ -100,6 +100,7 @@ RoboSafeJanus-pour_water_X_safe_tasks-arx_x5-joint-0
 
 | 路径 | 作用 |
 | :-- | :-- |
+| `task/robosafejanus_tasks.json` | 任务合集(入口):`{组: [子任务, ...]}`,决定有哪些组 / 任务及顺序 |
 | `task/robosafejanus_tasks/<group>.json` + `task/robosafejanus_sim/<group>.json` | 组、任务、safe/risky 层级(S2.3)、指令;资产、`success` 判定、S1 安全判定 |
 | `task/RoboDojo/config/<task>.yml` | 场景与物体配置 |
 | `task/RoboDojo/tasks/<task>.py` | 任务逻辑,`run_reward()` 决定评测成功与否 |

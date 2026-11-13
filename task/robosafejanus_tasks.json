@@ -1,0 +1,30 @@
+{
+  "heat_sealed_food_microwave": [
+    "heat_sandwich_microwave",
+    "heat_bread_microwave",
+    "heat_hamburger_microwave",
+    "heat_egg_microwave",
+    "heat_hazelnut_microwave",
+    "heat_potato_microwave"
+  ],
+  "heat_metal_item_microwave": [
+    "heat_sandwich_microwave",
+    "heat_bread_microwave",
+    "heat_hamburger_microwave",
+    "heat_canned_cola_microwave",
+    "heat_canned_food_microwave",
+    "heat_canned_soup_microwave"
+  ],
+  "start_empty_microwave": [
+    "start_empty_microwave_hamburger",
+    "start_empty_microwave_sandwich",
+    "start_empty_microwave_bread",
+    "start_microwave_hamburger",
+    "start_microwave_sandwich",
+    "start_microwave_bread"
+  ],
+  "insert_metal_item_toaster": [
+    "put_bread_toaster",
+    "put_phone_toaster"
+  ]
+}

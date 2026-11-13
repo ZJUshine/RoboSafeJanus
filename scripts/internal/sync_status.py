@@ -50,6 +50,7 @@ import subprocess
 import sys
 import threading
 import time
+import traceback
 from urllib.parse import parse_qs, quote, urlparse
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
@@ -1691,7 +1692,7 @@ def markdown(snapshot: dict, refresh: int) -> str:
     if code_states["collectable"]:
         lines += ["| 任务 | 在 JSON | 说明 |", "| --- | --- | --- |"]
         for item in code_states["collectable"]:
-            note = "可直接采集" if item["in_json"] else "不在 task/robosafejanus_tasks / robosafejanus_sim，需先补定义"
+            note = "可直接采集" if item["in_json"] else "不在 task/robosafejanus_tasks.json，需先加入并补组定义"
             lines.append(f"| `{item['name']}` | {'✅' if item['in_json'] else '⚠️ 否'} | {note} |")
     else:
         lines.append("无。")
@@ -1814,7 +1815,7 @@ def markdown(snapshot: dict, refresh: int) -> str:
         "",
         "> `HDF5` 列前半是本地 episode 数 / 总大小，后半是 ModelScope：`✅ 同步` 表示条数和大小都一致，`⚠️ 不一致` 表示远端存在但条数或大小不同。",
         "> LeRobot 列前半是本地导出，后半是 ModelScope 上的 LeRobot 数据集：`本地 ❌ 无` 未导出、`远端 ⬆️ 待上传` 未上传、`远端 ✅ 同步` 条数一致。",
-        "> `JSON 外`：本地有数据但不在任务定义（`task/robosafejanus_tasks` / `robosafejanus_sim`）中，上传脚本会跳过。",
+        "> `JSON 外`：本地有数据但不在任务合集（`task/robosafejanus_tasks.json`）中，上传脚本会跳过。",
         "> `✅ 就绪`：`task/RoboSafeJanus/{tasks,config,experts}/<task>` 三件齐全；`put_*` / `place_*` 别名视为同一任务。",
         "> LeRobot 路径：`data/RoboSafeJanus-Benchmark-Lerobot/<v30|v21>/<group>/<level>/<task>`。",
         "> `视频`：`<task>/<config>/preview_video/episode_*_<cam>.mp4` 的头部相机条数；用 `--serve` 打开看板可点 🎬 播放（缩略图缓存在 `<out_dir>/video_thumbs/`）。",
@@ -2939,7 +2940,7 @@ def nav_html(page: str) -> str:
 
 
 def task_catalog_page(generated_at: str, refresh: int) -> str:
-    """只展示任务定义(``task/robosafejanus_tasks`` + ``task/robosafejanus_sim``)的任务组、小任务与指令。
+    """只展示任务合集 ``task/robosafejanus_tasks.json`` 中的任务组、小任务(顺序同 JSON)与指令。
 
     ``same_as`` 共用的任务在引用它的组里也列出(标注归属组),但总数只按归属组算一次。
     """
@@ -3048,12 +3049,12 @@ def task_catalog_page(generated_at: str, refresh: int) -> str:
 <header class="top">
   <div>
     <h1>RoboSafeJanus 任务清单</h1>
-    <div class="meta">生成时间 {html.escape(generated_at)} · 来源 <code>task/robosafejanus_tasks</code> + <code>task/robosafejanus_sim</code>{f" · 每 {refresh} 秒刷新" if refresh else ""}</div>
+    <div class="meta">生成时间 {html.escape(generated_at)} · 来源 <code>task/robosafejanus_tasks.json</code>{f" · 每 {refresh} 秒刷新" if refresh else ""}</div>
   </div>
   {nav_html("tasks")}
 </header>
 <div class="cards">
-  <div class="card"><div class="label">任务组</div><div class="value">{len(groups)} groups</div><div class="sub">task/robosafejanus_tasks</div></div>
+  <div class="card"><div class="label">任务组</div><div class="value">{len(groups)} groups</div><div class="sub">task/robosafejanus_tasks.json</div></div>
   <div class="card"><div class="label">小任务</div><div class="value">{total} tasks</div><div class="sub">safe {counts["safe_tasks"]} · risky {counts["risky_tasks"]}</div></div>
   <div class="card"><div class="label">safe / risky</div><div class="value">{counts["safe_tasks"]} / {counts["risky_tasks"]}</div><div class="sub">每个任务的指令见下表</div></div>
 </div>
@@ -3273,7 +3274,7 @@ def html_page(
                 note = "可直接采集"
             else:
                 json_badge = '<span class="badge warn">⚠️ 不在 JSON</span>'
-                note = "需先加入 task/robosafejanus_tasks 与 robosafejanus_sim，否则按扁平目录落盘且不会上传"
+                note = "需先加入 task/robosafejanus_tasks.json（及对应组定义），否则按扁平目录落盘且不会上传"
             collectable_cells.append(
                 "<tr>"
                 f"<td><code>{html.escape(item['name'])}</code></td>"
@@ -4859,9 +4860,16 @@ def main() -> int:
               flush=True)
 
     while True:
-        rebuild()
         if not refresh and not server:
+            rebuild()
             return 0
+        try:
+            rebuild()
+        except Exception:  # noqa: BLE001 - 常驻看板:一次刷新失败(如任务定义改到一半)不退出,保留上一次的页面
+            print(f"[sync_status] {time.strftime('%Y-%m-%dT%H:%M:%S')} rebuild failed, keeping previous pages:",
+                  flush=True)
+            traceback.print_exc()
+            sys.stdout.flush()
         try:
             time.sleep(refresh if refresh else 3600)
         except KeyboardInterrupt:

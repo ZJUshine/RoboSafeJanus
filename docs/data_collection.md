@@ -13,7 +13,7 @@
 | 脚本专家(cuRobo) | `scripts/collect_data.sh` / `collect_data_parallel.sh` | `src/data_collect/expert_collection.py`   | 边执行边渲染相机,直接写 HDF5 | 否                                | `100000`  | `data/RoboSafeJanus-Benchmark/<group>/<level>/<task>/<config>/`        |
 | PICO 遥操作     | `scripts/teleop_collect.sh`                            | `src/data_collect/teleop_collection.py` | 只录关节指令(不渲染观测相机)   | **是**,`scripts/teleop_replay.sh` | `200000`  | `data/RoboSafeJanus-Benchmark/<group>/<level>/<task>/<config>_teleop/` |
 
-`<group>/<level>` 来自任务定义(`task/robosafejanus_tasks` + `task/robosafejanus_sim`,由 `benchmark_layout.load_tasks()` 合成):`<group>` 为任务所在组(如 `heat_X_microwave`),`<level>` 为 `safe_tasks` 或 `risky_tasks`,由 `src/data_collect/benchmark_layout.py` 计算(`python src/data_collect/benchmark_layout.py data/RoboSafeJanus-Benchmark <task>` 打印任务目录)。不在 JSON 中的任务、以及 `--save_dir` 不是 `RoboSafeJanus-Benchmark` 根目录时(如 `_shards/<task>/w<k>`、`/tmp/smoke`),仍是 `<save_dir>/<task>/`。
+`<group>/<level>` 来自任务定义(入口 `task/robosafejanus_tasks.json` 列出组和子任务,内容在 `task/robosafejanus_tasks/` + `task/robosafejanus_sim/`,由 `benchmark_layout.load_tasks()` 合成):`<group>` 为任务所在组(如 `heat_X_microwave`),`<level>` 为 `safe_tasks` 或 `risky_tasks`,由 `src/data_collect/benchmark_layout.py` 计算(`python src/data_collect/benchmark_layout.py data/RoboSafeJanus-Benchmark <task>` 打印任务目录)。不在 JSON 中的任务、以及 `--save_dir` 不是 `RoboSafeJanus-Benchmark` 根目录时(如 `_shards/<task>/w<k>`、`/tmp/smoke`),仍是 `<save_dir>/<task>/`。
 
 ```
 脚本专家:   collect_data.sh ──► expert_collection.py ──► data/RoboSafeJanus-Benchmark/<group>/<level>/<task>/<config>/{data,preview_video,layout}
