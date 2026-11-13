@@ -39,6 +39,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shlex
 import sys
 from typing import Any
 
@@ -73,6 +74,16 @@ OBJECTS_DIR = ROOT_DIR / "Assets" / "Object" / BENCHMARK
 EVAL_LAYOUT_DIR = ROOT_DIR / "Assets" / "Eval_Layout" / BENCHMARK
 INVENTORY_PY = ROOT_DIR / "scripts" / "internal" / "task_inventory.py"
 ASSET_SECTIONS = ("Rigid", "Articulation", "Geometry", "Fluid", "Garment", "Clutter", "Dynamic")
+# 资产来源(task/robosafejanus_assets.json,{组: {label: "hf download ..."}}):只允许 RoboDojo 官方和 SimReady,
+# 与 ext_assets/integrate/simready_assets.py 一致
+ASSETS_JSON = ROOT_DIR / "task" / "robosafejanus_assets.json"
+ROBODOJO_REPO = "RoboDojo-Benchmark/RoboDojo"
+SIMREADY_REPOS = (
+    "nvidia/simready-assets",
+    "PalatialSim/palatial-nv-asset-library",
+    "ForgeCAD/simready-assets",
+    "LGElectronics/simready-assets",
+)
 # 成功判定参数里引用 label 的键
 LABEL_ARGS = ("label", "label_A", "label_B", "label_C")
 LEROBOT_VERSIONS = ("v21", "v30")
@@ -195,6 +206,7 @@ def load_json_tasks(path=None) -> dict[str, dict[str, Any]]:
                     "instruction": spec.get("instruction"),
                     "candidates": list(candidates.get(name, ())),
                     "raw_assets": spec.get("assets", {}),
+                    "S1": spec.get("S1", {}),
                     "assets": {label: parse_asset(a["asset"]) for label, a in spec.get("assets", {}).items()},
                     "success": spec.get("success", {}),
                 }
@@ -319,12 +331,47 @@ class TaskSource:
 # ---------------------------------------------------------------------------
 
 
+def asset_source_errors(group: str, label: str, path: str, cmd: str | None) -> list[str]:
+    """``robosafejanus_assets.json`` 中该组 ``label`` 的下载命令是否存在、来源是否允许、与 sim 资产路径是否对应。"""
+    if cmd is None:
+        return [f"资产 {label}: {ASSETS_JSON.name} 的 {group} 里没有来源"]
+    args = shlex.split(cmd)
+    if args[:2] != ["hf", "download"] or len(args) < 3 or "--include" not in args:
+        return [f"资产 {label}: 来源不是 hf download ... --include ... 命令: {cmd}"]
+    repo, include = args[2], args[args.index("--include") + 1]
+    if repo == ROBODOJO_REPO:
+        expected = include.removeprefix(f"Assets/Object/{BENCHMARK}/").removesuffix("/*")
+        if path != expected:
+            return [f"资产 {label}: sim 路径 {path} 与 RoboDojo 官方来源 {include} 不一致"]
+    elif repo in SIMREADY_REPOS:
+        # _sNNN:缩放变体(scaled_variant.py);_thinz:换轴变体(reoriented_variant.py);
+        # _thinz_wNNN:换轴后宽度再缩放 NNN/100(reoriented_variant.py --stretch 1,0.NN,1 --suffix thinz_wNNN)
+        variant = r"(_s\d{3}|_thinz(_w\d{3})?)*"
+        if not re.fullmatch(rf"(Rigid|Articulation)/SimReady_{re.escape(label)}{variant}/\d{{5}}", path):
+            want = f"<Rigid|Articulation>/SimReady_{label}[_sNNN][_thinz[_wNNN]]/<编号>"
+            return [f"资产 {label}: SimReady 来源应挂在 {want},sim 写的是 {path}"]
+    else:
+        return [f"资产 {label}: 来源 {repo} 既不是 RoboDojo 官方({ROBODOJO_REPO})也不是 SimReady"]
+    return []
+
+
 def check_json(report: Report, tasks: dict) -> None:
     sec = "json"
     try:
         task_groups()
     except ValueError as e:
         report.error(sec, str(e))
+    with open(ASSETS_JSON, encoding="utf-8") as fp:
+        sources = json.load(fp)
+    for name, spec in tasks.items():
+        group_sources = sources.get(spec["group"], {})
+        # 主资产 + S1.x 新增的资产(空字符串 = 还没选模型,跳过)
+        used = [(label, asset["asset"]) for label, asset in spec["raw_assets"].items()]
+        for variant in (spec.get("S1") or {}).values():
+            used += [(label, path) for label, path in ((variant or {}).get("assets") or {}).items() if path]
+        for label, path in dict.fromkeys(used):
+            for msg in asset_source_errors(spec["group"], label, path, group_sources.get(label)):
+                report.error(sec, msg, name)
     for name, spec in tasks.items():
         # 组按核心风险命名(如 heat_sealed_food_microwave、heat_metal_item_microwave),与代码里的组模块
         # (heat_X_microwave.py)无关:几个风险组可以共用一个组模块。组名只要求是小写 snake_case
