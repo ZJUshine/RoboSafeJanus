@@ -244,8 +244,8 @@ class LayoutGenerator:
     def _place_on_support(self, group, cat, idx, label, meta, records, mirror=False):
         """把 ``label`` 放到某个已采样固定件的支撑面上,例如把面包放进 bread_shelf 的槽位。
 
-        与场景加载器的做法一致:物体的 ``qpos`` 在支撑面坐标系中生效,``xlim`` / ``ylim``
-        (取第一个值)是该坐标系内的偏移,物体底面贴在支撑面上。``mirror`` 为真时 y 偏移取反(``common.mirror``)。
+        与场景加载器的做法一致:物体的 ``qpos`` 在支撑面坐标系中生效,``xlim`` / ``ylim`` / ``zlim``
+        (取第一个值)是该坐标系内的偏移,物体底面贴在支撑面上(``zlim`` 不给时为 0)。``mirror`` 为真时 y 偏移取反(``common.mirror``)。
         """
         common = group.get("common", {})
         parent_label, tag = str(common["relative_plane"]).split("/", 1)
@@ -260,7 +260,9 @@ class LayoutGenerator:
         verts = np.asarray(meta["geometry"]["aligned_bbox"]["vertices"], dtype=float) * scale
         rest = -float((verts @ t3d.quaternions.quat2mat(qpos).T)[:, 2].min())
         y = float(np.ravel(common.get("ylim", [0.0]))[0])
-        offset = [float(np.ravel(common.get("xlim", [0.0]))[0]), -y if mirror else y, rest]
+        # ``zlim``(取第一个值)沿支撑面法向再偏移:原点不在中面的薄物体(手机原点在背面)插进槽里时用来居中
+        z = float(np.ravel(common.get("zlim", [0.0]))[0])
+        offset = [float(np.ravel(common.get("xlim", [0.0]))[0]), -y if mirror else y, rest + z]
         R_parent = t3d.quaternions.quat2mat(parent_rec["default_ori"])
         local = center[:3] + t3d.quaternions.quat2mat(center[3:]) @ np.asarray(offset)
         pos = np.asarray(parent_rec["default_pos"]) + R_parent @ local
