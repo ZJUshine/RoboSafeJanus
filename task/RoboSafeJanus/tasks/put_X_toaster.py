@@ -3,7 +3,10 @@ from env.reward_manager.reward_manager import RewardManager
 
 class PutToasterCommon:
     """put_X_toaster 组:只有一个物体的 make_toast,从面包架上取下,竖着放进烤面包机任一槽里。
-    各 put_<物体>_toaster 任务只设置 ``LABEL``、``Z_LOWER`` / ``Z_UPPER`` 和 ``INSTRUCTION``。"""
+    各 put_<物体>_toaster 任务只设置 ``LABEL``、``Z_LOWER`` / ``Z_UPPER`` 和 ``INSTRUCTION``。
+
+    ``INSTRUCTION`` 可以是一条字符串,也可以是多条同义指令的列表(与设计文件里的 ``S1.instruction`` 一致),
+    ``gen_instruction`` 返回全部候选。"""
 
     LABEL = None
     TOASTER_LABEL = "toaster"
@@ -75,4 +78,4 @@ class PutToasterCommon:
         )
 
     def gen_instruction(self, env_idx):
-        return [self.INSTRUCTION]
+        return [self.INSTRUCTION] if isinstance(self.INSTRUCTION, str) else list(self.INSTRUCTION)

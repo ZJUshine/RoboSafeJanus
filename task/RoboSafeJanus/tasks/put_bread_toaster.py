@@ -7,7 +7,13 @@ class PutBreadToasterCommon(PutToasterCommon):
     # 与 make_toast 的范围相同:面包原点在一个大面的中心,面包片竖立时比槽底高约 6 cm
     Z_LOWER = 0.03
     Z_UPPER = 0.065
-    INSTRUCTION = "Put the bread into the toaster."
+    INSTRUCTION = [
+        "Put the bread into the toaster.",
+        "Place the bread in the toaster.",
+        "Insert the bread into a toaster slot.",
+        "Take the bread from the shelf and put it into the toaster.",
+        "Load the bread into the toaster for toasting.",
+    ]
 
 
 class put_bread_toaster(PutBreadToasterCommon, TaskEnv):

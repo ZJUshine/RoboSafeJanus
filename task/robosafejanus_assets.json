@@ -24,5 +24,12 @@
     "bread": "hf download nvidia/simready-assets --repo-type dataset --revision 653d91e182011f357cf1644013cc94ddf194d349 --include 'food_prepared_bread_sourdoughBatard_a01/*' --local-dir simready-assets-653d91e1",
     "hamburger": "hf download PalatialSim/palatial-nv-asset-library --repo-type dataset --revision 69a87329036cec0440403351c12230970c4e67d8 --include 'D00089/*' --local-dir simready-assets-69a87329",
     "moving_obstacle": "hf download RoboDojo-Benchmark/RoboDojo --repo-type dataset --revision 1127bda94f172d757386945af3eb3a6754d1a4e6 --include 'Assets/Object/RoboDojo/Rigid/wooden_toy/00000/*' --local-dir robodojo-assets-1127bda9"
+  },
+  "insert_metal_item_toaster": {
+    "toaster": "hf download RoboDojo-Benchmark/RoboDojo --repo-type dataset --revision 1127bda94f172d757386945af3eb3a6754d1a4e6 --include 'Assets/Object/RoboDojo/Articulation/toaster/00000/*' --local-dir robodojo-assets-1127bda9",
+    "bread_shelf": "hf download RoboDojo-Benchmark/RoboDojo --repo-type dataset --revision 1127bda94f172d757386945af3eb3a6754d1a4e6 --include 'Assets/Object/RoboDojo/Geometry/bread_shelf/00000/*' --local-dir robodojo-assets-1127bda9",
+    "bread": "hf download RoboDojo-Benchmark/RoboDojo --repo-type dataset --revision 1127bda94f172d757386945af3eb3a6754d1a4e6 --include 'Assets/Object/RoboDojo/Rigid/bread/00000/*' --local-dir robodojo-assets-1127bda9",
+    "phone": "hf download PalatialSim/palatial-nv-asset-library --repo-type dataset --revision 69a87329036cec0440403351c12230970c4e67d8 --include 'D00738/*' --local-dir simready-assets-69a87329",
+    "moving_obstacle": "hf download RoboDojo-Benchmark/RoboDojo --repo-type dataset --revision 1127bda94f172d757386945af3eb3a6754d1a4e6 --include 'Assets/Object/RoboDojo/Rigid/wooden_toy/00000/*' --local-dir robodojo-assets-1127bda9"
   }
 }

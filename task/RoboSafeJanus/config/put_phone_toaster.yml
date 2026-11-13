@@ -52,9 +52,12 @@ Rigid:
 
     category:
       -
-        # RoboTwin 2.0 的 077_phone/base1(14.8 x 6.2 x 1.2 cm),碰撞体换成单个凸包(ext_assets/integrate/rigid_hull_variant.py)
-        name: "RoboTwin_077_phone_hull"
-        index: [1]
+        # SimReady 手机 D00738(15.7 x 7.9 x 1.2 cm,0.22 kg)转成厚度沿 z 后宽度缩到 0.8(6.3 cm):原宽 8 cm 时下端两角
+        # 卡进面包架两侧底框(内沿间距 7.1 cm),手机悬在桌面以上 1 cm 动不了,抬起时从指间滑掉;缩到和 RoboTwin 手机
+        # 同宽后从底框中间落到桌面上(ext_assets/integrate/reoriented_variant.py Rigid/SimReady_phone/00000 x
+        # --stretch 1,0.8,1 --suffix thinz_w080)
+        name: "SimReady_phone_thinz_w080"
+        index: [0]
 
     select_mode:
       nums: 1

@@ -2,9 +2,8 @@
 
 from task.RoboDojo.experts import put_X_toaster as toast
 
-# 手机的碰撞体(1.41 cm)比包围盒(外观,1.15 cm)厚:合到包围盒厚度就已经压进 2.6 mm,再多压时手指陷进碰撞体,
-# 抬起时手指沿手机滑上去;手中手机的碰撞球也按碰撞体的半厚度(7.1 mm)取
-SPEC = toast.Spec("phone", squeeze=0.0, held_r=0.0072)
+# SimReady 手机(SimReady_phone_thinz_w080,0.22 kg):默认合拢量(每指约 4.6 N)抬起时从指间滑掉,合到比手机薄 8 mm
+SPEC = toast.Spec("phone", squeeze=0.008)
 
 
 def play_once(env):
