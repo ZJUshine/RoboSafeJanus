@@ -6,8 +6,8 @@
 #
 # 两步:先在当前 python(RoboDojo 环境,需要 yaml)里从 task/RoboDojo/config/<task>.yml 列出 Rigid 段的
 # <category>/<index>,再用 GraspGenX 自己的 venv(third_party/GraspGenX/.venv,可用 GRASPGENX_PYTHON 覆盖)
-# 运行 grasp_gen.py。已有缓存的资产会跳过(缺可视化图时只补画图);输出在
-# data/grasp_pose/<gripper>/<category>/<index>.npz,每个物体另有同名 .png 可视化。
+# 运行 grasp_gen.py。已有缓存的资产会跳过;输出在
+# data/grasp_pose/<gripper>/<category>/<index>.npz(交互查看用 scripts/view_grasps.sh)。
 set -euo pipefail
 
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

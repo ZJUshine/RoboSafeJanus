@@ -59,6 +59,14 @@ def _list_assets(cache_root):
     return sorted(items, key=str.lower)
 
 
+def _mesh_path(obj_type, asset):
+    """资产在 ``Assets/Object/<obj_type>/<category>/<index:05d>`` 下的网格(usdz 优先)。"""
+    category, index = asset.split("/")
+    obj_dir = gg.OBJECTS_ROOT / obj_type / category / f"{int(index):05d}"
+    usd = obj_dir / "object.usdz"
+    return usd if usd.exists() else obj_dir / "object.usd"
+
+
 def main():
     args = _parse()
     import trimesh
@@ -94,19 +102,28 @@ def main():
         assets = [a for a in wanted if a in assets] or wanted
     if not assets:
         raise SystemExit(f"[view_grasps] no grasp caches under {caches['new']}")
+    # 缓存可能来自别的机器 / 旧的资产列表:本地没有网格的物体跳过,免得启动就崩
+    with_mesh = [a for a in assets if _mesh_path(args.obj_type, a).exists()]
+    if len(with_mesh) < len(assets):
+        skipped = [a for a in assets if a not in with_mesh]
+        print(
+            f"[view_grasps] skip {len(skipped)} cached asset(s) with no mesh under "
+            f"{gg.OBJECTS_ROOT / args.obj_type}: {','.join(skipped)}"
+        )
+    if not with_mesh:
+        raise SystemExit(
+            f"[view_grasps] none of the selected assets has a mesh under {gg.OBJECTS_ROOT / args.obj_type} "
+            "(sync Assets/ or pick another --objects)"
+        )
+    assets = with_mesh
 
     meshes = {}  # asset -> (trimesh, table_z)
 
     def load_mesh(asset):
         if asset not in meshes:
-            category, index = asset.split("/")
-            obj_dir = gg.OBJECTS_ROOT / args.obj_type / category / f"{int(index):05d}"
-            usd = obj_dir / "object.usdz"
-            if not usd.exists():
-                usd = obj_dir / "object.usd"
             import scene_synthesizer as synth
 
-            mesh = synth.Asset(str(usd)).mesh()
+            mesh = synth.Asset(str(_mesh_path(args.obj_type, asset))).mesh()
             meshes[asset] = (mesh, float(mesh.bounds[0][2]))
         return meshes[asset]
 

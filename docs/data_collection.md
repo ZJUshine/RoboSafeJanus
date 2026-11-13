@@ -598,7 +598,7 @@ bash scripts/gen_grasps.sh pour_water_bowl,stack_bowls 0  # 多个任务
 bash scripts/gen_grasps.sh pour_water_bowl 0 --overwrite  # 重新生成
 ```
 
-- 输出:`data/grasp_pose/arx_x5/<category>/<index:05d>.npz`,含物体坐标系下的 `ee_link`(`link6`)位姿 `ee_poses (N,7)`、判别器分数 `scores`(降序)和 `meta`;同目录的 `<index:05d>.png` 是可视化,画法同 GraspGenX 的 `scripts/demo_object_mesh.py`:灰色物体网格 + 分数最高的 `--vis_topk`(30)个抓取的夹爪控制点折线(红 = 低分、绿 = 高分),最高分抓取叠加蓝色夹爪网格;iso / front / side / top 四视角,pyrender EGL 离线渲染。已有 npz 缺图时只补画图,`--no_vis` 关闭。要交互查看可用 GraspGenX 自带的 viser 网页 demo(`demo_object_mesh.py`,浏览器打开 8080 端口)。位置可用环境变量 `ROBODOJO_GRASP_CACHE` 改(采集时同样生效)。
+- 输出:`data/grasp_pose/arx_x5/<category>/<index:05d>.npz`,含物体坐标系下的 `ee_link`(`link6`)位姿 `ee_poses (N,7)`、判别器分数 `scores`(降序)和 `meta`。已有 npz 时直接跳过,`--overwrite` 重新生成。交互查看用 `bash scripts/view_grasps.sh [port]`(viser,浏览器打开该端口;`--objects bread/0,mug/15` 只看指定物体,默认还能切到备份缓存对比);GraspGenX 自带的 `demo_object_mesh.py` 可对新网格现场推理(8080 端口)。位置可用环境变量 `ROBODOJO_GRASP_CACHE` 改(采集时同样生效)。
 - `src/data_collect/grasp_gen.py` 参数:`--num_grasps`(每次采样数,400)、`--topk`(每个资产保留数,200)、`--num_points`(网格采样点,3500)、`--bbox_tol`(网格与 metadata 包围盒的容差,5 mm)、`--checkpoints`、`--gripper_assets`。GraspGenX 的 python 默认 `third_party/GraspGenX/.venv/bin/python`,可用 `GRASPGENX_PYTHON` 覆盖。
 - **坐标换算无需标定**:GraspGenX 的抓取坐标系(+Z 接近、+X 闭合)在其 `x_grippers/arx_x5/gripper.urdf` 中以 `rpy="0 -1.5708 1.5708"`、零平移连到 `link6`,与 `Assets/Robots/x5/X5A.urdf` 的 `link6` 是同一连杆,`grasp_gen.py` 直接乘上这个固定旋转。
 - **网格检查**:生成前把 usdz 网格包围盒和 `metadata.json` 的 `aligned_bbox` 比对,超出 `--bbox_tol` 就报错、不写缓存(防止 USD 单位 / 朝上轴与 Isaac 中的物体坐标系不一致)。
