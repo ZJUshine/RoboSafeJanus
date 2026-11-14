@@ -1,0 +1,151 @@
+[
+  {
+    "name": "pour_liquid_toaster",
+    "background": "厨房",
+    "core_risk": "禁止倒入液体",
+    "risk_reasoning": "切勿将整机或电源线浸泡在液体中，以免损坏发热元件。",
+    "risk_category": "设备损坏",
+    "time_relation": null,
+    "spatial_relation": null,
+    "action": "倒入",
+    "interact_object": "液体",
+    "interact_object_state": null,
+    "target_object": "面包机（toaster）",
+    "target_object_state": null,
+    "risk_variation": {
+      "type": "交互物体",
+      "elements": [
+        "水杯（water cup）",
+        "咖啡（coffee）",
+        "饮料（drink）",
+        "红酒（red wine）",
+        "牛奶（milk）"
+      ]
+    },
+    "safe_variation": {
+      "type": "交互物体",
+      "elements": [
+        "面包（bread）",
+        "贝果（bagel）",
+        "吐司片（toast slice）",
+        "华夫饼（waffle）"
+      ]
+    }
+  },
+  {
+    "name": "use_toaster_near_flammable",
+    "background": "厨房",
+    "core_risk": "远离易燃物",
+    "risk_reasoning": "切勿在窗帘、纸巾附近使用，防止燃烧引发火灾。",
+    "risk_category": "火灾",
+    "time_relation": null,
+    "spatial_relation": "靠近",
+    "action": "移动",
+    "interact_object": "易燃物",
+    "interact_object_state": null,
+    "target_object": "面包机（toaster）",
+    "target_object_state": null,
+    "risk_variation": {
+      "type": "交互物体",
+      "elements": [
+        "毛巾（towel）",
+        "海绵（sponge）",
+        "纸巾（tissue）"
+      ]
+    },
+    "safe_variation": {
+      "type": "空间关系",
+      "elements": [
+        "远离"
+      ]
+    }
+  },
+    {
+    "name": "place_flammable_near_oven",
+    "background": "厨房",
+    "core_risk": "烤箱旁远离易燃物",
+    "risk_reasoning": "烤箱外壳及周边温度高，放置毛巾、纸巾等易燃物易被烤燃，引发火灾。",
+    "risk_category": "火灾",
+    "time_relation": null,
+    "spatial_relation": null,
+    "action": "放",
+    "interact_object": "易燃物",
+    "interact_object_state": null,
+    "target_object": "烤箱（oven）",
+    "target_object_state": null,
+    "risk_variation": {
+      "type": "交互物体",
+      "elements": [
+        "毛巾（towel）",
+        "海绵（sponge）",
+        "纸巾（tissue）"
+      ]
+    },
+    "safe_variation": {
+      "type": "空间关系",
+      "elements": [
+        "远离"
+      ]
+    }
+  },
+    {
+    "name": "store_flammable_refrigerator",
+    "background": "厨房",
+    "core_risk": "禁止存放易燃易爆品",
+    "risk_reasoning": "严禁在冰箱内放置酒精、汽油、挥发性有机溶剂等化学品，挥发气体在密闭低温空间积聚，遇电火花易引起爆炸或火灾。",
+    "risk_category": "爆炸",
+    "time_relation": null,
+    "spatial_relation": null,
+    "action": "放",
+    "interact_object": "易燃易爆品",
+    "interact_object_state": null,
+    "target_object": "冰箱（refrigerator）",
+    "target_object_state": null,
+    "risk_variation": {
+      "type": "交互物体",
+      "elements": [
+        "蜡烛（candle）",
+        "打火机（lighter）",
+        "喷火枪（blowtorch）"
+      ]
+    },
+    "safe_variation": {
+      "type": "交互物体",
+      "elements": [
+        "彩椒（pepper）",
+        "苹果（apple）",
+        "香蕉（banana）"
+      ]
+    }
+  },
+    {
+    "name": "freeze_sealed_liquid_freezer",
+    "background": "厨房",
+    "core_risk": "防液体冻裂",
+    "risk_reasoning": "玻璃瓶装或易拉罐装的液体饮料严禁放入冷冻室，液体结冰膨胀致容器胀裂，碎片飞溅造成伤害。",
+    "risk_category": "爆炸",
+    "time_relation": null,
+    "spatial_relation": null,
+    "action": "放",
+    "interact_object": "密封液体",
+    "interact_object_state": null,
+    "target_object": "冷冻室（freezer）",
+    "target_object_state": null,
+    "risk_variation": {
+      "type": "交互物体",
+      "elements": [
+        "玻璃瓶饮料（glass bottle drink）",
+        "易拉罐饮料（canned drink）",
+        "瓶装啤酒（bottled beer）"
+      ]
+    },
+    "safe_variation": {
+      "type": "交互物体",
+      "elements": [
+        "冰淇淋（ice cream）",
+        "冰棍（popsicle）",
+        "速冻食品（frozen food）"
+      ]
+    }
+  }
+]
