@@ -1,0 +1,52 @@
+Articulation:
+  -
+    common:
+      # 正面（门一侧）朝向机器人（-y）。SimReady 微波炉（ext_assets SimReady D00516，原尺寸）：body 0.51 x
+      # 0.37 x 0.30 m，铰链在左边缘，关节 0 度就是门开 90 度（门 link 已经在 -y 侧立着），open_door() 把它置到
+      # 下限 0 度；门打开后立在 x ~= center - 0.27、y ~= center - 0.56 .. center - 0.16。桌上相机支架底板占
+      # y -0.515..-0.425、x +-0.15，所以中心 y 要 >= 0.14；中心还要在左臂导轨（x ~= -0.3，+-0.09）右侧。
+      # 位置定死（与 heat_sandwich_microwave 一致）：中心 (0.05, 0.16)、朝 -y。
+      xlim: [0.05, 0.05]
+      ylim: [0.16, 0.16]
+      rotate_rand: False
+      # 资产的 bbox 把开着的门（伸到 y -0.56）也算进去，占地圆会大到手放不下物体；这里显式给 body 的占地尺寸。
+      footprint: [0.508, 0.367]
+      margin: -0.05
+      relative_plane: "Table"
+
+    category:
+      -
+        name: "SimReady_microwave"
+        index: [0]
+
+    select_mode:
+      nums: [1]
+      mode: "unique"
+      label: ["microwave"]
+
+Rigid:
+  -
+    common:
+      # 位于微波炉前方右臂一侧，在打开的门扫过的区域之外。
+      # SimReady 可乐罐（ext_assets food_beverage_can_h01，原尺寸 6.2 x 6.2 x 12.1 cm）：直立放桌面上，
+      # 自上而下抓取（罐径 6.2 cm 在 X5 夹爪 7.5 cm 上限内）。半径 3.1 cm，y 下限 -0.35 时远端 -0.381，
+      # 距相机支架底板（y -0.515..-0.425）仍有 4 cm 以上；x 范围沿用 heat_sandwich_microwave。
+      xlim: [0.10, 0.30]
+      ylim: [-0.35, -0.22]
+      rotate_rand: True
+      rotate_deg: 180
+      relative_plane: "Table"
+      physics:
+        mass: 0.1  # 资产标注 0.04 kg（空罐）；设得足够轻以便夹持
+        static_friction: 1.0
+        dynamic_friction: 1.5
+
+    category:
+      -
+        name: "SimReady_canned_cola"
+        index: [0]
+
+    select_mode:
+      nums: [1]
+      mode: "unique"
+      label: ["canned_cola"]
