@@ -38,6 +38,7 @@ Rigid:
       physics:
         mass: 0.054  # SimReady_sandwich 0.60 缩放变体（7.4 x 6.9 x 4.4 cm），质量按体积缩放
         static_friction: 1.0
+        dynamic_friction: 1.5
 
     category:
       -

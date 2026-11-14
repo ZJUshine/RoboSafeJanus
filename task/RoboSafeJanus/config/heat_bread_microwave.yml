@@ -40,6 +40,7 @@ Rigid:
       physics:
         mass: 0.13
         static_friction: 1.0
+        dynamic_friction: 1.5
 
     category:
       -

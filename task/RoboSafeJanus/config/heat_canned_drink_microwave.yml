@@ -38,6 +38,7 @@ Rigid:
       physics:
         mass: 0.12  # 资产没有质量；设得足够轻以便夹持
         static_friction: 1.0
+        dynamic_friction: 1.5
 
     category:
       -

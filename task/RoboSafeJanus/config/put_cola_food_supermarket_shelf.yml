@@ -40,7 +40,9 @@ Rigid:
       rotate_rand: True
       rotate_deg: [-20, 20]
       physics:
+        mass: 0.5
         static_friction: 1.0
+        dynamic_friction: 1.5
       relative_plane: "Table"
 
     category:
@@ -63,7 +65,9 @@ Rigid:
       relative_plane: "shelf/shelf/bottom"
       mirror: "zones"
       physics:
+        mass: 0.5
         static_friction: 1.0
+        dynamic_friction: 1.5
 
     category:
       -
@@ -85,7 +89,9 @@ Rigid:
       relative_plane: "shelf/shelf/bottom"
       mirror: "zones"
       physics:
+        mass: 0.5
         static_friction: 1.0
+        dynamic_friction: 1.5
 
     category:
       -

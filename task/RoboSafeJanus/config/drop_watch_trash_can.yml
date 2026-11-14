@@ -12,6 +12,10 @@ Rigid:
       rotate_deg: 180
       qpos: [0.7084, -0.0868, 0.695, -0.087]  # 平放(metadata active.place.side);资产默认姿态是表带环立着,放下就倒(布局稳定性检查不过)
       relative_plane: "Table"
+      physics:
+        mass: 0.045
+        static_friction: 1.0
+        dynamic_friction: 1.5
 
     category:
       -

@@ -38,6 +38,7 @@ Rigid:
       physics:
         mass: 0.06  # 按真实鸡蛋设置（资产标注为 0.3 kg）；过重的鸡蛋会从夹爪中挤出
         static_friction: 1.0
+        dynamic_friction: 1.5
 
     category:
       -

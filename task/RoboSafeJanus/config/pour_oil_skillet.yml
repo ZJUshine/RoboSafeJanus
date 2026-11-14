@@ -11,6 +11,10 @@ Rigid:
       relative_plane: "Table"
       qpos: [1, 0, 0, 0]
       margin: 0.01
+      physics:
+        mass: 0.15
+        static_friction: 1.0
+        dynamic_friction: 1.5
 
     category:
       -
@@ -35,6 +39,8 @@ Rigid:
       # RoboTwin 的平底锅 0.41 kg,倒油时油流离锅很近;按真实铸铁平底锅取 1 kg,避免被推走
       physics:
         mass: 1.0
+        static_friction: 1.0
+        dynamic_friction: 1.5
 
     category:
       -

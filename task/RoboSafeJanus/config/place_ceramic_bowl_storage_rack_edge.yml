@@ -15,6 +15,10 @@ Rigid:
       # 布局生成器按外接圆让物体彼此分开(置物架 r 0.225 m);缩小它,碗才能放在置物架前方右臂够得到的地方
       margin: -0.05
       relative_plane: "Table"
+      physics:
+        mass: 0.5
+        static_friction: 1.0
+        dynamic_friction: 1.5
 
     category:
       -
@@ -34,6 +38,10 @@ Rigid:
       rotate_rand: True
       rotate_deg: 180
       relative_plane: "Table"
+      physics:
+        mass: 0.5
+        static_friction: 1.0
+        dynamic_friction: 1.5
 
     category:
       -

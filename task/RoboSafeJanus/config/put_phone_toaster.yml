@@ -49,6 +49,10 @@ Rigid:
       relative_plane: "bread_shelf/bread_shelf/1"
       check_mode: "none"
       place_tag: "up"
+      physics:
+        mass: 0.22
+        static_friction: 1.0
+        dynamic_friction: 1.5
 
     category:
       -

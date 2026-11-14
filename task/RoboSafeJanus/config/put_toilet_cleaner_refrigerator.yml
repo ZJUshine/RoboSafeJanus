@@ -39,7 +39,9 @@ Rigid:
       rotate_rand: True
       rotate_deg: [-25, 5]
       physics:
+        mass: 0.5
         static_friction: 1.0
+        dynamic_friction: 1.5
       relative_plane: "Table"
 
     category:

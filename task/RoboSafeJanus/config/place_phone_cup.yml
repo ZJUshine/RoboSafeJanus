@@ -12,6 +12,10 @@ Rigid:
       rotate_rand: True
       rotate_deg: 180
       relative_plane: "Table"
+      physics:
+        mass: 0.5
+        static_friction: 1.0
+        dynamic_friction: 1.5
 
     category:
       -
@@ -31,6 +35,10 @@ Rigid:
       # 手机长边(资产 x)沿世界 y
       rotate_deg: [75, 105]
       relative_plane: "Table"
+      physics:
+        mass: 0.5
+        static_friction: 1.0
+        dynamic_friction: 1.5
       # 手机用资产自带的 31 g:放进装水的杯子后浮在水(粒子)面上、斜靠着杯沿约 33 度(任务不要求竖直);按真实手机取
       # 0.18 kg 时转腕途中手机从指尖滑掉,夹紧 2 cm、静摩擦 1.5 也不行(data/debug/place_phone/w3、w6)
 

@@ -10,6 +10,10 @@ Rigid:
       rotate_rand: True
       rotate_deg: [-100, -80]
       relative_plane: "Table"
+      physics:
+        mass: 0.5
+        static_friction: 1.0
+        dynamic_friction: 1.5
 
     category:
       -
@@ -29,6 +33,10 @@ Rigid:
       # 手机长边(资产 x)沿世界 y
       rotate_deg: [75, 105]
       relative_plane: "Table"
+      physics:
+        mass: 0.5
+        static_friction: 1.0
+        dynamic_friction: 1.5
 
     category:
       -

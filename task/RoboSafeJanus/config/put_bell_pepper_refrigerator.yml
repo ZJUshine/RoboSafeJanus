@@ -36,7 +36,9 @@ Rigid:
       rotate_deg: 180
       relative_plane: "Table"
       physics:
+        mass: 0.18
         static_friction: 1.0  # 彩椒表面圆滑、重 0.18 kg,自上而下抓时抬起就滑掉
+        dynamic_friction: 1.5
 
     category:
       -

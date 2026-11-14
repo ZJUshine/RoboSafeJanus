@@ -9,6 +9,10 @@ Rigid:
       relative_plane: "Table"
       qpos: [1, 0, 0, 0]
       margin: 0.02
+      physics:
+        mass: 0.15
+        static_friction: 1.0
+        dynamic_friction: 1.5
 
     category:
       -
@@ -32,6 +36,8 @@ Rigid:
       # RoboTwin 的锅没有质量信息,转换时默认 0.1 kg,倾倒时手指 / 瓶子一碰就推走或打翻;按真实小奶锅取 1 kg
       physics:
         mass: 1.0
+        static_friction: 1.0
+        dynamic_friction: 1.5
 
     category:
       -

@@ -13,6 +13,8 @@ Rigid:
       relative_plane: "Table"
       physics:
         mass: 0.05  # 资产自带 0.42 kg(缩放后 0.21 kg),按空易拉罐取
+        static_friction: 1.0
+        dynamic_friction: 1.5
 
     category:
       -

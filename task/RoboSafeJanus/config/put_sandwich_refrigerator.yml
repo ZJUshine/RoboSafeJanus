@@ -38,6 +38,7 @@ Rigid:
       physics:
         mass: 0.08  # 同 heat_sandwich_microwave:资产没有质量(按碰撞体积算太重),设轻一点才夹得住
         static_friction: 1.0
+        dynamic_friction: 1.5
       relative_plane: "Table"
 
     category:

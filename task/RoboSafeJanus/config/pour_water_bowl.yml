@@ -10,6 +10,10 @@ Rigid:
       relative_plane: "Table"
       qpos: [1, 0, 0, 0]
       margin: 0.03
+      physics:
+        mass: 0.5
+        static_friction: 1.0
+        dynamic_friction: 1.5
 
     category:
       -
@@ -30,6 +34,10 @@ Rigid:
       relative_plane: "Table"
       qpos: [1, 0, 0, 0]
       margin: 0.02
+      physics:
+        mass: 0.25
+        static_friction: 1.0
+        dynamic_friction: 1.5
 
     category:
       -
