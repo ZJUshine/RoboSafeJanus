@@ -101,6 +101,12 @@ if args.list:
 local_dir = os.path.abspath(args.local_dir)
 os.makedirs(local_dir, exist_ok=True)
 paths = [path for items in runs.values() for path, _ in items]
+# 远端换了文件(比如训练机重新上传了完整的 .wandb)时本地旧文件大小对不上:先删掉,下面重新下载
+for path, size in (entry for items in runs.values() for entry in items):
+    local = os.path.join(local_dir, path)
+    if os.path.isfile(local) and size and os.path.getsize(local) != size:
+        print(f"[download_wandb] remote changed, re-download: {path} ({os.path.getsize(local)} -> {size} bytes)")
+        os.remove(local)
 api.download_repo(
     args.repo_id,
     "model",
@@ -109,7 +115,9 @@ api.download_repo(
     allow_patterns=paths,
     max_workers=args.num_workers,
 )
-missing = [path for path in paths if not os.path.isfile(os.path.join(local_dir, path))]
+sizes = {path: size for items in runs.values() for path, size in items}
+missing = [path for path in paths if not os.path.isfile(os.path.join(local_dir, path))
+           or (sizes[path] and os.path.getsize(os.path.join(local_dir, path)) != sizes[path])]
 if missing:
     sys.exit(f"[download_wandb] {len(missing)} files missing after download (e.g. {missing[0]}); rerun to resume")
 print(f"[download_wandb] downloaded {len(runs)} runs to {local_dir}")

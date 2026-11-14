@@ -22,6 +22,7 @@
 """
 
 import argparse
+import base64
 from datetime import datetime
 import fnmatch
 import json
@@ -32,6 +33,7 @@ import shutil
 import subprocess
 import sys
 from urllib.parse import urlparse
+import urllib.request
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 RUN_RE = re.compile(r"^(?:offline-)?run-\d{8}_\d{6}-[A-Za-z0-9]+$")
@@ -58,8 +60,9 @@ parser.add_argument("--project", default=os.environ.get("WANDB_PROJECT"), help="
 parser.add_argument("--base_url", default=os.environ.get("WANDB_BASE_URL", "https://api.wandb.ai"),
                     help="W&B API 地址;默认官方 https://api.wandb.ai"
                          "(训练 run 里可能记着别的部署地址,必须显式覆盖)")
-parser.add_argument("--proxy", default=os.environ.get("WANDB_PROXY"),
-                    help="上传走 HTTP(S) 代理,如 http://127.0.0.1:7899;默认 WANDB_PROXY")
+parser.add_argument("--proxy", default=os.environ.get("WANDB_PROXY", "http://127.0.0.1:49623") or None,
+                    help="上传走 HTTP(S) 代理;默认 WANDB_PROXY,没设时用本机 clash 混合端口 "
+                         "http://127.0.0.1:49623(WANDB_PROXY='' 表示不走代理)")
 parser.add_argument("--api_key_file", default=None, help="默认 data/.cache/wandb/api_key")
 parser.add_argument("--state_file", default=None, help="默认 data/.cache/wandb/synced.json")
 parser.add_argument("--venv_dir", default=None, help="wandb 专用 venv;默认 data/.cache/wandb/venv")
@@ -166,6 +169,49 @@ def api_key() -> str | None:
     return None
 
 
+def same_run(a: dict, b: dict) -> bool:
+    """同一个 W&B run 的不同段(训练中断续训):同一个训练目录,目录名最后的 run id 一样。"""
+    return (a["policy"], a["task"], a["run"]) == (b["policy"], b["task"], b["run"]) and \
+        a["name"].rsplit("-", 1)[-1] == b["name"].rsplit("-", 1)[-1]
+
+
+def wandb_bytes(path: str) -> int:
+    """run 目录里 ``.wandb`` 文件的大小:记进状态文件,远端换成新文件(大小变了)时看板会提示重新同步。"""
+    return sum(f.stat().st_size for f in Path(path).glob("*.wandb"))
+
+
+def wandb_query(text: str, key: str) -> dict:
+    """W&B GraphQL 只读查询(走 --proxy)。"""
+    handlers = [urllib.request.ProxyHandler({"http": args.proxy, "https": args.proxy})] if args.proxy else []
+    request = urllib.request.Request(
+        args.base_url.rstrip("/") + "/graphql", data=json.dumps({"query": text}).encode(),
+        headers={"Content-Type": "application/json",
+                 "Authorization": "Basic " + base64.b64encode(f"api:{key}".encode()).decode()})
+    with urllib.request.build_opener(*handlers).open(request, timeout=30) as response:
+        return json.loads(response.read()).get("data") or {}
+
+
+def uploaded_run(output: str, key: str) -> tuple[str, int | None]:
+    """上传后官方 W&B 上这个 run 的 ``(网页地址, summary 里的 _step)``;查不到时 ``("", None)``。
+
+    ``wandb sync`` 打印的是 ``[project/run_id]`` 和训练机部署(如 CoreWeave)的地址,entity 要另查。"""
+    match = re.search(r"\[([^/\s\]]+)/([A-Za-z0-9]+)\] setting up run", output)
+    if not match:
+        return "", None
+    project, run_id = match.groups()
+    try:
+        entity = args.entity or wandb_query("{ viewer { entity } }", key)["viewer"]["entity"]
+        host = urlparse(args.base_url).netloc
+        url = f"https://{host[4:] if host.startswith('api.') else host}/{entity}/{project}/runs/{run_id}"
+        run = wandb_query(f'{{ project(name: "{project}", entityName: "{entity}") '
+                          f'{{ run(name: "{run_id}") {{ summaryMetrics }} }} }}', key)["project"]["run"]
+        if not run:
+            return "", None
+        return url, json.loads(run.get("summaryMetrics") or "{}").get("_step")
+    except (OSError, ValueError, KeyError, TypeError):
+        return "", None
+
+
 def run_url(output: str, base_url: str, run_dir: str) -> tuple[str, str]:
     """(官方 run URL, 输出里其它部署的 URL)。
 
@@ -229,7 +275,7 @@ if args.proxy:
 online_flag = supports_online(cmd)
 print(f"[upload_wandb] target: {args.base_url}" + (f" via {args.proxy}" if args.proxy else ""))
 
-failed = []
+failed, partial = [], []
 for index, item in enumerate(selected, 1):
     command = [*cmd, "sync", "--yes"]
     if online_flag:
@@ -258,17 +304,35 @@ for index, item in enumerate(selected, 1):
         failed.append(item["run_dir"])
         print(f"[upload_wandb] FAILED: exit {result.returncode}")
         continue
-    if "wandb: ERROR" in output or re.search(r"^Error:", output, re.M):
+    # .wandb 文件结尾有一条没写完的记录:训练机在训练还没结束时就把 wandb/ 传上了 ModelScope。
+    # 写完的部分已经传上去了,记成"部分上传",等远端换成完整文件后再同步
+    incomplete = "incomplete record" in output
+    errors = [line for line in output.splitlines()
+              if line.startswith("wandb: ERROR") and "incomplete record" not in line]
+    if errors or re.search(r"^Error:", output, re.M):
         failed.append(item["run_dir"])
         print("[upload_wandb] FAILED: wandb reported an error (exit code was 0)")
         continue
     match_url, source_url = run_url(output, args.base_url, item["run_dir"])
+    official, step = uploaded_run(output, key)
+    if official and urlparse(match_url).netloc != urlparse(official).netloc:
+        match_url, source_url = official, source_url or match_url
     state[item["run_dir"]] = {
         "synced_at": datetime.now().isoformat(timespec="seconds"),
         "url": match_url,
         "base_url": args.base_url,
         "source_url": source_url,
+        "wandb_bytes": wandb_bytes(item["path"]),
     }
+    later = [r for r in runs if r["run_dir"] > item["run_dir"] and same_run(r, item)]
+    if incomplete:
+        state[item["run_dir"]].update({"partial": True, "last_step": step})
+        if later:  # 训练中断后续训:前面的段结尾本来就不完整,后面的段接着传
+            print(f"[upload_wandb] 这一段结尾不完整(训练中断过,到 step {step}),后面还有 {len(later)} 段同一个 run")
+        else:
+            partial.append(f"{item['run_dir']}" + (f"(到 step {step})" if step is not None else ""))
+            print(f"[upload_wandb] PARTIAL: .wandb 文件不完整,只传了写完的部分"
+                  f"{f'(到 step {step})' if step is not None else ''};训练机重新上传完整的 wandb/ 后再同步")
     save_state(state)
     if not match_url:
         print("[upload_wandb] warning: synced but no run URL in the output")
@@ -277,6 +341,10 @@ for index, item in enumerate(selected, 1):
 if args.dry_run:
     print(f"[upload_wandb] dry-run: {len(selected)} runs would be uploaded")
     sys.exit(0)
+if partial:  # 看板任务面板把 [status] 这一行当成结果显示
+    steps = sorted({m for p in partial for m in re.findall(r"step \d+", p)})
+    print(f"[status] 部分上传 {len(partial)} 个 run" + (f"(到 {'、'.join(steps)})" if steps else "")
+          + ":远端 wandb 文件不完整")
 if failed:
     sys.exit(f"[upload_wandb] failed {len(failed)} runs: {', '.join(failed[:5])}")
 print(f"[upload_wandb] uploaded {len(selected)} runs; state -> {state_file}")
