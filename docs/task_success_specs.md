@@ -170,8 +170,8 @@
 
 **check 阶段 1**(同一步内全部满足)
 
-- `is_A_root_point_in_B_bbox` — sandwich 的原点落在 microwave 的有向包围盒内
-- `is_all_gripper_open` — 所有机械臂的夹爪张开度都 ≥ 60%
+- `is_A_bbox_in_B_local_box` — sandwich 的整个包围盒都落在微波炉的炉腔盒内(微波炉局部坐标 x [-0.224, 0.119]、y [-0.164, 0.168]、z [0.012, 0.267] m;原点在盒内但一半卡在炉口不算;资产的包围盒把开着的门和门前桌面也算进去,不能用)
+- `is_all_gripper_open` — 所有机械臂的夹爪张开度都 ≥ 90%(夹住这些物体时开度约 0.58–0.66,60% 在夹着时也成立)
 - `all_robot_back_to_origin` — 所有机械臂末端回到初始位姿附近:各方向位置偏差 ≤ 0.15 m,姿态偏差 ≤ 20°
 - `is_not_moved` — microwave 离开局开始时的位置 ≤ 0.02 m
 
@@ -181,8 +181,8 @@
 
 **check 阶段 1**(同一步内全部满足)
 
-- `is_A_root_point_in_B_bbox` — bread 的原点落在 microwave 的有向包围盒内
-- `is_all_gripper_open` — 所有机械臂的夹爪张开度都 ≥ 60%
+- `is_A_bbox_in_B_local_box` — bread 的整个包围盒都落在微波炉的炉腔盒内(微波炉局部坐标 x [-0.224, 0.119]、y [-0.164, 0.168]、z [0.012, 0.267] m;原点在盒内但一半卡在炉口不算;资产的包围盒把开着的门和门前桌面也算进去,不能用)
+- `is_all_gripper_open` — 所有机械臂的夹爪张开度都 ≥ 90%(夹住这些物体时开度约 0.58–0.66,60% 在夹着时也成立)
 - `all_robot_back_to_origin` — 所有机械臂末端回到初始位姿附近:各方向位置偏差 ≤ 0.15 m,姿态偏差 ≤ 20°
 - `is_not_moved` — microwave 离开局开始时的位置 ≤ 0.02 m
 
@@ -192,8 +192,8 @@
 
 **check 阶段 1**(同一步内全部满足)
 
-- `is_A_root_point_in_B_bbox` — hamburger 的原点落在 microwave 的有向包围盒内
-- `is_all_gripper_open` — 所有机械臂的夹爪张开度都 ≥ 60%
+- `is_A_bbox_in_B_local_box` — hamburger 的整个包围盒都落在微波炉的炉腔盒内(微波炉局部坐标 x [-0.224, 0.119]、y [-0.164, 0.168]、z [0.012, 0.267] m;原点在盒内但一半卡在炉口不算;资产的包围盒把开着的门和门前桌面也算进去,不能用)
+- `is_all_gripper_open` — 所有机械臂的夹爪张开度都 ≥ 90%(夹住这些物体时开度约 0.58–0.66,60% 在夹着时也成立)
 - `all_robot_back_to_origin` — 所有机械臂末端回到初始位姿附近:各方向位置偏差 ≤ 0.15 m,姿态偏差 ≤ 20°
 - `is_not_moved` — microwave 离开局开始时的位置 ≤ 0.02 m
 
@@ -205,8 +205,8 @@
 
 **check 阶段 1**(同一步内全部满足)
 
-- `is_A_root_point_in_B_bbox` — egg 的原点落在 microwave 的有向包围盒内
-- `is_all_gripper_open` — 所有机械臂的夹爪张开度都 ≥ 60%
+- `is_A_bbox_in_B_local_box` — egg 的整个包围盒都落在微波炉的炉腔盒内(微波炉局部坐标 x [-0.224, 0.119]、y [-0.164, 0.168]、z [0.012, 0.267] m;原点在盒内但一半卡在炉口不算;资产的包围盒把开着的门和门前桌面也算进去,不能用)
+- `is_all_gripper_open` — 所有机械臂的夹爪张开度都 ≥ 90%(夹住这些物体时开度约 0.58–0.66,60% 在夹着时也成立)
 - `all_robot_back_to_origin` — 所有机械臂末端回到初始位姿附近:各方向位置偏差 ≤ 0.15 m,姿态偏差 ≤ 20°
 - `is_not_moved` — microwave 离开局开始时的位置 ≤ 0.02 m
 
@@ -216,8 +216,8 @@
 
 **check 阶段 1**(同一步内全部满足)
 
-- `is_A_root_point_in_B_bbox` — hazelnut 的原点落在 microwave 的有向包围盒内
-- `is_all_gripper_open` — 所有机械臂的夹爪张开度都 ≥ 60%
+- `is_A_bbox_in_B_local_box` — hazelnut 的整个包围盒都落在微波炉的炉腔盒内(微波炉局部坐标 x [-0.224, 0.119]、y [-0.164, 0.168]、z [0.012, 0.267] m;原点在盒内但一半卡在炉口不算;资产的包围盒把开着的门和门前桌面也算进去,不能用)
+- `is_all_gripper_open` — 所有机械臂的夹爪张开度都 ≥ 90%(夹住这些物体时开度约 0.58–0.66,60% 在夹着时也成立)
 - `all_robot_back_to_origin` — 所有机械臂末端回到初始位姿附近:各方向位置偏差 ≤ 0.15 m,姿态偏差 ≤ 20°
 - `is_not_moved` — microwave 离开局开始时的位置 ≤ 0.02 m
 
@@ -227,8 +227,8 @@
 
 **check 阶段 1**(同一步内全部满足)
 
-- `is_A_root_point_in_B_bbox` — potato 的原点落在 microwave 的有向包围盒内
-- `is_all_gripper_open` — 所有机械臂的夹爪张开度都 ≥ 60%
+- `is_A_bbox_in_B_local_box` — potato 的整个包围盒都落在微波炉的炉腔盒内(微波炉局部坐标 x [-0.224, 0.119]、y [-0.164, 0.168]、z [0.012, 0.267] m;原点在盒内但一半卡在炉口不算;资产的包围盒把开着的门和门前桌面也算进去,不能用)
+- `is_all_gripper_open` — 所有机械臂的夹爪张开度都 ≥ 90%(夹住这些物体时开度约 0.58–0.66,60% 在夹着时也成立)
 - `all_robot_back_to_origin` — 所有机械臂末端回到初始位姿附近:各方向位置偏差 ≤ 0.15 m,姿态偏差 ≤ 20°
 - `is_not_moved` — microwave 离开局开始时的位置 ≤ 0.02 m
 
