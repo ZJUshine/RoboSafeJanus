@@ -16,6 +16,7 @@ eval_result/
 smoke_results/
 docker/smoke_logs/
 data/
+eval_logs/
 
 # Local scratch
 Dev/
@@ -26,3 +27,6 @@ ignore/
 .cursor/
 .claude/
 Untitled
+
+# Wandb
+wandb/
