@@ -756,6 +756,110 @@ class Func_Parser:
             return 1.0
         return 0.0
 
+    def is_A_root_point_in_B_local_box(self, args):
+        """A 的原点是否落在 B 局部坐标系下的 ``box_min``/``box_max`` 盒子里。
+
+        与 ``is_A_root_point_in_B_bbox`` 的区别:后者用的是资产静态 oriented_bbox(articulation
+        的包围盒往往把张开的活动件也算进去,例如微波炉开着的门),这里用调用方显式给出的局部
+        盒子(例如量好的炉腔),避免把门扫过的那片空间也判成"在物体里面"。
+        """
+        env_idx = args["env_idx"]
+        label_A = args["label_A"]
+        label_B = args["label_B"]
+        box_min = args["box_min"]
+        box_max = args["box_max"]
+        atol = float(args.get("atol", 1e-6))
+
+        if check_1d(label_A):
+            if len(label_A) != self.num_envs:
+                print("Length of label_A list should be same as num_envs.")
+                return 0.0
+            label_A = label_A[env_idx]
+
+        if check_1d(label_B):
+            if len(label_B) != self.num_envs:
+                print("Length of label_B list should be same as num_envs.")
+                return 0.0
+            label_B = label_B[env_idx]
+
+        inst_name_A = self.layout_manager.get_instance_name(label=label_A, env_idx=env_idx)
+        inst_name_B = self.layout_manager.get_instance_name(label=label_B, env_idx=env_idx)
+        if inst_name_A is None or inst_name_B is None:
+            return 0.0
+
+        pos_A, _ = self.layout_manager.get_instance_pose(inst_name=inst_name_A, env_idx=env_idx)
+        pos_B, rot_B = self.layout_manager.get_instance_pose(inst_name=inst_name_B, env_idx=env_idx)
+        if pos_A is None or pos_B is None or rot_B is None:
+            print(f"Missing pose for is_A_root_point_in_B_local_box check: A={inst_name_A}, B={inst_name_B}.")
+            return 0.0
+
+        pos_A = np.asarray(pos_A, dtype=float).reshape(-1)[:3]
+        pos_B = np.asarray(pos_B, dtype=float).reshape(-1)[:3]
+        rot_B = np.asarray(rot_B, dtype=float).reshape(-1)[:4]
+        box_min = np.asarray(box_min, dtype=float).reshape(-1)[:3]
+        box_max = np.asarray(box_max, dtype=float).reshape(-1)[:3]
+
+        rot_B_mat = t3d.quaternions.quat2mat(rot_B)
+        pos_A_in_B = rot_B_mat.T @ (pos_A - pos_B)
+
+        if np.all(pos_A_in_B >= box_min - atol) and np.all(pos_A_in_B <= box_max + atol):
+            return 1.0
+        return 0.0
+
+    def is_A_bbox_in_B_local_box(self, args):
+        """A 的整个包围盒(所有顶点)是否都落在 B 局部坐标系下的 ``box_min``/``box_max`` 盒子里。
+
+        比 ``is_A_root_point_in_B_local_box`` 严:A 的包围盒顶点按 A 的世界位姿旋转平移后,
+        再换到 B 的局部坐标逐个检查,物体一半卡在盒外(例如卡在微波炉炉口)不算。
+        """
+        env_idx = args["env_idx"]
+        label_A = args["label_A"]
+        label_B = args["label_B"]
+        box_min = args["box_min"]
+        box_max = args["box_max"]
+        atol = float(args.get("atol", 1e-6))
+
+        if check_1d(label_A):
+            if len(label_A) != self.num_envs:
+                print("Length of label_A list should be same as num_envs.")
+                return 0.0
+            label_A = label_A[env_idx]
+
+        if check_1d(label_B):
+            if len(label_B) != self.num_envs:
+                print("Length of label_B list should be same as num_envs.")
+                return 0.0
+            label_B = label_B[env_idx]
+
+        inst_name_A = self.layout_manager.get_instance_name(label=label_A, env_idx=env_idx)
+        inst_name_B = self.layout_manager.get_instance_name(label=label_B, env_idx=env_idx)
+        if inst_name_A is None or inst_name_B is None:
+            return 0.0
+
+        pos_A, rot_A = self.layout_manager.get_instance_pose(inst_name=inst_name_A, env_idx=env_idx)
+        pos_B, rot_B = self.layout_manager.get_instance_pose(inst_name=inst_name_B, env_idx=env_idx)
+        bbox_A = self.layout_manager.get_instance_bbox_vertices(inst_name=inst_name_A, env_idx=env_idx)
+        if pos_A is None or rot_A is None or pos_B is None or rot_B is None or bbox_A is None:
+            print(f"Missing pose/bbox for is_A_bbox_in_B_local_box check: A={inst_name_A}, B={inst_name_B}.")
+            return 0.0
+
+        pos_A = np.asarray(pos_A, dtype=float).reshape(-1)[:3]
+        rot_A = np.asarray(rot_A, dtype=float).reshape(-1)[:4]
+        pos_B = np.asarray(pos_B, dtype=float).reshape(-1)[:3]
+        rot_B = np.asarray(rot_B, dtype=float).reshape(-1)[:4]
+        bbox_A = np.asarray(bbox_A, dtype=float).reshape(-1, 3)
+        box_min = np.asarray(box_min, dtype=float).reshape(-1)[:3]
+        box_max = np.asarray(box_max, dtype=float).reshape(-1)[:3]
+
+        rot_A_mat = t3d.quaternions.quat2mat(rot_A)
+        rot_B_mat = t3d.quaternions.quat2mat(rot_B)
+        verts_world = bbox_A @ rot_A_mat.T + pos_A
+        verts_in_B = (verts_world - pos_B) @ rot_B_mat
+
+        if np.all(verts_in_B >= box_min - atol) and np.all(verts_in_B <= box_max + atol):
+            return 1.0
+        return 0.0
+
     def is_A_functional_point_in_B_bbox(self, args):
         env_idx = args["env_idx"]
         label_A = args["label_A"]

@@ -1003,6 +1003,26 @@ class RewardManager:
         args = {"label_A": label_A, "label_B": label_B}
         return ("is_A_root_point_in_B_bbox", args)
 
+    def is_A_root_point_in_B_local_box(self, label_A, label_B, box_min, box_max, atol=1e-6):
+        args = {
+            "label_A": label_A,
+            "label_B": label_B,
+            "box_min": list(box_min),
+            "box_max": list(box_max),
+            "atol": atol,
+        }
+        return ("is_A_root_point_in_B_local_box", args)
+
+    def is_A_bbox_in_B_local_box(self, label_A, label_B, box_min, box_max, atol=1e-6):
+        args = {
+            "label_A": label_A,
+            "label_B": label_B,
+            "box_min": list(box_min),
+            "box_max": list(box_max),
+            "atol": atol,
+        }
+        return ("is_A_bbox_in_B_local_box", args)
+
     def is_A_z_lower_than_B_bbox_zmax(self, label_A, label_B, z_threshold=0.0):
         args = {"label_A": label_A, "label_B": label_B, "z_threshold": z_threshold}
         return ("is_A_z_lower_than_B_bbox_zmax", args)
