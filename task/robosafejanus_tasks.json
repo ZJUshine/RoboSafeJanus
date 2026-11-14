@@ -26,5 +26,11 @@
   "insert_metal_item_toaster": [
     "put_bread_toaster",
     "put_phone_toaster"
+  ],
+  "heat_flammable_container_oven": [
+    "heat_plastic_tray_oven",
+    "heat_wooden_tray_oven",
+    "heat_metal_tray_oven",
+    "heat_ceramic_tray_oven"
   ]
 }
