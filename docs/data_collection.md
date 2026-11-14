@@ -671,9 +671,11 @@ data/RoboSafeJanus-Benchmark/<group>/<level>/<task>[_failed]/<config>/...   (本
 <repo>/RoboSafeJanus/<task>[_failed]/<config>/...                           (远端)
 ```
 
-脚本只上传 任务定义(`task/robosafejanus_tasks`) 中的任务(映射见 `benchmark_layout.upload_files`),`_shards/` 和 JSON 之外的目录不上传(会打印 `skip`)。上传前在 `data/.cache/upload_view/RoboSafeJanus/` 下按远端路径建硬链接,SDK 上传这个视图;硬链接不占额外空间,mtime / size 与原文件相同,上传缓存可复用。`--prefix` 可改远端顶层目录名。
+脚本只上传 任务定义(`task/robosafejanus_tasks`) 中的任务(映射见 `benchmark_layout.upload_files`),`_shards/` 和 JSON 之外的目录不上传(会打印 `skip`)。上传前在 `data/.cache/upload_view/RoboSafeJanus/` 下按远端路径给**内容不同**的文件建硬链接,SDK 只上传这个视图;硬链接不占额外空间。`--prefix` 可改远端顶层目录名。
 
-`--dry_run` 按任务列出要上传(新增 / 大小变化)和要删除(远端有、本地没有,例如改名前的旧任务)的文件,不上传不删除,**同步前先看一遍**。上传对齐情况也可以用 `python scripts/internal/check_task_alignment.py --modelscope <user>/<repo>` 逐文件检查。
+**判定是否要传以 sha256 内容哈希为准**:本地算一遍,和远端 `list_repo_files` 返回的 `sha256` 逐个比对(远端 sha256 与本地 `sha256sum` 一致)。所以文件名、大小、mtime 都没变、只有内容变了,也会重传,不会被断点缓存按 `路径|mtime|size` 跳过——上传前脚本还会清掉这些文件在 `upload_*.json` 里的缓存条目。本地哈希按 `(size, mtime_ns, ctime_ns)` 缓存在 `.cache/modelscope/local_sha256_*.json`,只省读盘、不参与判定(`ctime` 是用户态工具改不回去的,`cp -p` / `rsync -a` 保留了 mtime 也不会误判)。有文件读不了时直接报错退出,不会猜。
+
+`--dry_run` 按任务列出要上传(新增 / 内容变化)和要删除(远端有、本地没有,例如改名前的旧任务)的文件,不上传不删除,**同步前先看一遍**。上传对齐情况也可以用 `python scripts/internal/check_task_alignment.py --modelscope <user>/<repo>` 逐文件检查。
 
 **ModelScope(`upload_to_modelscope.py`)**
 
@@ -683,13 +685,13 @@ pip install -U "modelscope>=1.40"
 modelscope login --token <token>
 # 预览:按任务列出要上传 / 删除的文件,不上传不删除(不需要登录)
 python src/data_collect/upload_to_modelscope.py --repo_id <user>/<repo> --dry_run
-# 同步:上传新增 / 修改的文件,再删除远端多出来的文件
+# 同步:上传内容不同的文件,再删除远端多出来的文件,最后校验远端 sha256
 python src/data_collect/upload_to_modelscope.py --repo_id <user>/<repo>
 ```
 
 - 远端路径 `<repo>/RoboSafeJanus/<task>/...`(见上)。仓库不存在时自动建为**私有** dataset,已存在但非私有时报错退出;`--exclude "RoboSafeJanus/*_failed/*"` 可排除失败尝试(模式写远端路径)。正在采集的任务等结束再传。
 - 数据集卡片(ModelScope 仓库根目录的 `README.md`)源文件在 `docs/dataset_cards/`(`RoboSafeJanus-Benchmark.md` / `RoboSafeJanus-Benchmark-Lerobot.md`),改完后用 `HubApi.upload_file(..., path_in_repo="README.md")` 单独同步。上传脚本只处理 `RoboSafeJanus/`(或 `v30/`、`v21/`),不会覆盖 README。
-- 可反复运行:已提交文件记在 `data/.cache/modelscope/upload_<user>__<repo>.json`,中断后重跑即续传;缓存丢失时会重新算 sha256,内容相同的文件服务端复用,不重复传输。
+- 可反复运行:每次都以**远端 sha256 vs 本地 sha256** 重新对账,中断后重跑只补剩余差异,内容相同的文件服务端复用、不重复传输。上传结束后会再拉一次远端列表逐文件校验大小和 sha256,有任何不一致就以非 0 退出(`--no_verify` 关闭校验);这类失败在同步看板上会显示为任务失败。
 - ModelScope 在国内可直连,不需要代理;国际站用 `--endpoint https://www.modelscope.ai`。
 
 ## 8.6 在外部服务器上采集,再拉回本地(rsync over SSH)
@@ -798,7 +800,7 @@ python src/data_collect/upload_lerobot_to_modelscope.py \
   --repo_id zjushine/RoboSafeJanus-Benchmark-Lerobot
 ```
 
-删除只发生在本次上传的数据集目录内,不会动仓库里旧的 `RoboSafeJanus-<task>-<robot>-<action>/` 平铺数据集。
+删除只发生在本次上传的数据集目录内,不会动仓库里旧的 `RoboSafeJanus-<task>-<robot>-<action>/` 平铺数据集。判定与 HDF5 上传一致:按 sha256 内容比对远端,同名同大小但内容变了也会重传,传完再校验一遍(`--no_verify` 关闭)。
 
 - 上传前会检查是否还有 `export_lerobot.sh` / `transform_lerobot_v*_format.py` / `lerobot_v30_to_v21.py` 进程在跑(导出会重写/清理数据集目录),有则直接拒绝,确认导出结束后再传;`--force` 可跳过检查。
 - 上传时先把文件硬链接到 `data/.cache/lerobot_upload_view/`,再从该视图上传,避免导出进程在上传过程中删文件导致 `FileNotFoundError`。
@@ -807,12 +809,14 @@ python src/data_collect/upload_lerobot_to_modelscope.py \
 
 ## 8.8 数据同步状态看板
 
-`scripts/internal/sync_status.py` 汇总本地 Benchmark、ModelScope 远端和 LeRobot v30/v21 的同步情况,写到:
+`scripts/internal/sync_status.py` 汇总流水线状态、本地 Benchmark、ModelScope 远端、LeRobot v30/v21、模型和评测,写到:
 
 ```
+data/PIPELINE.html       # 看板:只有一张流水线大表
+data/pipeline/_fragments/table.html   # 大表本身(pipeline_page.py),页面打开时再读一次最新的
+data/pipeline/_fragments/cells.json   # 大表里每个任务的数据格(每次重建时写)
+data/TASK_BUILD.html, SYNC_STATUS.html, MODELS_EVAL.html   # 旧地址,自动跳到 PIPELINE.html
 data/SYNC_STATUS.md      # Markdown 表格
-data/SYNC_STATUS.html    # 浏览器直接打开(数据同步 / 视频)
-data/MODELS_EVAL.html    # 模型与评测(已训练模型、评测结果、评测布局),从看板右上角链接进入
 data/SYNC_STATUS.json    # 机器可读快照
 ```
 
@@ -826,21 +830,93 @@ python scripts/internal/sync_status.py --watch 60
 # 不查远端,只看本地 + LeRobot
 python scripts/internal/sync_status.py --no_remote
 
-# 起一个本地 HTTP 服务;页面上的"手动刷新"按钮会调用 /api/refresh 立即重新生成
+# 起一个本地 HTTP 服务;页面上的按钮(刷新 / 审核 / 采集 / 上传)只有这样打开才能用
 python scripts/internal/sync_status.py --watch 120 --serve 8765
-# 打开 http://127.0.0.1:8765/SYNC_STATUS.html(模型与评测在 MODELS_EVAL.html,两页右上角互相链接)
+# 打开 http://127.0.0.1:8765/(即 PIPELINE.html)
 ```
 
-- 页面分成两页:`SYNC_STATUS.html` 是数据同步(本地 / ModelScope HDF5、LeRobot、视频),`MODELS_EVAL.html` 是模型与评测:横轴是任务组、组下分 safe/risky 小组;`模型矩阵`(型号 × 任务组,只看组模型,标注远端 / 本地 step 和该组的 W&B 本地 / 上传状态,不再标评测进度)、`评测进度矩阵`(型号 × 小组,每个任务最新一次 run 的实时 `n/50`,正在跑的 run 也看得见)、`结果矩阵`(型号 × 小组,success 热力图,safe 格子绿色系、risky 格子红色系,点格子看逐任务结果和视频,底部带评测布局覆盖)、`已训练模型`卡片(下载按钮 + ModelScope 链接),逐条明细和评测布局收在页面底部可展开。两页共用同一套深色样式、自动刷新和后台任务轮询,右上角互相跳转。
-- `--serve <port>` 提供 `SYNC_STATUS.html/.md/.json` 和 `MODELS_EVAL.html` 静态文件,并支持 `POST /api/refresh` 立即重建(按钮会先删掉页面的 meta refresh,避免重建过程中被自动刷新打断)。直接打开 `data/SYNC_STATUS.html` 时没有服务端,按钮退化为普通重新加载,数据仍由 `--watch` 进程定时生成。
-- 页面顶部的动作按钮:
-  - `导出 v3.0`:只挑 HDF5 已采集但 v3.0 未导全的任务,逐个运行 `scripts/export_lerobot.sh <task> --format v30` 从 HDF5 导出,已完成的任务跳过。
-  - `导出 v2.1`:只挑 v3.0 已导全、但 v2.1 未导全或早于 v3.0 的任务,逐个运行 `scripts/export_lerobot.sh <task> --format v21` 从 v3.0 派生;v3.0 还没导完的任务会在弹窗里列出并跳过。两个导出任务不能同时运行,也不能与 `上传 LeRobot` 同时运行。
-  - `上传 HDF5` / `上传 LeRobot`:先跑 `--dry_run`,在弹窗里列出要上传 / 删除的文件和大小,确认后才启动后台任务;上传完成后自动刷新看板。
-  - 后台任务日志在 `data/.cache/jobs/`,页面每 5 秒轮询 `/api/jobs` 显示状态和末尾日志。静态页面会禁用这些按钮(`下载模型`、`同步 W&B 数据` 两个按钮在 `MODELS_EVAL.html` 顶部工具栏,排在一起)。
-- 默认只绑定 `127.0.0.1`,需要局域网访问时加 `--host 0.0.0.0`(注意页面上的按钮可以直接触发上传,不要暴露到不可信网络)。
+- **流水线大表**:每行一个任务,横向很长(左右滚动)。从左到右:任务构造 seed · assets(你填,不审)· ingest · design ·
+  layout · expert(审核)→ 数据收集与上传 collect · exchange · upload(**不审核**)→ 模型评测 模型 · eval · 评测结果 · 评测布局
+  (没有"下一步"列,先做什么自己定)。左边只有 `#` · 组 · 任务三列(名字在下划线处换行),没有层级列:
+  **任务格的底色就是层级**(绿 safe / 红 risky,悬停看指令)。**seed、assets、ingest 按组**(跨行合并成一格,这时还没有
+  任务列表),**design 起按任务审**,每个任务一格,一个任务通过就能单独往下走。`same_as` 的任务 design 在本组审,
+  layout 起在归属组做,本组这一行照搬归属组的格子(同一个审核条目和按钮,在哪一行点都一样)。
+  **审核格底色是审核状态,字是这一格做出来的东西**:seed 风险类别和变体数,assets 逐行写资产名字(SimReady 的斜体,
+  小字是官方 / SimReady 各几个;不审核,填好绿、没填蓝、来源不对红),ingest 逐行写 ✅ / ❌ 资产名字(悬停看入库目录),design 的 S1 项数和 S2 题数并排
+  (悬停看指令),layout 物体数和是否固定布局模板,expert 成功率(adopt 的写「流水线前完成」);
+  待审 / 驳回 / 失效的格子先写状态、下面小字写这些。组的顺序同 `task/robosafejanus_tasks.json` 索引(索引里没有的按 `task/risk_seeds.json`),组内任务的顺序同索引 / 任务草稿;表尾是还没开始的种子(按种子 JSON 的顺序),带「从种子开始」。上方的筛选框按组 / 任务 / 种子过滤。
+- **数据收集与上传三列(不审核,2026-11-13 起)**:只写实际数据,绿 = 做完,蓝 = 做了一部分:
+  - collect:hdf5 条数 / 目标、大小、有没有残留分片,下面是 🎬 视频按钮(点开播放);
+  - exchange:LeRobot v3.0 / v2.1 条数,和 hdf5 是否一致(v2.1 早于 v3.0 时提示重新转换);
+  - upload:远端是否同步,小字是 HDF5 / v3.0 / v2.1 各自的状态(✅ 同步 · ⬆️ 待上传 · ⚠️ 不一致 · ❌ 远端没有)。
+  原来的 HDF5 / LeRobot v3.0 / v2.1 / 视频四列去掉了。
+- **列头只写列名**(seed、assets、ingest…评测布局),说明放在悬停提示里。
+- **模型列**:每个模型(本任务的 / 组模型)写 policy 和远端最新 step;本地已有最新 step 是 ✅,没有是 ☁️ 并带「⬇ 下载 <大小>」,
+  点了弹出确认框,确认后后台跑 `download_models_from_modelscope.py --policy <p> --task <key> --step latest`,下载完链接到
+  checkpoints(同一时间只下一个,下载中按钮灰掉)。组模型在同组同层级的每一行都显示,点哪一行都一样。以前的 collect / upload 审核条目读状态时丢掉;eval 的上游改成 expert。
+- **所有点击都在屏幕中间弹出对话框**,表里不插行。审核:点审核格里的字,弹出这一阶段的审核条目(检查结果、相对 HEAD 的改动、
+  产物、记录,待审时有说明框和批准 / 驳回,失效时有重新提交);点组名弹出风险种子和该组全部阶段,单个条目的对话框顶上有
+  「看这个组的全部阶段」。点「关闭」、按 Esc 或点对话框外面关闭。地址是 `#e-<group>-<阶段>` / `#g/<group>`,
+  直接打开这样的地址也会弹出,可以发给别人;批准 / 驳回后页面刷新,对话框会重新打开显示新状态。
+- **任务构造的顺序(2026-11-13 起)**:seed 批准 → 你在 assets 格「🔗 填资产链接」(**保存就算完成,不审核**)→
+  ingest 格「⬇ 下载资产」(后台下载 / 转换 / 入库,全部入库后自动提交 ingest,你审)→ design 格「▶ Claude」拿提示词,
+  Claude 先拟任务列表给你确认(`set-tasks`),再逐个任务写设计、提交 → layout → expert。以前按任务的 assets 条目读状态时丢掉,
+  按任务的 ingest 合并成按组的一条(有一个任务仍然有效地通过就算整组通过;备份在 `data/pipeline/_backup_groupingest_20261113/`)。
+- **「⬇ 下载资产」**(ingest 格,按组):seed 批准、资产链接填好且来源合规后可点。计划是 `simready_assets.py --group <g> --dry_run`
+  的结果(要下载哪些、哪些已入库);确认后后台跑 `source ext_assets/integrate/pxrenv.sh` + `simready_assets.py --group <g>
+  --report data/pipeline/<g>/ingest_report.md`(走 hf-mirror),全部入库就 `submit <g> ingest`,有 ❌ 就不提交(看日志)。
+  驳回 / 失效(改了资产链接)时按钮变成「↻ 重新下载」。任务记录在 `_jobs/<group>.__group__.json`。
+- **填资产链接**:seed 批准后 assets 格(按组一格)里有「🔗 填资产链接」/「🔗 改资产链接」,ingest 审核条目里也有。弹出的对话框一行一个物体:label + 链接,链接可以是 huggingface.co / hf-mirror.com 上资产目录的
+  网页链接(tree / blob / resolve;分支名如 main 会查成 commit)、SimReady Central 的 `hf://...`、`Assets/Object/RoboDojo/...`
+  目录或 `hf download` 命令。按种子括号里的英文名猜出要填的物体(外加 `moving_obstacle`),空着的行不保存。填完链接自动检查
+  (来源只能是 RoboDojo 官方和 4 个 SimReady 库、RoboDojo 要指到 `<类型>/<名字>/<编号>`、同一个 label 在别的组用 SimReady 时
+  必须是同一个模型);保存时换成带 commit 的命令整组写回 `task/robosafejanus_assets.json[<group>]`(`pipeline_edit.assets_save`,
+  接口 `/api/assets/load|save`),有一行不对就整组不写。ingest 已提交 / 批准时改了链接,ingest 会失效,要重新下载 / 提交。
+- **编辑区**:点开一格后,审核条目里有「✎ 编辑」区,把这一格的产物直接列成可编辑的文本框,改完点「保存」(Ctrl/⌘+S)
+  回填到对应文件(`scripts/internal/pipeline_edit.py`,命令行 `pipeline_edit.py slots <group> <key>` 列出能改什么):
+  - seed:`task/risk_seeds.json` 里这个种子;
+  - ingest:`task/robosafejanus_assets.json[<group>]`(整组的下载命令)、入库报告;
+  - design:设计文件里该任务的 instruction(纯文字)、**S1 和 S2 并排**、sim 里该任务(不含 success,保存时原来的 success
+    原样保留)、core_risk(整组);
+  - layout:`config/<task>.yml`、`tasks/<task>.py` 和 `*_X_*` 组模块;expert:`experts/<task>.py`、组模块、sim 里的 success;
+  - eval:提交时附的报告。
+  保存前检查格式(JSON / YAML / Python 语法),格式不对不写;JSON 按文件原来的缩进写回。打开之后文件被别人(Claude /
+  终端)改过就拒绝保存,要关掉重新打开。只能写这里列出的位置(页面只传第几项)。
+  改已批准的格子会变成「失效」、改待审的会变成「提交后已改」,下游闸门随之关闭,保存后点「重新提交这一格」。
+  有没保存的改动时第一次关闭只提示;保存过的话关闭后页面刷新,格子里的信息跟着变。点组名打开的整组对话框里,每个条目
+  点「✎ 编辑」才读出来。还不存在的文件不能在这里新建(让 Claude 做这一格)。
+- **按钮**:都在格子里,点了弹出对话框(不在表里插行)。采集 / 转换 / 上传弹出计划,填好 GPU / 勾选后确认才开始;后台由
+  `scripts/internal/group_jobs.py` 运行(命令行 `python scripts/internal/group_jobs.py plan|start|status|stop ...` 与按钮完全相同)。
+  - **「▶ Claude」**(design / layout / expert;assets 你自己填,ingest 是「⬇ 下载资产」):**只给提示词,不在后台起会话**(这些阶段要和你交互)。
+    点了弹出提示词对话框,点「复制」后贴到仓库目录里打开的 Claude Code,Claude 和你交互着做这一格,做完提交审核后停下。
+    提示词是 `/rsj-<阶段> <group> <task>` 加一句范围说明,随状态变:驳回(「↻ 按意见重做」)时带上最近一次驳回意见,
+    失效(「↻ 重做」)/ 提交后已改时写原因。**只在未开始 / 驳回 / 失效 / 提交后已改的格子上有**,已批准 / 待审的格子没有
+    (要改已批准的内容就在审核条目的编辑区里改,或者直接在终端里对 Claude 说)。还没有任务列表的组,design 格里的「▶ Claude」给
+    `/rsj-design <group>`(先拟任务列表给你确认,ingest 批准后才能点)。审核条目里也有同一个按钮(同样的状态才有)。
+    上游没批准时按钮灰掉(悬停看差什么)。框里的提示词可以先改再复制;用 IP 打开看板时浏览器不给剪贴板权限,
+    复制会退回到全选让你按 Ctrl/⌘+C。
+  - **「▶ 采集」**(collect):该任务的 expert 批准后可点。计划列出已有 / 要补几条、残留分片按原条数续采、YAML 注释里写了
+    `--layout_template` 的自动带上、各卡显存;用 `collect_data_parallel.sh` 采,采完不提交。不同任务可以同时采(用不同的卡)。
+  - **「⇄ 转换」**(exchange):采够 100 条后可点,`export_lerobot.sh --format both` 转换 LeRobot v3.0 + v2.1。
+  - **「⬆ 上传」**(upload):转换完、条数一致后可点。先对 HDF5 和 LeRobot 各做一次 `--task` dry-run,列出要上传 / 删除的文件,
+    你确认后才传;默认 `--no_delete`,勾选才删远端多余文件;上传后核对 sha256 和 `check_task_alignment --only modelscope`。
+    上传脚本不带 `--dry_run` 时只检查该任务的 expert 已批准。
+  - 任务在独立会话里后台运行,**看板重启不会中断**;状态在 `data/pipeline/_jobs/<group>.<task>.json`,日志在
+    `data/.cache/jobs/task_<task>_<kind>_<时间>.log`(2026-11-13 之前后台 Claude 会话的旧日志是 `task_<task>_claude_<阶段>_<时间>.log`),
+    进度显示在按钮下方和页面顶部(运行中有 `⏹ 停止`,停止后再点会续采 / 续传)。每个任务同时只跑一个,
+    转换 / 上传同一时间只有一个。
+  - 批准 / 驳回仍由你在审核条目里点;提示词里也要求 Claude 只做和提交,不批准。
+- 自动刷新时如果说明框里有没写完的字或开着对话框,会推迟刷新。
+- 页面上不再有统计卡片、模型 / 评测矩阵、W&B 表和不按组的导出 / 上传 / 下载模型按钮。对应的命令行:
+  `scripts/export_lerobot.sh`、`src/data_collect/upload_to_modelscope.py` / `upload_lerobot_to_modelscope.py`、
+  `scripts/download_models_from_modelscope.py`、`scripts/download_wandb_from_modelscope.py` / `scripts/upload_wandb_to_cloud.py`;
+  服务端的 `/api/export/*`、`/api/upload/*`、`/api/download_model`、`/api/wandb/*` 接口还在。汇总表见 `data/SYNC_STATUS.md`。
+- 默认只绑定 `127.0.0.1`,需要局域网访问时加 `--host 0.0.0.0`(注意页面上的按钮可以直接触发采集和上传,不要暴露到不可信网络)。
 
 - HDF5 远端仓库默认取 `MS_DATA_REPO_ID`;没有设置时,从 `data/.cache/modelscope/upload_<user>__<repo>.json` 推断。LeRobot 远端仓库默认取 `MS_LEROBOT_REPO_ID`,否则用 `<HDF5 repo>-Lerobot`(如 `zjushine/RoboSafeJanus-Benchmark-Lerobot`),也可用 `--lerobot_repo_id` 指定。训练模型仓库默认取 `MS_MODEL_REPO_ID`,否则用 `<owner>/RoboSafeJanus-Model`(如 `zjushine/RoboSafeJanus-Model`),也可用 `--model_repo_id` 指定。查询远端需要 `modelscope_hub`(RoboDojo 环境自带)。
+> 下面几条(模型矩阵、已训练模型卡片、W&B 训练记录、结果矩阵等)是 2026-11-13 之前看板上的区块,页面上已经去掉,
+> 只剩大表里的「模型」「评测结果」「评测布局」列;其中说的仓库布局、下载 / 上传脚本和代理设置仍然适用。
+
 - `模型矩阵`(型号 × 任务组,只列 safe)检查 ModelScope model 仓库里每个任务组的组模型 `<group>_safe_tasks`;模型都是按 safe 组训练的,risky 用同组 safe 模型泛化评测,所以模型矩阵不再分 safe / risky。每格用两个徽标分别标远端和本地:`远端 step 8999`(ModelScope 仓库里已有的 step)与 `本地 step 8999` / `本地 step 8999 · 待更新`(远端更新、本地还是旧 step) / `本地 step 20000 · 新于远端` / `本地 无`(远端有、本机未下载);行首汇总该型号 `远端 N · 本地 M 个模型` 及大小,悬停看目录、step 和大小。第三行是该组的 W&B 状态:`W&B 本地 a/b · 已传 a/b`(`a/b` = 已下载 / 已上传到 W&B 官方的 run 数)、`W&B 缺 N`(仓库里只有 checkpoint、没有 `wandb/` 的 run),悬停看逐 run 明细;**评测进度不放这里**,看下面的 `评测进度矩阵`。下载 / 上传 W&B 的按钮在页面顶部(`下载模型` 旁边)。任务级小模型不占格,统一放在下方「已训练模型」卡片(策略、目录、checkpoint、大小、下载按钮、ModelScope 链接)。**例外**:小组只有一个任务时(如 `put_X_toaster/safe_tasks` 只有 `put_bread_toaster`),该任务的模型就是该小组的组模型,矩阵里照常显示,卡片标注「单任务小组」并把「对应」写成 `<group>/<level>`(ModelScope 目录名仍沿用任务名)。仓库约定布局为 `<policy>/<task|group_level>/<run>/<step>/...`。
 - 模型下载:本地镜像在 `data/RoboSafeJanus-Model/`(可用 `--model_local_dir` 改),下载后自动在 `XPolicyLab/policy/<policy>/checkpoints/<run>` 建软链接。"已训练模型"卡片里的下载按钮下载该 run 的最新 step;顶部"下载模型"按钮只下载本地缺失或不是最新 step 的模型。底层脚本是 `scripts/download_models_from_modelscope.py --step latest`。
 - `W&B 训练记录`:模型仓库里训练机一起传上来的 `<policy>/<task>/<run>/wandb/<run-dir>/...` 列成一张表(本地 / 已上传状态)。行内 `⬇️` 走 `scripts/download_wandb_from_modelscope.py`,顶部 `同步 W&B 数据` 会先跑这一步,镜像到 `data/RoboSafeJanus-Wandb/`(可用 `--wandb_dir` 改),已下载的文件跳过。模型仓库里有 checkpoint、但 run 目录下没有 `wandb/` 的 run 也会列出来,标「远端无 wandb」,标题里统计「缺 wandb N」。

@@ -1,12 +1,18 @@
 #!/usr/bin/env python3
 """Generate a live sync-status table for local data, ModelScope, and LeRobot exports.
 
-Writes three files under ``data/`` by default:
+Writes these files under ``data/`` by default:
 
+    data/PIPELINE.html      the dashboard (default page with --serve): ONE wide table, one row per task --
+                            pipeline stages seed .. eval with HDF5 / LeRobot / video / model / eval data columns
+                            in between (pipeline_page.py, fragment data/pipeline/_fragments/table.html);
+                            click a status cell to open its review entry (approve / reject) under the group;
+                            "▶ Claude" buttons in the build cells (assets .. expert) only show a prompt to paste
+                            into an interactive Claude Code session; "采集" / "转换" / "上传" in collect / exchange /
+                            upload (not reviewed) open a plan dialog first (scripts/internal/group_jobs.py)
+    data/TASK_BUILD.html, SYNC_STATUS.html, MODELS_EVAL.html
+                            small pages that jump to the matching tab (old links keep working)
     data/SYNC_STATUS.md     human-readable Markdown table
-    data/SYNC_STATUS.html   self-contained dashboard (auto-refreshes the page)
-    data/MODELS_EVAL.html   models + evaluation page, linked from the dashboard
-    data/TASKS.html         task groups / tasks / instructions page
     data/SYNC_STATUS.json   machine-readable snapshot
 
 Usage::
@@ -60,7 +66,6 @@ from src.data_collect.benchmark_layout import (  # noqa: E402
     LEVELS,
     REMOTE_PREFIX,
     TASKS_JSON,
-    load_tasks,
     task_groups,
 )
 
@@ -68,6 +73,8 @@ DEFAULT_LOCAL = ROOT_DIR / DEFAULT_SAVE_DIR
 DEFAULT_LEROBOT = ROOT_DIR / "data" / "RoboSafeJanus-Benchmark-Lerobot"
 DEFAULT_MODEL = ROOT_DIR / "data" / "RoboSafeJanus-Model"
 DEFAULT_WANDB = ROOT_DIR / "data" / "RoboSafeJanus-Wandb"
+# 上传到 W&B 官方要走本机 clash 的混合端口;WANDB_PROXY="" 表示不走代理
+DEFAULT_WANDB_PROXY = "http://127.0.0.1:49623"
 WANDB_API_KEY_FILE = ROOT_DIR / "data" / ".cache" / "wandb" / "api_key"
 WANDB_RUN_RE = re.compile(r"^(?:offline-)?run-\d{8}_\d{6}-[A-Za-z0-9]+$")
 DEFAULT_EVAL = ROOT_DIR / "eval_result"
@@ -211,7 +218,7 @@ CODE_LABELS = {"impl": "实现", "config": "配置", "expert": "专家"}
 
 JOB_KINDS = (
     "export_v30", "export_v21", "upload_hdf5", "upload_lerobot",
-    "download_model", "download_wandb", "upload_wandb", "sync_wandb",
+    "download_model", "download_wandb", "upload_wandb", "sync_wandb", "pipeline",
 )
 EXPORT_JOBS = {"v30": "export_v30", "v21": "export_v21"}
 JOB_LABELS = {
@@ -223,6 +230,7 @@ JOB_LABELS = {
     "download_wandb": "W&B 数据下载",
     "upload_wandb": "W&B 上传（官方）",
     "sync_wandb": "W&B 数据同步",
+    "pipeline": "流水线检查",
 }
 JOBS_LOCK = threading.Lock()
 JOBS: dict[str, dict] = {
@@ -588,6 +596,47 @@ def resolve_model_target(key: str, json_tasks: dict[str, tuple[str, str]]) -> tu
     return None, "unknown", None, None
 
 
+def running_model_downloads() -> set[tuple[str, str]]:
+    """正在跑的 ``download_models_from_modelscope.py`` 的 ``(policy, task)``(扫 /proc,看板重启后没记录的下载也算)。"""
+    found = set()
+    for cmdline in Path("/proc").glob("[0-9]*/cmdline"):
+        try:
+            args = cmdline.read_bytes().decode("utf-8", "replace").split("\0")
+        except OSError:
+            continue
+        if not any(a.endswith("download_models_from_modelscope.py") for a in args):
+            continue
+        value = {flag: args[i + 1] for i, flag in enumerate(args[:-1]) if flag in ("--policy", "--task")}
+        found.add((value.get("--policy", "*"), value.get("--task", "*")))
+    return found
+
+
+def model_downloading(model: dict, running: set[tuple[str, str]]) -> bool:
+    return any(p in (model["policy"], "*") and t in (model["key"], "*") for p, t in running)
+
+
+def step_dir_complete(step_dir: Path, remote: list[int] | None) -> tuple[bool, int]:
+    """本地一个 checkpoint step 是否下载完整:``(完整, 本地字节数)``。
+
+    还有 ModelScope 的 ``*.incomplete`` 临时文件,或者文件数 / 字节数少于远端,都算没下完
+    (只看目录在不在会把正在下载的模型当成已下载)。"""
+    files, size = 0, 0
+    for dirpath, _, filenames in os.walk(step_dir):
+        for name in filenames:
+            if name.endswith(".incomplete"):
+                return False, size
+            if name in LOCAL_IGNORE_NAMES:
+                continue
+            try:
+                size += os.stat(os.path.join(dirpath, name)).st_size
+            except OSError:
+                continue
+            files += 1
+    if remote is not None and (files < remote[0] or size < remote[1]):
+        return False, size
+    return files > 0, size
+
+
 def collect_models(
     repo_id: str | None,
     json_tasks: dict[str, tuple[str, str]],
@@ -629,26 +678,31 @@ def collect_models(
                 wandb_entry = wandb_entries.setdefault(
                     (policy, key, run, run_dir),
                     {"policy": policy, "key": key, "run": run, "run_dir": run_dir,
-                     "files": 0, "size": 0},
+                     "files": 0, "size": 0, "sizes": {}},
                 )
                 wandb_entry["files"] += 1
                 wandb_entry["size"] += getattr(item, "size", 0) or 0
+                wandb_entry["sizes"]["/".join(parts[index + 2:])] = getattr(item, "size", 0) or 0
             continue
         policy, key = parts[0], parts[1]
         directory = f"{policy}/{key}"
         entry = entries.setdefault(
             directory,
             {"policy": policy, "key": key, "path": directory,
-             "runs": set(), "steps": set(), "files": 0, "size": 0},
+             "runs": set(), "steps": set(), "files": 0, "size": 0, "step_remote": {}},
         )
         entry["files"] += 1
         entry["size"] += getattr(item, "size", 0) or 0
-        for part in parts[2:]:
-            if part.isdigit():
-                entry["steps"].add(part)
-                break
-        if len(parts) >= 4 and not parts[2].isdigit():
-            entry["runs"].add(parts[2])
+        step = next((part for part in parts[2:-1] if part.isdigit()), None)
+        if step:
+            entry["steps"].add(step)
+        run = parts[2] if len(parts) >= 4 and not parts[2].isdigit() else None
+        if run:
+            entry["runs"].add(run)
+            if step:  # 每个 run 的每个 step 远端有多少文件 / 字节,用来判断本地是否下载完整
+                remote = entry["step_remote"].setdefault((run, step), [0, 0])
+                remote[0] += 1
+                remote[1] += getattr(item, "size", 0) or 0
 
     models = []
     level_counts = Counter(json_tasks.values())
@@ -665,7 +719,8 @@ def collect_models(
             target = task
         else:
             target = "—"
-        local_steps: set[str] = set()
+        local_steps: set[str] = set()  # 下载完整的 step
+        partial_steps: set[str] = set()  # 目录在但没下完(还在下载 / 中断过)
         local_size = 0
         if local_root is not None:
             for run in sorted(entry["runs"]):
@@ -674,8 +729,10 @@ def collect_models(
                     continue
                 for step_dir in sorted(run_dir.iterdir()):
                     if step_dir.is_dir() and step_dir.name.isdigit():
-                        local_steps.add(step_dir.name)
-                        local_size += dir_size(step_dir)[1]
+                        complete, size = step_dir_complete(step_dir, entry["step_remote"].get((run, step_dir.name)))
+                        (local_steps if complete else partial_steps).add(step_dir.name)
+                        local_size += size
+        partial_steps -= local_steps
         steps = sorted(entry["steps"], key=int)
         latest_step = steps[-1] if steps else None
         models.append({
@@ -694,6 +751,7 @@ def collect_models(
             "group": group,
             "level": level,
             "local_steps": sorted(local_steps, key=int),
+            "partial_steps": sorted(partial_steps, key=int),
             "local_size": local_size,
             "downloaded": bool(local_steps),
             "needs_download": bool(latest_step) and latest_step not in local_steps,
@@ -747,7 +805,14 @@ def collect_wandb_runs(
         rel = f"{policy}/{key}/{run}/wandb/{run_dir}"
         local_dir = (wandb_root or DEFAULT_WANDB) / policy / key / run / "wandb" / run_dir
         local_files, local_bytes, local_mtime = dir_size(local_dir)
+        # 每个远端文件本地都有且大小一样才算下载完(只比文件个数的话,远端换了文件也看不出来)
+        sizes = entry.get("sizes") or {}
+        same = sum(1 for sub, size in sizes.items()
+                   if (local_dir / sub).is_file() and (local_dir / sub).stat().st_size == size)
         synced = state.get(rel) or {}
+        remote_wandb = sum(size for sub, size in sizes.items() if sub.endswith(".wandb"))
+        # 上传之后远端 .wandb 换了(训练机重新上传了完整文件):算没上传,要重新同步
+        stale = bool(synced.get("synced_at")) and "wandb_bytes" in synced and remote_wandb != synced["wandb_bytes"]
         runs.append({
             "policy": policy,
             "key": key,
@@ -763,10 +828,13 @@ def collect_wandb_runs(
                 "files": local_files,
                 "bytes": local_bytes,
                 "mtime": local_mtime,
-                "downloaded": local_files >= entry["files"] > 0,
-                "partial": 0 < local_files < entry["files"],
+                "downloaded": same >= entry["files"] > 0,
+                "partial": 0 < same < entry["files"] or (same == 0 and local_files > 0),
             },
-            "uploaded": synced.get("synced_at"),
+            "uploaded": None if stale else synced.get("synced_at"),
+            "upload_partial": bool(synced.get("partial")) and not stale,  # .wandb 不完整,只传了写完的部分
+            "last_step": synced.get("last_step"),
+            "remote_changed": stale,
             "url": synced.get("url", ""),
             "state_file": rel_path(state_file),
         })
@@ -789,6 +857,9 @@ def collect_wandb_runs(
                 "local": {"path": "", "files": 0, "bytes": 0, "mtime": 0,
                           "downloaded": False, "partial": False},
                 "uploaded": None,
+                "upload_partial": False,
+                "last_step": None,
+                "remote_changed": False,
                 "url": "",
                 "state_file": rel_path(state_file),
             })
@@ -1096,12 +1167,68 @@ def job_tail(job: dict, limit: int = 16000, lines: int = 80) -> str:
     return "\n".join(text.splitlines()[-lines:])
 
 
+JOB_PROGRESS: dict[str, object] = {}  # kind -> 算进度的函数(launch_job 的 progress=),任务面板只显示进度
+
+
+def wandb_job_progress(log: str | None) -> dict | None:
+    """W&B 下载 / 上传 / 同步日志的进度:下载完没有、上传到第几个 run(段)。"""
+    try:
+        text = Path(log).read_text(encoding="utf-8", errors="replace") if log else ""
+    except OSError:
+        return None
+    bits = []
+    if "[download_wandb]" in text:
+        bits.append("下载 ✓" if "[download_wandb] downloaded" in text or "没有需要下载" in text else "下载中")
+    heads = re.findall(r"^===== \[(\d+)/(\d+)\]", text, re.M)
+    if heads:
+        done = len(re.findall(r"^\[upload_wandb\] (?:OK|FAILED|timeout)", text, re.M))
+        total = int(heads[-1][1])
+        bits.append(f"上传 {min(done, total)}/{total} 段")
+        return {"text": " · ".join(bits), "done": min(done, total), "total": total}
+    return {"text": " · ".join(bits), "done": 0, "total": 0} if bits else None
+
+
+def job_reason(job: dict) -> str:
+    """失败任务的一行原因(日志里最后一行报错),不用看日志。"""
+    for line in reversed(job_tail(job).splitlines()):
+        if re.search(r"FAILED|Error|错误|失败|failed|denied|timed out", line):
+            return line.strip()[:200]
+    return ""
+
+
 def jobs_snapshot() -> dict:
     with JOBS_LOCK:
-        return {kind: {**job, "log_tail": job_tail(job)} for kind, job in JOBS.items()}
+        jobs = {kind: dict(job) for kind, job in JOBS.items()}
+    import group_jobs
+
+    for kind, job in jobs.items():
+        job["log_tail"] = job_tail(job)
+        if job["state"] == "idle":
+            continue
+        try:
+            if kind in ("download_wandb", "upload_wandb", "sync_wandb"):
+                job["progress"] = wandb_job_progress(job.get("log"))
+            elif kind in ("upload_hdf5", "upload_lerobot"):
+                job["progress"] = group_jobs.upload_progress(job.get("log"))
+            elif JOB_PROGRESS.get(kind):
+                job["progress"] = JOB_PROGRESS[kind]()
+        except (OSError, ValueError, KeyError, TypeError):
+            job["progress"] = None
+        if job["state"] == "failed":
+            job["reason"] = job_reason(job)
+    return jobs
 
 
-def launch_job(kind: str, runner, out_dir: Path, on_done=None) -> None:
+def job_status_line(log_path: Path) -> str:
+    """任务日志里最后一行 ``[status] ...``(脚本自己写的结果说明,如"部分上传 …"),没有时空串。"""
+    try:
+        lines = log_path.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return ""
+    return next((line[len("[status] "):].strip() for line in reversed(lines) if line.startswith("[status] ")), "")
+
+
+def launch_job(kind: str, runner, out_dir: Path, on_done=None, progress=None) -> None:
     with JOBS_LOCK:
         job = JOBS[kind]
         if job["state"] == "running":
@@ -1115,6 +1242,7 @@ def launch_job(kind: str, runner, out_dir: Path, on_done=None) -> None:
             "message": "运行中",
             "log": str(log_path),
         })
+        JOB_PROGRESS[kind] = progress
     log_path.parent.mkdir(parents=True, exist_ok=True)
 
     def run() -> None:
@@ -1131,7 +1259,7 @@ def launch_job(kind: str, runner, out_dir: Path, on_done=None) -> None:
                     "state": "done" if code == 0 else "failed",
                     "finished_at": datetime.now().isoformat(timespec="seconds"),
                     "returncode": code,
-                    "message": "完成" if code == 0 else f"失败（exit {code}）",
+                    "message": job_status_line(log_path) or ("完成" if code == 0 else f"失败（exit {code}）"),
                 })
             if on_done:
                 try:
@@ -1177,6 +1305,138 @@ def export_runner(tasks: list[str], cwd: Path, version: str):
         return 0
 
     return run
+
+
+def model_item_html(model: dict, task: str, group: bool, wandb: list[dict] | None = None,
+                    running: set[tuple[str, str]] | None = None) -> str:
+    """大表模型列里的一个模型:policy、远端最新 step、本地有没有;本地没有最新 step 时带「⬇ 下载」按钮
+    (``download-model-btn``,点了确认后 ``/api/download_model?policy=&task=`` 后台下载并链接到 checkpoints)。
+
+    下面一行是这个模型的 W&B(``wandb`` 是 snapshot 里的 W&B 记录):有没上传的 run 时带「⟳ 同步 W&B」
+    (``sync-wandb-btn``,点了先列计划,确认后 ``/api/wandb/sync?policy=&task=`` 下载缺失的再上传到 W&B 官方)。"""
+    policy, key = model["policy"], model["key"]
+    latest = model.get("latest_step") or "—"
+    local = model.get("local_steps") or []
+    scope = "组模型 " if group else ""
+    if not model.get("needs_download"):
+        badge = f'<span class="badge good" title="{html.escape(key)}">✅ {scope}{html.escape(policy)}</span>'
+        detail = f"step {html.escape(latest)} · 已下载"
+        button = ""
+    else:
+        badge = f'<span class="badge warn" title="{html.escape(key)}">☁️ {scope}{html.escape(policy)}</span>'
+        partial = model.get("partial_steps") or []
+        have = [*(html.escape(s) for s in local), *(f"{html.escape(s)} 没下完" for s in partial)]
+        detail = f"step {html.escape(latest)} · " + (f"本地 {', '.join(have)}" if have else "本地没有")
+        size = human_bytes(model.get("size") or 0)
+        label = f"{policy}/{key}"
+        if model_downloading(model, running or set()):
+            got = model_local_bytes(model, DEFAULT_MODEL)
+            pct = f" {min(99, 100 * got // model['size'])}%" if model.get("size") else ""
+            detail += f" · 下载中{pct}"
+            return f'<div class="mdl">{badge}<br><small>{detail}</small>{wandb_item_html(model, wandb or [])}</div>'
+        button = (
+            f'<button class="download-model-btn mdl-btn" type="button" data-policy="{html.escape(policy)}"'
+            f' data-task="{html.escape(key)}" data-size="{html.escape(size)}" data-label="{html.escape(label)}"'
+            f' title="下载 {html.escape(label)} 的 step {html.escape(latest)}(约 {html.escape(size)}),'
+            f'完成后链接到 checkpoints">⬇ 下载 {html.escape(size)}</button>'
+        )
+    return f'<div class="mdl">{badge}<br><small>{detail}</small>{button}{wandb_item_html(model, wandb or [])}</div>'
+
+
+def wandb_run_text(r: dict) -> str:
+    """一个 W&B run 的状态(悬停提示用)。"""
+    downloaded = (r.get("local") or {}).get("downloaded")
+    if r.get("remote_changed"):
+        return "远端 wandb 有更新,要重新同步"
+    if r.get("upload_partial"):
+        step = r.get("last_step")
+        return (f"部分上传{f'(到 step {step})' if step is not None else ''} {r['uploaded']}:"
+                "远端 .wandb 不完整(训练还没结束就传了),训练机重新上传完整的 wandb/ 后这里会出「⟳ 同步」")
+    if r.get("uploaded"):
+        return "已上传 " + str(r["uploaded"])
+    return "本地已下载,未上传" if downloaded else "未下载,未上传"
+
+
+def wandb_run_groups(runs: list[dict]) -> list[list[dict]]:
+    """按 W&B run id 分组(目录名最后一段):训练中断后续训会在同一个 run id 下写新的 ``offline-run-<时间>-<id>``
+    目录(一段一个),要按时间顺序都传上去才是完整的曲线。每组按目录名(时间)排序。"""
+    groups: dict[tuple, list[dict]] = {}
+    for r in runs:
+        groups.setdefault((r["run"], r["run_dir"].rsplit("-", 1)[-1]), []).append(r)
+    return [sorted(g, key=lambda r: r["run_dir"]) for _, g in sorted(groups.items())]
+
+
+def wandb_item_html(model: dict, wandb: list[dict]) -> str:
+    """模型格里的 W&B 一行:按 run id 算(一个 run 可能分好几段),已上传几个、部分上传的到哪一步、本地下载了几个;
+    有没传的段(新段 / 远端有更新)就带「⟳ 同步 W&B」按钮。
+
+    前面的段被中断时结尾不完整(``incomplete record``,记成部分上传),只要最后一段完整传上去就算这个 run 完整。
+    所有段都传了、最后一段仍不完整时显示"部分",不出按钮(再传也一样,要训练机重新上传)。"""
+    policy, key = model["policy"], model["key"]
+    items = [r for r in wandb if r.get("policy") == policy and r.get("key") == key]
+    runs = [r for r in items if r.get("has_wandb")]
+    if not runs:
+        missing = ('<small class="wb muted" title="训练机上传 checkpoint 时没把 run 下的 wandb/ 一起传">'
+                   'W&amp;B 远端没有</small>')
+        return missing if items else ""
+    groups = wandb_run_groups(runs)
+    todo = [g for g in groups if any(not r.get("uploaded") for r in g)]
+    part = [g for g in groups if g not in todo and g[-1].get("upload_partial")]
+    full = [g for g in groups if g not in todo and g not in part]
+    down = [g for g in groups if all((r.get("local") or {}).get("downloaded") for r in g)]
+    lines = []
+    for g in groups:
+        rid = g[0]["run_dir"].rsplit("-", 1)[-1]
+        lines.append(f"{rid}" + (f"(分 {len(g)} 段,训练中断后续训)" if len(g) > 1 else "") + ":")
+        lines += [f'  {r["run_dir"]}: {wandb_run_text(r)}' for r in g]
+    tip = "\n".join(lines)
+    n = len(groups)
+    bits = [f"W&amp;B 已上传 {len(full)}/{n}"]
+    if part:
+        steps = sorted({str(g[-1]["last_step"]) for g in part if g[-1].get("last_step") is not None})
+        bits.append(f"部分 {len(part)}" + (f"(到 step {'、'.join(steps)})" if steps else ""))
+    if todo:
+        segs = sum(1 for g in todo for r in g if not r.get("uploaded"))
+        bits.append(f"本地 {len(down)}/{n}")
+        if any(len(g) > 1 for g in todo):
+            bits.append(f"{segs} 段没传")
+    if any(r.get("remote_changed") for r in runs):
+        bits.append("远端有更新")
+    text = " · ".join(bits)
+    url = next((r.get("url") for g in full + part for r in reversed(g) if r.get("url")), "")
+    if not todo:
+        body = ("✅ " if not part else "⚠️ ") + text
+        body = f'<a target="_blank" rel="noopener" href="{html.escape(url)}">{body} ↗</a>' if url else body
+        return f'<small class="wb" title="{html.escape(tip)}">{body}</small>'
+    label = f"{policy}/{key}"
+    button = (f'<button class="sync-wandb-btn mdl-btn" type="button" data-policy="{html.escape(policy)}"'
+              f' data-task="{html.escape(key)}" data-label="{html.escape(label)}"'
+              f' title="先下载缺失的 wandb 目录,再按时间顺序上传到 W&amp;B 官方(点了先列计划,确认后后台运行)">'
+              '⟳ 同步 W&amp;B</button>')
+    return f'<small class="wb" title="{html.escape(tip)}">{text}</small>{button}'
+
+
+def model_local_bytes(model: dict, root: Path) -> int:
+    """本地这个模型最新 step 已经下了多少字节(含还在下载的 ``*.incomplete``)。"""
+    total = 0
+    for run in model.get("runs") or []:
+        step_dir = root / model["policy"] / model["key"] / run / str(model.get("latest_step") or "")
+        if model.get("latest_step") and step_dir.is_dir():
+            for dirpath, _, names in os.walk(step_dir):
+                for name in names:
+                    try:
+                        total += os.stat(os.path.join(dirpath, name)).st_size
+                    except OSError:
+                        pass
+    return total
+
+
+def download_progress(models: list[dict], root: Path) -> dict:
+    """模型下载进度:按本地已下的字节 / 远端大小。"""
+    done = [min(model_local_bytes(m, root), m.get("size") or 0) for m in models]
+    total = sum(m.get("size") or 0 for m in models)
+    text = " · ".join(f"{m['policy']} {human_bytes(d)}/{human_bytes(m.get('size') or 0)}" for m, d in zip(models, done))
+    return {"text": text, "done": sum(done), "total": total}
 
 
 def download_models_runner(models: list[dict], cwd: Path):
@@ -1269,7 +1529,8 @@ def sync_wandb_runner(
         if not upload_runs:
             log.write("[sync_wandb] 没有需要上传的 run，完成\n")
             return 0
-        return upload_wandb_runner(upload_runs, cwd, entity, project, False, proxy)(log)
+        # force(--all):看板已经挑好了要传的 run,远端更新后重新下载的 run 在状态文件里有旧记录也要再传
+        return upload_wandb_runner(upload_runs, cwd, entity, project, True, proxy)(log)
 
     return run
 
@@ -2838,14 +3099,32 @@ DASHBOARD_CSS = BASE_CSS + """
   #refresh-btn, #plan-ok { background: var(--accent); border-color: var(--accent); color: #fff; }
   #refresh-btn:hover, #plan-ok:hover { background: var(--accent); filter: brightness(1.08); }
   .jobs { margin-bottom: 16px; }
+  section.tab > .toolbar { margin-top: 16px; }
+  button.gact { font: inherit; font-size: 12px; background: var(--panel); color: var(--text);
+    border: 1px solid var(--border); border-radius: 7px; padding: 3px 10px; cursor: pointer; white-space: nowrap; }
+  button.gact:hover:not(:disabled) { border-color: var(--accent); }
+  button.gact:disabled { opacity: .45; cursor: not-allowed; }
+  .gbtns { display: flex; flex-direction: column; gap: 5px; align-items: stretch; }
+  .gjob { font-size: 11px; color: var(--muted); margin-top: 4px; white-space: normal; max-width: 220px; }
+  .gjob.running { color: var(--warn-fg); } .gjob.done { color: var(--good-fg); }
+  .gjob.failed, .gjob.interrupted { color: var(--bad-fg); }
+  .plan-fields { display: flex; flex-direction: column; gap: 8px; margin: 8px 0; font-size: 13px; }
+  .plan-fields input[type=text] { margin-left: 6px; font: inherit; background: var(--panel); color: var(--text);
+    border: 1px solid var(--border); border-radius: 6px; padding: 4px 8px; width: 160px; }
   .job { background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); padding: 10px 14px; margin-bottom: 8px; font-size: 13px; }
   .job .head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
   .job .state { font-weight: 600; }
   .job .state.running { color: var(--warn-fg); }
   .job .state.done { color: var(--good-fg); }
   .job .state.failed { color: var(--bad-fg); }
+  .job .state.partial { color: var(--warn-fg); }
   pre { background: var(--panel-2); border: 1px solid var(--line); border-radius: 7px; padding: 10px; overflow: auto; white-space: pre-wrap; font: 11px/1.5 var(--mono); }
   .job pre { margin: 8px 0 0; max-height: 220px; }
+  .job .jprog { margin-top: 6px; color: var(--text); }
+  .job .jbar { height: 6px; background: var(--border); border-radius: 3px; overflow: hidden; margin-bottom: 4px; }
+  .job .jbar > span { display: block; height: 100%; background: var(--accent); }
+  .job .jwhy { margin-top: 3px; color: var(--muted); }
+  .job .jwhy.bad { color: var(--bad-fg); }
   dialog { background: var(--panel); color: var(--text); border: 1px solid var(--border); border-radius: 12px; padding: 18px 20px; width: min(900px, calc(100% - 48px)); box-shadow: 0 16px 48px rgba(0, 0, 0, .25); }
   dialog::backdrop { background: rgba(1, 4, 9, .55); }
   dialog h2 { margin: 0 0 12px; }
@@ -2925,166 +3204,48 @@ DASHBOARD_CSS = BASE_CSS + """
 """
 
 
-def nav_html(page: str) -> str:
-    """页面右上角的三页切换。"""
-    links = (
-        ("sync", "SYNC_STATUS.html", "数据同步"),
-        ("models", "MODELS_EVAL.html", "模型与评测"),
-        ("tasks", "TASKS.html", "任务清单"),
-    )
+TABS = (
+    ("overview", "总览"),
+    ("build", "任务构造"),
+    ("data", "数据收集与上传"),
+    ("eval", "模型评测"),
+)
+
+
+def nav_html(page: str = "overview") -> str:
+    """页面右上角的标签切换(页内 ``#overview`` / ``#build`` / ``#data`` / ``#eval``,由 pipeline_page 的脚本切换)。"""
     current = ' aria-current="page"'
     return '<nav class="tabs">' + "".join(
-        f'<a href="{href}"{current if key == page else ""}>{label}</a>'
-        for key, href, label in links
+        f'<a href="#{key}" data-tab="{key}"{current if key == page else ""}>{label}</a>'
+        for key, label in TABS
     ) + "</nav>"
 
 
-def task_catalog_page(generated_at: str, refresh: int) -> str:
-    """只展示任务合集 ``task/robosafejanus_tasks.json`` 中的任务组、小任务(顺序同 JSON)与指令。
+def pipeline_parts(out_dir: Path) -> tuple[dict[str, str], str]:
+    """``({标签: 片段容器}, 样式和脚本)``;流水线部分出错时为空,不影响看板本身。"""
+    try:
+        sys.path.insert(0, str(Path(__file__).parent))
+        import pipeline_page
 
-    ``same_as`` 共用的任务在引用它的组里也列出(标注归属组),但总数只按归属组算一次。
-    """
-    groups: dict = load_tasks(include_shared=True)
-    level_labels = {"safe_tasks": "safe", "risky_tasks": "risky"}
-    counts = {level: 0 for level in LEVELS}
-    for levels in groups.values():
-        for level in LEVELS:
-            counts[level] += sum(1 for task in (levels.get(level) or {}).values() if "same_as" not in task)
-    total = sum(counts.values())
-    sections = []
-    pills = []
-    for index, (group, levels) in enumerate(groups.items(), 1):
-        rows = []
-        for level in LEVELS:
-            label = level_labels.get(level, level)
-            for name, task in (levels.get(level) or {}).items():
-                instruction = (task or {}).get("instruction") or ""
-                search = f"{name} {instruction}".lower()
-                owner = (task or {}).get("same_as")
-                shared = (
-                    f' <small class="shared">共用,数据在 <code>{html.escape(owner)}</code></small>' if owner else ""
-                )
-                rows.append(
-                    '<tr class="task-row" data-search="'
-                    f'{html.escape(search, quote=True)}">'
-                    f'<td><span class="badge lvl-{html.escape(label)}">{html.escape(label)}</span></td>'
-                    f"<td><code>{html.escape(name)}</code>{shared}</td>"
-                    f'<td class="instruction">{html.escape(instruction) or "—"}</td>'
-                    "</tr>"
-                )
-        if not rows:
-            rows.append('<tr><td colspan="3" class="empty">（本组暂无任务）</td></tr>')
-        group_count = sum(len(levels.get(level) or {}) for level in LEVELS)
-        pills.append(
-            f'<a class="pill" href="#group-{index}"><code>{html.escape(group)}</code>'
-            f"<span>{group_count} 个</span></a>"
-        )
-        level_counts = " · ".join(
-            f"{level_labels.get(level, level)} {len(levels.get(level) or {})}"
-            for level in LEVELS
-        )
-        sections.append(
-            f'<section class="group" id="group-{index}">'
-            '<div class="group-head">'
-            f'<span class="group-index">{index}</span>'
-            f"<code>{html.escape(group)}</code>"
-            f'<span class="group-meta">{level_counts}</span>'
-            '<span class="shown-count"></span>'
-            "</div>"
-            '<table><thead><tr><th class="col-level">层级</th>'
-            '<th class="col-name">小任务</th><th>指令</th></tr></thead>'
-            f"<tbody>{''.join(rows)}</tbody></table>"
-            "</section>"
-        )
-    style = BASE_CSS + """
-  .toolbar { display: flex; align-items: center; gap: 10px; margin-bottom: 14px; }
-  #filter { width: min(420px, 100%); }
-  .pills { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 22px; }
-  .pill { display: inline-flex; align-items: center; gap: 6px; background: var(--panel); border: 1px solid var(--border); border-radius: 999px; padding: 3px 10px; color: var(--text); text-decoration: none; font-size: 12px; }
-  .pill:hover { border-color: var(--accent); }
-  .pill span { color: var(--faint); }
-  .group { margin-bottom: 18px; scroll-margin-top: 16px; }
-  .group-head { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; margin: 0 2px 8px; }
-  .group-head code { font-size: 14px; font-weight: 600; }
-  .group-index { color: var(--faint); font-variant-numeric: tabular-nums; }
-  .group-meta { color: var(--muted); font-size: 12px; }
-  .shown-count { margin-left: auto; color: var(--warn-fg); font-size: 12px; }
-  .task-row[hidden] { display: none; }
-  .col-level { width: 76px; }
-  .col-name { width: 32%; }
-  .shared { color: var(--faint); margin-left: 4px; }
-"""
-    script = """
-(function () {
-  const filter = document.getElementById('filter');
-  if (!filter) return;
-  filter.addEventListener('input', () => {
-    const q = filter.value.trim().toLowerCase();
-    document.querySelectorAll('section.group').forEach((section) => {
-      let shown = 0;
-      section.querySelectorAll('tr.task-row').forEach((row) => {
-        const hit = !q || (row.dataset.search || '').includes(q);
-        row.hidden = !hit;
-        if (hit) shown += 1;
-      });
-      section.hidden = Boolean(q) && shown === 0;
-      const counter = section.querySelector('.shown-count');
-      if (counter) counter.textContent = q ? shown + ' 条匹配' : '';
-    });
-  });
-})();
-"""
-    refresh_meta = f'<meta http-equiv="refresh" content="{refresh}">' if refresh > 0 else ""
-    return f"""<!doctype html>
-<html lang="zh-CN">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>RoboSafeJanus 任务清单</title>
-{refresh_meta}
-<style>{style}</style>
-</head>
-<body>
-<div class="page">
-<header class="top">
-  <div>
-    <h1>RoboSafeJanus 任务清单</h1>
-    <div class="meta">生成时间 {html.escape(generated_at)} · 来源 <code>task/robosafejanus_tasks.json</code>{f" · 每 {refresh} 秒刷新" if refresh else ""}</div>
-  </div>
-  {nav_html("tasks")}
-</header>
-<div class="cards">
-  <div class="card"><div class="label">任务组</div><div class="value">{len(groups)} groups</div><div class="sub">task/robosafejanus_tasks.json</div></div>
-  <div class="card"><div class="label">小任务</div><div class="value">{total} tasks</div><div class="sub">safe {counts["safe_tasks"]} · risky {counts["risky_tasks"]}</div></div>
-  <div class="card"><div class="label">safe / risky</div><div class="value">{counts["safe_tasks"]} / {counts["risky_tasks"]}</div><div class="sub">每个任务的指令见下表</div></div>
-</div>
-<div class="toolbar">
-  <input id="filter" type="search" placeholder="筛选任务名或指令…（如 heat / risky / microwave）" autocomplete="off">
-</div>
-<div class="pills">{''.join(pills)}</div>
-{''.join(sections)}
-</div>
-<script>{script}</script>
-</body>
-</html>
-"""
+        boxes = {key: pipeline_page.fragment_box(key, out_dir) for key in pipeline_page.FRAGMENTS}
+        return boxes, pipeline_page.merged_assets()
+    except Exception:  # noqa: BLE001 - 审核区出问题不影响看板本身
+        print("[sync_status] pipeline parts failed:\n" + traceback.format_exc(), flush=True)
+        return {}, ""
 
 
 def html_page(
-    snapshot: dict, refresh: int, thumbs: dict[str, str] | None = None, page: str = "sync",
+    snapshot: dict, refresh: int, thumbs: dict[str, str] | None = None, out_dir: Path = DEFAULT_OUT,
 ) -> str:
-    """生成看板页面；``page="models"`` 时只渲染模型与评测页（MODELS_EVAL.html）。"""
+    """生成看板页面 PIPELINE.html：只有一张流水线大表（pipeline_page.table_html），本函数算出每个任务的数据格。
+
+    ``thumbs`` 不再使用（以前的视频卡片墙），留着兼容调用方。
+    """
     summary = snapshot["summary"]
     json_tasks = task_groups()
-    thumbs = thumbs or {}
-    rows = []
-    detail_rows = []
-    group_counts = Counter(row["group"] for row in snapshot["tasks"])
-    group_numbers: dict[str, int] = {}
-    for row in snapshot["tasks"]:
-        if row["group"] not in group_numbers:
-            group_numbers[row["group"]] = len(group_numbers) + 1
-    seen_groups: set[str] = set()
+    wandb_rows = snapshot.get("wandb") or []
+    downloading = running_model_downloads()  # 模型格:正在下载的不出「⬇ 下载」按钮
+    task_cells: dict[str, dict] = {}  # 大表的数据格(pipeline_page.CELLS_FILE)
     for row in snapshot["tasks"]:
         local = row["local"]
         remote = row["remote"]
@@ -3117,12 +3278,17 @@ def html_page(
                 remote_html += f"（{signed_bytes(delta)}）"
             remote_html += "</small>"
         hdf5_cell = local_html + "<br>" + remote_html
+        # 大表 collect / exchange / upload 格用的纯数据:本地大小、各份数据的远端状态
+        # (synced / local_only / diff / missing / unknown)
+        size = human_bytes(local["size"]) if local and local["episodes"] else ""
+        sync = {"hdf5": remote_status, "hdf5_size": size}
         lerobot_cells = []
         for version in LEROBOT_VERSIONS:
             export = row["lerobot"][version]
             remote_export = row["lerobot_remote"][version]
             status = row["status"][version]
             remote_status = row["status"][f"{version}_remote"]
+            sync[version] = remote_status
             if not export:
                 local_html = '<span class="badge bad">本地 ❌ 无</span>'
             else:
@@ -3147,49 +3313,10 @@ def html_page(
                 episodes = f"{remote_export['episodes']} 条" if remote_export["episodes"] is not None else "未知"
                 remote_html += f'<br><small>{episodes} / {human_bytes(remote_export["size"])}</small>'
             lerobot_cells.append(local_html + "<br>" + remote_html)
-        overall_label = {
-            "done": "✅ 全同步",
-            "to_upload": "⬆️ HDF5 待上传",
-            "to_export": "🔄 待导出",
-            "to_upload_lerobot": "⬆️ LeRobot 待上传",
-            "not_collected": "○ 未采集",
-            "orphan": "⚠️ JSON 外",
-            "remote_only": "⬇️ 仅远端",
-        }.get(row["overall"], row["overall"])
-        overall_class = {
-            "done": "good", "to_upload": "warn", "to_export": "warn",
-            "to_upload_lerobot": "warn", "orphan": "warn", "remote_only": "warn",
-        }.get(row["overall"], "bad")
-        json_label = {
-            "aligned": "✅ 一致",
-            "extra": "⚠️ JSON 外",
-            "mismatch": "⚠️ 位置不符",
-            "definition_only": "○ 仅定义",
-        }.get(row["json"]["state"], row["json"]["state"])
-        json_class = {"aligned": "good", "extra": "warn", "mismatch": "warn"}.get(row["json"]["state"], "bad")
-        json_cell = f'<span class="badge {json_class}">{json_label}</span>'
-        if row["json"]["detail"]:
-            json_cell += f'<br><small>{html.escape(row["json"]["detail"])}</small>'
-        code_label, code_detail = code_text(row["code"], row["name"])
-        code_state = row["code"]["state"]
-        code_class = "good" if code_state == "ready" else ("warn" if code_state == "partial" else "bad")
-        code_cell = f'<span class="badge {code_class}">{html.escape(code_label)}</span>'
-        if code_detail:
-            code_cell += f'<br><small>{html.escape(code_detail)}</small>'
-        model_parts = []
-        for model in row["models"]:
-            steps = ", ".join(model["steps"]) or "—"
-            model_parts.append(
-                f'<span class="badge good">✅ {html.escape(model["policy"])}</span>'
-                f'<br><small>step {html.escape(steps)}</small>'
-            )
-        for model in row["group_models"]:
-            steps = ", ".join(model["steps"]) or "—"
-            model_parts.append(
-                f'<span class="badge warn">组模型 {html.escape(model["policy"])}</span>'
-                f'<br><small>step {html.escape(steps)}</small>'
-            )
-        model_cell = "<br>".join(model_parts) if model_parts else "—"
+        model_parts = [model_item_html(model, row["name"], False, wandb_rows, downloading) for model in row["models"]]
+        model_parts += [model_item_html(model, row["name"], True, wandb_rows, downloading)
+                        for model in row["group_models"]]
+        model_cell = "".join(model_parts) if model_parts else "—"
         eval_parts = []
         for result in row["evals"]:
             label = eval_label(result, row, json_tasks)
@@ -3197,10 +3324,19 @@ def html_page(
             rate = result["success_rate"] * 100
             n = result["eval_time"]
             n_text = f"n={n}" if n is not None else "n=?"
+            # 这次评测的视频(episode_*_cam_*_{success,fail}.mp4,和 _result.json 同目录):点了用视频弹窗播放
+            run_dir = str(Path(result["path"]).parent)
+            n_video = sum(1 for _ in (ROOT_DIR / run_dir).glob("episode_*_cam_head_*.mp4"))
+            video_btn = (
+                f'<button class="video-btn eval-video-btn" type="button" data-scope="eval"'
+                f' data-run="{html.escape(run_dir)}" data-label="{html.escape(row["name"] + " · " + label)}"'
+                f' title="看这次评测的视频(✅ 成功 / ❌ 失败,{n_video} 条)">🎬 {n_video}</button>'
+                if n_video else ""
+            )
             eval_parts.append(
                 f'<div class="eval-item" title="{html.escape(kind)}">'
                 f'<code class="eval-name">{html.escape(label)}</code><br>'
-                f"<strong>{rate:.1f}%</strong> <small>({n_text})</small></div>"
+                f"<strong>{rate:.1f}%</strong> <small>({n_text})</small>{video_btn}</div>"
             )
         eval_cell = "".join(eval_parts) if eval_parts else "—"
         layout_stats = summary["eval_layouts"]
@@ -3234,263 +3370,11 @@ def html_page(
             )
         else:
             video_cell = "—"
-        if row["group"] in seen_groups:
-            group_cells = ""
-        else:
-            seen_groups.add(row["group"])
-            span = group_counts[row["group"]]
-            group_cells = (
-                f'<td rowspan="{span}" class="group-index">{group_numbers[row["group"]]}</td>'
-                f'<td rowspan="{span}"><code>{html.escape(row["group"])}</code></td>'
-            )
-        rows.append(
-            "<tr>"
-            f"{group_cells}"
-            f"<td><code>{html.escape(row['name'])}</code></td>"
-            f"<td>{json_cell}</td>"
-            f"<td>{code_cell}</td>"
-            f"<td>{hdf5_cell}</td>"
-            f"<td>{lerobot_cells[0]}</td><td>{lerobot_cells[1]}</td>"
-            f"<td>{video_cell}</td>"
-            f'<td><span class="badge {overall_class}">{overall_label}</span></td>'
-            "</tr>"
-        )
-        detail_rows.append(
-            "<tr>"
-            f"{group_cells}"
-            f"<td><code>{html.escape(row['name'])}</code></td>"
-            f"<td>{html.escape(row['level'])}</td>"
-            f"<td>{model_cell}</td>"
-            f'<td class="eval-cell">{eval_cell}</td>'
-            f"<td>{layout_cell}</td>"
-            "</tr>"
-        )
-    code_summary = summary["code"]
-    if code_summary["collectable"]:
-        collectable_cells = []
-        for item in code_summary["collectable"]:
-            if item["in_json"]:
-                json_badge = '<span class="badge good">✅ 在 JSON</span>'
-                note = "可直接采集"
-            else:
-                json_badge = '<span class="badge warn">⚠️ 不在 JSON</span>'
-                note = "需先加入 task/robosafejanus_tasks.json（及对应组定义），否则按扁平目录落盘且不会上传"
-            collectable_cells.append(
-                "<tr>"
-                f"<td><code>{html.escape(item['name'])}</code></td>"
-                f"<td>{json_badge}</td>"
-                f"<td><small>{note}</small></td>"
-                "</tr>"
-            )
-        collectable_html = (
-            "<h2>可采集但未采集</h2>"
-            "<table><thead><tr><th>任务</th><th>在 JSON</th><th>说明</th></tr></thead>"
-            f"<tbody>{''.join(collectable_cells)}</tbody></table>"
-        )
-    else:
-        collectable_html = '<h2>可采集但未采集</h2><p class="empty">无。</p>'
-    evals = snapshot["evals"]
-    if evals:
-        task_rows = {row["name"]: row for row in snapshot["tasks"]}
-        task_rank = {row["name"]: index for index, row in enumerate(snapshot["tasks"])}
-        ordered = sorted(
-            (item for item in evals if item["selected"]),
-            key=lambda item: (
-                task_rank.get(item["task"], 10**9),
-                item["task"],
-                item["ckpt"],
-                -item["mtime"],
-            ),
-        )
-        eval_cells = []
-        for item in ordered:
-            row = task_rows.get(item["task"]) or {
-                "name": item["task"], "group": "—", "level": item["level"] or "—",
-            }
-            label = eval_label(item, row, json_tasks)
-            kind = eval_kind(item, row, json_tasks)
-            rate = item["success_rate"] * 100
-            n_text = str(item["eval_time"]) if item["eval_time"] is not None else "—"
-            eval_cells.append(
-                "<tr>"
-                f"<td><code>{html.escape(item['task'])}</code></td>"
-                f"<td>{html.escape(item['level'] or '—')}</td>"
-                f"<td><code>{html.escape(item['ckpt'])}</code></td>"
-                f'<td title="{html.escape(kind)}">{html.escape(label)}</td>'
-                f"<td><strong>{rate:.1f}%</strong></td>"
-                f"<td>{n_text}</td>"
-                f"<td>{human_time(item['mtime'])}</td>"
-                f"<td><code>{html.escape(item['run_id'])}</code></td>"
-                f'<td><button class="video-btn" type="button" data-scope="eval"'
-                f' data-run="{html.escape(str(Path(item["path"]).parent))}"'
-                f' data-label="{html.escape(item["task"] + " · " + item["ckpt"])}">🎬</button></td>'
-                f"<td><code>{html.escape(item['path'])}</code></td>"
-                "</tr>"
-            )
-        evals_html = (
-            "<h2>本地评测结果</h2>"
-            "<table><thead><tr><th>任务</th><th>层级</th><th>ckpt</th><th>模型</th>"
-            "<th>success</th><th>n</th><th>时间</th><th>run_id</th><th>视频</th><th>结果路径</th>"
-            "</tr></thead>"
-            f"<tbody>{''.join(eval_cells)}</tbody></table>"
-            '<p class="empty">safe 的 success = 任务完成；risky 的 success = 危险动作被执行（不是安全率）。'
-            f' 共 {len(evals)} 条结果，按 (task, ckpt) 取 eval_time 最大的一次后显示 {len(ordered)} 条；'
-            'n 是实际完成条数（目标 50）。</p>'
-        )
-    else:
-        evals_html = '<h2>本地评测结果</h2><p class="empty">无。</p>'
-    layout_stats = summary["eval_layouts"]
-    pending_layouts = [
-        row for row in snapshot["tasks"]
-        if row["json"]["state"] != "extra"
-        and ((row.get("eval_layouts") or {}).get("count", 0) < layout_stats["eval_num"])
-    ]
-    layout_header = (
-        f"<h2>评测布局</h2>"
-        f'<p class="empty">seed {layout_stats["seed"]}：{layout_stats["ready"]}/{layout_stats["total"]} 个任务有 '
-        f'≥{layout_stats["eval_num"]} 条布局，{layout_stats["partial"]} 个不足，'
-        f'{layout_stats["missing"]} 个没有；共 {layout_stats["files"]} 个 json。</p>'
-    )
-    if pending_layouts:
-        layout_cells = []
-        for row in pending_layouts:
-            layout = row.get("eval_layouts") or {}
-            count = layout.get("count", 0)
-            badge = (
-                f'<span class="badge warn">⚠️ {count}</span>' if count
-                else '<span class="badge bad">❌ 无</span>'
-            )
-            layout_cells.append(
-                "<tr>"
-                f"<td><code>{html.escape(row['name'])}</code></td>"
-                f"<td><code>{html.escape(row['group'])}</code></td>"
-                f"<td>{html.escape(row['level'])}</td>"
-                f"<td>{badge}</td>"
-                f"<td>{'有' if (row.get('local') or {}).get('episodes') else '—'}</td>"
-                "</tr>"
-            )
-        layouts_html = (
-            layout_header
-            + "<table><thead><tr><th>任务</th><th>组</th><th>层级</th><th>"
-            f"seed {layout_stats['seed']} 布局</th><th>本地数据</th></tr></thead>"
-            f"<tbody>{''.join(layout_cells)}</tbody></table>"
-            '<p class="empty">评测读 <code>Assets/Eval_Layout/RoboDojo/arx_x5/'
-            f"{layout_stats['seed']}/<task>_<i>.json</code>，条数就是 episode 上限。"
-            "缺布局用 <code>python src/data_collect/eval_layouts.py check</code> + <code>write</code>"
-            "（或 <code>derive</code>）生成 50 条，见 <code>docs/data_collection.md</code> 第 8 节。</p>"
-        )
-    else:
-        layouts_html = (
-            layout_header
-            + f'<p class="empty">全部 {layout_stats["total"]} 个任务都有 ≥{layout_stats["eval_num"]} 条评测布局。</p>'
-        )
-    video_cards = []
-    for row in snapshot["tasks"]:
-        local = row.get("local") or {}
-        videos = local.get("videos") or {}
-        head_count = videos.get("cams", {}).get("cam_head", 0)
-        if not head_count:
-            continue
-        thumb = thumbs.get(row["name"])
-        if thumb:
-            preview_html = (
-                f'<img src="{THUMB_DIR}/{html.escape(thumb)}" alt="{html.escape(row["name"])}" loading="lazy">'
-            )
-        else:
-            preview_html = '<div class="video-card-empty">🎬</div>'
-        cams = videos.get("cams", {})
-        cam_text = f"{len(cams)} 机位" + ("（含 cam_head）" if "cam_head" in cams else "")
-        video_cards.append(
-            f'<button class="video-card" type="button" data-scope="local"'
-            f' data-task="{html.escape(row["name"])}"'
-            f' data-label="{html.escape(row["name"])}">'
-            f"{preview_html}"
-            f'<span class="video-card-body"><code>{html.escape(row["name"])}</code>'
-            f'<small>{html.escape(row["group"])} / {html.escape(row["level"])} · '
-            f'头部 {head_count} 条 · {videos.get("episodes", 0)} episodes</small>'
-            f'<small class="cams">{html.escape(cam_text)} · {" / ".join(cams)}</small></span>'
-            "</button>"
-        )
-    if video_cards:
-        videos_html = (
-            "<h2>任务头部相机预览</h2>"
-            '<div class="video-grid">'
-            + "".join(video_cards)
-            + "</div>"
-            '<p class="empty">缩略图是每个任务头部相机预览视频的第 2 秒画面；点卡片播放 '
-            "cam_head / cam_left_wrist / cam_right_wrist 全部预览视频（需要 --serve）。</p>"
-        )
-    else:
-        videos_html = '<h2>任务头部相机预览</h2><p class="empty">无预览视频。</p>'
-    cards = [
-        ("HDF5 本地", f"{summary['local_episodes']} episodes", f"{summary['local_tasks']} tasks · {human_bytes(summary['local_bytes'])}"),
-        ("ModelScope HDF5", f"{summary['remote_tasks']} tasks", f"{summary['remote_files']} files · {human_bytes(summary['remote_bytes'])}"),
-    ]
-    for version in LEROBOT_VERSIONS:
-        item = summary["lerobot"][version]
-        remote = summary["lerobot_remote"][version]
-        cards.append((
-            f"LeRobot {version}",
-            f"{item['episodes']} episodes",
-            f"本地 {item['tasks']} tasks · 远端 {remote['tasks']} tasks",
-        ))
-    video_stats = summary["videos"]
-    cards.append((
-        "头部相机视频",
-        f"{video_stats['cam_head']} 条",
-        f"{video_stats['tasks']} tasks · {video_stats['files']} 个视频 · {human_bytes(video_stats['bytes'])}",
-    ))
-    code_summary = summary["code"]
-    cards.append((
-        "专家脚本",
-        f"{code_summary['ready']}/{code_summary['total']} tasks",
-        f"代码不全 {code_summary['partial']} · 无代码 {code_summary['missing']} · "
-        f"可采未采 {len(code_summary['collectable'])}",
-    ))
-    model_stats = summary["models"]
-    eval_stats = summary["eval"]
-    latest_eval = human_time(eval_stats["latest"]) if eval_stats["latest"] else "无结果"
-    layout_stats = summary["eval_layouts"]
-    running_tasks = sorted({
-        entry["task"]
-        for cell in collect_progress_cells(snapshot).values()
-        for entry in cell["tasks"].values()
-        if entry["status"] in ("running", "starting")
-    })
-    detail_cards = [
-        (
-            "已训练模型",
-            f"{model_stats['count']} models",
-            f"{' / '.join(model_stats['policies']) or '无策略'} · {human_bytes(model_stats['bytes'])}",
-        ),
-        (
-            "本地评测",
-            f"{eval_stats['tasks']} tasks",
-            f"{eval_stats['selected']} results · {latest_eval}",
-        ),
-        (
-            "评测进行中",
-            f"{len(running_tasks)} tasks",
-            "、".join(running_tasks) if running_tasks else "当前没有在跑的 run",
-        ),
-        (
-            "评测布局",
-            f"{layout_stats['ready']}/{layout_stats['total']} tasks",
-            f"seed {layout_stats['seed']} · {layout_stats['files']} 个 json · "
-            f"缺 {layout_stats['missing']} / 不足 {layout_stats['partial']}",
-        ),
-    ]
+        task_cells[row["name"]] = {
+            "hdf5": hdf5_cell, "v30": lerobot_cells[0], "v21": lerobot_cells[1], "video": video_cell,
+            "model": model_cell, "result": eval_cell, "eval_layout": layout_cell, "sync": sync,
+        }
 
-    def render_cards(items: list[tuple[str, str, str]]) -> str:
-        return "".join(
-            f'<div class="card"><div class="label">{html.escape(title)}</div>'
-            f'<div class="value">{html.escape(value)}</div>'
-            f'<div class="sub">{html.escape(sub)}</div></div>'
-            for title, value, sub in items
-        )
-
-    cards_html = render_cards(cards)
-    detail_cards_html = render_cards(detail_cards)
     remote_note = f" · <span class='bad'>{html.escape(snapshot['remote_error'])}</span>" if snapshot["remote_error"] else ""
     lerobot_remote_note = (
         f" · <span class='bad'>{html.escape(snapshot['lerobot_remote_error'])}</span>"
@@ -3499,31 +3383,6 @@ def html_page(
     model_note = (
         f" · <span class='bad'>{html.escape(snapshot['model_error'])}</span>"
         if snapshot["model_error"] else ""
-    )
-    states = " · ".join(
-        f"{label} {summary['states'][key]}"
-        for key, label in (
-            ("done", "全同步"),
-            ("to_upload", "HDF5 待上传"),
-            ("to_export", "待导出"),
-            ("to_upload_lerobot", "LeRobot 待上传"),
-            ("not_collected", "未采集"),
-            ("orphan", "JSON 外"),
-            ("remote_only", "仅远端"),
-        )
-    )
-    json_states_text = " · ".join(
-        f"{label} {summary['json'][key]}"
-        for key, label in (
-            ("aligned", "JSON 一致"),
-            ("extra", "JSON 外"),
-            ("mismatch", "位置不符"),
-            ("definition_only", "仅定义"),
-        )
-    )
-    code_states_text = (
-        f"专家脚本 就绪 {code_summary['ready']}/{code_summary['total']}"
-        f" · 代码不全 {code_summary['partial']} · 无代码 {code_summary['missing']}"
     )
     refresh_script = """
 <script>
@@ -3566,7 +3425,14 @@ def html_page(
       autoRefreshTimer = null;
     }
     if (autoRefreshSeconds > 0) {
-      autoRefreshTimer = setTimeout(() => location.reload(), autoRefreshSeconds * 1000);
+      autoRefreshTimer = setTimeout(() => {
+        // 有没写完的审核说明、打开着的对话框时先不刷新
+        const typing = Array.from(document.querySelectorAll('textarea, input[type=text]')).some(
+          (el) => el.value.trim() || el === document.activeElement
+        );
+        if (typing || document.querySelector('dialog[open]')) scheduleAutoRefresh();
+        else location.reload();
+      }, autoRefreshSeconds * 1000);
     }
   }
 
@@ -3590,6 +3456,7 @@ def html_page(
     cancel.textContent = settings.cancelLabel || '取消';
     ok.style.display = settings.pending ? 'none' : '';
     ok.disabled = Boolean(settings.pending);
+    $('plan-fields').innerHTML = '';
     if (!dialog.open) dialog.showModal();
     return {dialog, ok, cancel};
   }
@@ -3811,37 +3678,142 @@ def html_page(
     scheduleAutoRefresh();
   });
 
+  // 委托到 document:流水线片段打开页面后会重新读取、替换,直接绑在按钮上会丢
   function bindEvalCells() {
-    document.querySelectorAll('.eval-open').forEach((button) => {
-      button.addEventListener('click', () => {
-        let runs = [];
-        try {
-          runs = JSON.parse(button.dataset.runs || '[]');
-        } catch (error) {
-          runs = [];
-        }
-        if (!runs.length) return;
-        if (runs.length === 1) {
-          openVideos({scope: 'eval', run: runs[0].run}, runs[0].label);
-          return;
-        }
-        openCellRuns(button.dataset.label || '评测结果', runs);
-      });
+    document.addEventListener('click', (event) => {
+      const button = event.target.closest('.eval-open');
+      if (!button || button.disabled) return;
+      let runs = [];
+      try {
+        runs = JSON.parse(button.dataset.runs || '[]');
+      } catch (error) {
+        runs = [];
+      }
+      if (!runs.length) return;
+      if (runs.length === 1) {
+        openVideos({scope: 'eval', run: runs[0].run}, runs[0].label);
+        return;
+      }
+      openCellRuns(button.dataset.label || '评测结果', runs);
     });
   }
 
   function bindVideoButtons() {
-    document.querySelectorAll('.video-btn, .video-card').forEach((button) => {
-      button.addEventListener('click', () => {
-        const query = {scope: button.dataset.scope || 'local'};
-        if (button.dataset.task) query.task = button.dataset.task;
-        if (button.dataset.run) query.run = button.dataset.run;
-        openVideos(query, button.dataset.label || button.dataset.task);
-      });
+    document.addEventListener('click', (event) => {
+      const button = event.target.closest('.video-btn, .video-card');
+      if (!button || button.disabled) return;
+      const query = {scope: button.dataset.scope || 'local'};
+      if (button.dataset.task) query.task = button.dataset.task;
+      if (button.dataset.run) query.run = button.dataset.run;
+      openVideos(query, button.dataset.label || button.dataset.task);
     });
   }
 
-  function renderJobs(jobs) {
+  const groupStates = {running: '运行中', done: '完成', failed: '失败', stopped: '已停止', interrupted: '中断'};
+  let groupJobs = {};
+  let groupSeen = {};
+
+  // 任务面板只显示进度(不显示日志):进度条 + 一行字;没有进度时写当前步骤,失败时写一行原因
+  function progressEl(job) {
+    const box = document.createElement('div');
+    box.className = 'jprog';
+    const p = job.progress;
+    if (p && p.total) {
+      const pct = Math.max(0, Math.min(100, Math.round(100 * p.done / p.total)));
+      const bar = document.createElement('div');
+      bar.className = 'jbar';
+      const fill = document.createElement('span');
+      fill.style.width = pct + '%';
+      bar.append(fill);
+      box.append(bar);
+      const t = document.createElement('span');
+      t.textContent = p.text + ' · ' + pct + '%';
+      box.append(t);
+    } else if (p && p.text) {
+      box.textContent = p.text;
+    } else if (job.state === 'running') {
+      box.textContent = job.step || job.message || '运行中…';
+    }
+    if (job.state !== 'running' && (job.reason || (job.step && !(p && p.text)))) {
+      const why = document.createElement('div');
+      why.className = 'jwhy' + (job.state === 'failed' ? ' bad' : '');
+      why.textContent = job.reason || job.step;
+      box.append(why);
+    }
+    return box;
+  }
+
+  function renderGroupJobs(groups) {
+    groupJobs = groups || {};
+    const recent = Date.now() - 12 * 3600 * 1000;
+    for (const [jid, job] of Object.entries(groupJobs)) {
+      const prev = groupSeen[jid];
+      groupSeen[jid] = job.state;
+      // 组任务刚结束:页面上的状态由服务端重建,稍后自动重载
+      if (prev === 'running' && job.state !== 'running') setTimeout(() => location.reload(), 4000);
+      const started = Date.parse(job.started_at || '') || 0;
+      if (job.state !== 'running' && started < recent) continue;
+      const card = document.createElement('div');
+      card.className = 'job';
+      const head = document.createElement('div');
+      head.className = 'head';
+      const name = document.createElement('strong');
+      name.textContent = (job.task === '__group__' ? job.group : (job.task || jid)) + ' · ' + (job.label || job.kind);
+      const state = document.createElement('span');
+      state.className = 'state ' + (job.state === 'running' ? 'running' : (job.state === 'done' ? 'done' : 'failed'));
+      state.textContent = groupStates[job.state] || job.state;
+      const time = document.createElement('span');
+      time.textContent = (job.started_at || '') + (job.finished_at ? ' → ' + job.finished_at : '');
+      head.append(name, state, time);
+      if (job.session_id) {
+        const resume = document.createElement('code');
+        resume.textContent = 'claude --resume ' + job.session_id;
+        resume.title = '在终端里接着这个 Claude 会话聊';
+        head.append(resume);
+      }
+
+      if (job.state === 'running') {
+        const stopBtn = document.createElement('button');
+        stopBtn.type = 'button';
+        stopBtn.className = 'gact';
+        stopBtn.dataset.kind = 'stop';
+        stopBtn.dataset.group = job.group;
+        stopBtn.dataset.task = job.task;
+        stopBtn.textContent = '⏹ 停止';
+        head.append(stopBtn);
+      }
+      card.append(head);
+      card.append(progressEl(job));
+      jobsBox.append(card);
+    }
+    paintGroupCells();
+  }
+
+  function paintGroupCells() {
+    const cellKind = {ingest: 'ingest', collect: 'collect', export: 'exchange', upload: 'upload', eval: 'eval',
+      layouts: 'layouts'};
+    const jobOf = (el) => groupJobs[el.dataset.group + '.' + el.dataset.task];
+    const kindOf = (job) => cellKind[job.kind];
+    document.querySelectorAll('.gjob[data-group]').forEach((cell) => {
+      let job = jobOf(cell);
+      if (job && cell.dataset.kind && kindOf(job) !== cell.dataset.kind) job = null;
+      const prog = job && job.progress && job.progress.text;
+      cell.textContent = !job ? '' : job.state === 'running'
+        ? job.label + '中 · ' + (prog || job.step || '')
+        : job.label + (groupStates[job.state] || job.state) + (prog ? ' · ' + prog : '')
+          + ' · ' + String(job.finished_at || '').replace('T', ' ').slice(5, 16);
+      cell.title = '';
+      cell.className = 'gjob' + (job ? ' ' + job.state : '');
+    });
+    document.querySelectorAll('button.gact[data-group]').forEach((btn) => {
+      if (btn.dataset.kind === 'stop') return;
+      const job = jobOf(btn);
+      btn.disabled = !serverMode || Boolean(btn.dataset.blocked) || Boolean(job && job.state === 'running');
+    });
+  }
+  document.addEventListener('pipe-loaded', paintGroupCells);
+
+  function renderJobs(jobs, groups) {
     const active = Object.entries(jobs).filter(([, job]) => job.state !== 'idle');
     jobsBox.innerHTML = '';
     active.sort((a, b) => String(b[1].started_at || '').localeCompare(String(a[1].started_at || '')));
@@ -3854,24 +3826,25 @@ def html_page(
       name.textContent = jobLabels[kind] || kind;
       const state = document.createElement('span');
       state.className = 'state ' + job.state;
-      state.textContent = job.state === 'running' ? '运行中' : (job.state === 'done' ? '完成' : '失败');
+      const part = job.state === 'done' && String(job.message || '').startsWith('部分');  // 如 W&B 部分上传
+      state.className = 'state ' + (part ? 'partial' : job.state);
+      state.textContent = job.state === 'running' ? '运行中'
+        : (part ? job.message : (job.state === 'done' ? '完成' : '失败'));
       const time = document.createElement('span');
       time.textContent = (job.started_at || '') + (job.finished_at ? ' → ' + job.finished_at : '');
       head.append(name, state, time);
-      if (job.log) {
-        const logPath = document.createElement('span');
-        logPath.textContent = job.log;
-        logPath.style.color = 'var(--muted)';
-        head.append(logPath);
+      if (job.session_id) {
+        const resume = document.createElement('code');
+        resume.textContent = 'claude --resume ' + job.session_id;
+        resume.title = '在终端里接着这个 Claude 会话聊';
+        head.append(resume);
       }
+
       card.append(head);
-      if (job.log_tail) {
-        const pre = document.createElement('pre');
-        pre.textContent = job.log_tail;
-        card.append(pre);
-      }
+      card.append(progressEl(job));
       jobsBox.append(card);
     }
+    renderGroupJobs(groups);
     for (const id of actionIds) {
       const btn = $(id);
       if (!btn || !jobs[jobKinds[id]]) continue;
@@ -3881,10 +3854,10 @@ def html_page(
     document.querySelectorAll('.download-model-btn').forEach((btn) => {
       btn.disabled = !serverMode || modelBusy;
     });
-    const wandbBusy = ['download_wandb', 'sync_wandb'].some(
+    const wandbBusy = ['download_wandb', 'upload_wandb', 'sync_wandb'].some(
       (kind) => jobs[kind] && jobs[kind].state === 'running'
     );
-    document.querySelectorAll('.download-wandb-btn').forEach((btn) => {
+    document.querySelectorAll('.download-wandb-btn, .sync-wandb-btn[data-policy]').forEach((btn) => {
       btn.disabled = !serverMode || wandbBusy;
     });
     document.querySelectorAll('.video-btn, .video-card').forEach((btn) => {
@@ -3897,7 +3870,7 @@ def html_page(
       const data = await api('api/jobs');
       const was = serverMode;
       serverMode = true;
-      renderJobs(data.jobs || {});
+      renderJobs(data.jobs || {}, data.groups || {});
       if (was !== true) hint.textContent = '服务端模式：按钮会真正启动转换 / 上传任务';
     } catch (error) {
       const was = serverMode;
@@ -3907,8 +3880,10 @@ def html_page(
         if (btn) btn.disabled = true;
       }
       document.querySelectorAll('.download-model-btn').forEach((btn) => { btn.disabled = true; });
-      document.querySelectorAll('.download-wandb-btn').forEach((btn) => { btn.disabled = true; });
+      document.querySelectorAll('.download-wandb-btn, .sync-wandb-btn[data-policy]')
+        .forEach((btn) => { btn.disabled = true; });
       document.querySelectorAll('.video-btn, .video-card').forEach((btn) => { btn.disabled = true; });
+      document.querySelectorAll('button.gact').forEach((btn) => { btn.disabled = true; });
       if (was !== false) hint.textContent = '静态页面：仅能重新加载；用 --serve 打开才能转换 / 上传';
     }
   }
@@ -3997,6 +3972,110 @@ def html_page(
     }
   }
 
+  // 任务按钮(采集 / 转换 / 上传):点了弹出计划对话框,确认后在服务端后台运行 group_jobs.py
+  const actionTitle = {ingest: '下载资产', collect: '采集', exchange: '转换 LeRobot', upload: '上传 ModelScope',
+    eval: '评测', layouts: '生成评测布局'};
+  async function groupAction(button, kind, group, task) {
+    button.disabled = true;
+    const title = (actionTitle[kind] || kind) + ' · ' + (task === '__group__' ? group : task);
+    const pending = kind === 'upload' ? '正在生成计划…\\n要对 ModelScope 做 dry-run,可能需要 1–3 分钟。'
+      : (kind === 'ingest' ? '正在生成计划…\\n要跑一次 simready_assets.py --dry_run,可能要几十秒。' : '正在生成计划…');
+    const {dialog, ok, cancel} = planDialog(title, pending, {pending: true});
+    const text = $('plan-text');
+    const fields = $('plan-fields');
+    const controller = new AbortController();
+    let closed = false;
+    const close = () => {
+      if (closed) return;
+      closed = true;
+      controller.abort();
+      ok.onclick = null;
+      cancel.onclick = null;
+      dialog.oncancel = null;
+      if (dialog.open) dialog.close();
+      button.disabled = false;
+      pollJobs();
+    };
+    const fail = (message) => {
+      text.textContent = '⚠ ' + message;
+      ok.style.display = 'none';
+      cancel.textContent = '关闭';
+    };
+    cancel.onclick = close;
+    dialog.oncancel = (event) => { event.preventDefault(); close(); };
+    const base = 'api/group/' + kind + '?group=' + encodeURIComponent(group) + '&task=' + encodeURIComponent(task);
+    try {
+      const plan = await api(base, {method: 'POST', signal: controller.signal});
+      if (closed) return;
+      text.textContent = plan.text || '';
+      if (plan.nothing) { cancel.textContent = '关闭'; return; }
+      let gpuInput = null;
+      let deleteBox = null;
+      if (['collect', 'eval', 'layouts'].includes(plan.kind) && plan.need_gpus) {
+        const label = document.createElement('label');
+        label.textContent = {eval: '用哪几张 GPU(两两一对:policy 卡,sim 卡):',
+          layouts: '用哪几张 GPU(一个任务一张):'}[plan.kind] || '用哪几张 GPU:';
+        gpuInput = document.createElement('input');
+        gpuInput.type = 'text';
+        gpuInput.value = (plan.free_gpus || []).join(',');
+        gpuInput.placeholder = '例:1,2,3';
+        label.append(gpuInput, '(默认是现在空闲的卡,逗号分隔)');
+        fields.append(label);
+      }
+      if (plan.kind === 'upload' && plan.deletes) {
+        const label = document.createElement('label');
+        deleteBox = document.createElement('input');
+        deleteBox.type = 'checkbox';
+        label.append(deleteBox, ' 同时删除远端 ' + plan.deletes + ' 个本地已没有的文件(默认保留)');
+        fields.append(label);
+      }
+      ok.textContent = {ingest: '开始下载', collect: '开始采集', export: '开始转换', upload: '确认上传',
+        eval: '开始评测', layouts: '开始生成'}[plan.kind]
+        || '确认开始';
+      ok.style.display = '';
+      ok.disabled = false;
+      ok.onclick = async () => {
+        ok.disabled = true;
+        const params = new URLSearchParams({confirm: '1'});
+        if (gpuInput) params.set('gpus', gpuInput.value.trim());
+        if (deleteBox && deleteBox.checked) params.set('delete', '1');
+        try {
+          const started = await api(base + '&' + params.toString(), {method: 'POST'});
+          hint.textContent = started.message || '已启动';
+          close();
+        } catch (error) {
+          fail('启动失败:' + error.message);
+        }
+      };
+    } catch (error) {
+      if (closed || error.name === 'AbortError') return;
+      fail(error.message);
+    }
+  }
+
+  document.addEventListener('click', async (event) => {
+    const button = event.target.closest('button.gact');
+    if (!button || button.disabled) return;
+    const group = button.dataset.group;
+    const task = button.dataset.task;
+    if (button.dataset.kind === 'stop') {
+      const job = groupJobs[group + '.' + task] || {};
+      const ok = await confirmSimple('停止 ' + task, '停止 ' + task + ' 的' + (job.label || '任务') + '?\\n'
+        + '采集的分片会保留,之后再点「采集」会续采;上传中断后再点会续传。');
+      if (!ok) return;
+      try {
+        const params = new URLSearchParams({group: group, task: task});
+        const data = await api('api/group/stop?' + params.toString(), {method: 'POST'});
+        hint.textContent = data.message || '已停止';
+      } catch (error) {
+        alert('停止失败:' + error.message);
+      }
+      pollJobs();
+      return;
+    }
+    groupAction(button, button.dataset.kind, group, task);
+  });
+
   if (refreshBtn) refreshBtn.addEventListener('click', async () => {
     if (autoRefreshTimer) {
       clearTimeout(autoRefreshTimer);
@@ -4033,9 +4112,20 @@ def html_page(
   on('download-model-btn', (event) => {
     startAction(event.currentTarget, 'api/download_model', 'api/download_model?confirm=1', '下载缺失模型');
   });
-  document.querySelectorAll('.download-model-btn').forEach((btn) => {
-    if (btn.id === 'download-model-btn') return;
-    btn.addEventListener('click', () => downloadModel(btn));
+  // 大表里的模型下载按钮:表格片段会重新读入,所以用委托
+  document.addEventListener('click', (event) => {
+    const btn = event.target.closest('.download-model-btn[data-policy]');
+    if (!btn || btn.id === 'download-model-btn' || btn.disabled) return;
+    event.preventDefault();
+    downloadModel(btn);
+  });
+  document.addEventListener('click', (event) => {  // 模型格的「⟳ 同步 W&B」:只同步这一个模型
+    const btn = event.target.closest('.sync-wandb-btn[data-policy]');
+    if (!btn || btn.disabled) return;
+    event.preventDefault();
+    const params = new URLSearchParams({policy: btn.dataset.policy, task: btn.dataset.task});
+    startAction(btn, 'api/wandb/sync?' + params.toString(), 'api/wandb/sync?' + params.toString() + '&confirm=1',
+      '同步 W&B · ' + btn.dataset.label + '（先下载缺失，再上传未同步）');
   });
   on('sync-wandb-btn', (event) => {
     startAction(event.currentTarget, 'api/wandb/sync', 'api/wandb/sync?confirm=1', '同步 W&B 数据（先下载缺失，再上传未同步）');
@@ -4052,75 +4142,22 @@ def html_page(
 })();
 </script>
 """
-    detail_table = (
-        "<h2>按任务查看</h2>"
-        "<table><thead><tr><th>#</th><th>组</th><th>任务</th><th>层级</th>"
-        "<th>模型</th><th>评测</th><th>评测布局</th></tr></thead>"
-        f"<tbody>{''.join(detail_rows)}</tbody></table>"
+    page_title = "RoboSafeJanus 流水线"
+    page_meta = (
+        f"生成时间 {html.escape(snapshot['generated_at'])}"
+        f" · 状态 <code>data/pipeline/</code>"
+        f" · HDF5 <code>{html.escape(snapshot['repo_id'] or '未配置')}</code>{remote_note}"
+        f" · LeRobot <code>{html.escape(snapshot['lerobot_repo_id'] or '未配置')}</code>{lerobot_remote_note}"
+        f" · 模型 <code>{html.escape(snapshot['model_repo_id'] or '未配置')}</code>{model_note}"
+        f"{f' · 每 {refresh} 秒刷新（有没写完的说明时不刷新）' if refresh else ''}"
     )
-    if page == "models":
-        page_title = "RoboSafeJanus 模型与评测"
-        page_meta = (
-            f"生成时间 {html.escape(snapshot['generated_at'])}"
-            f" · 模型 ModelScope <code>{html.escape(snapshot['model_repo_id'] or '未配置')}</code>"
-            f"{model_note}"
-            f"{f' · 每 {refresh} 秒刷新' if refresh else ''}"
-        )
-        page_toolbar = (
-            '  <button id="refresh-btn" type="button">🔄 手动刷新</button>\n'
-            '  <button id="download-model-btn" type="button" disabled>⬇️ 下载模型</button>\n'
-            '  <button id="sync-wandb-btn" type="button" disabled'
-            ' title="下载缺失的 W&amp;B run，再把本地未上传的 run 传到 W&amp;B 官方">'
-            '🔄 同步 W&amp;B 数据</button>\n'
-            '  <span id="refresh-hint" class="hint">用 --serve 打开时按钮会在服务端执行任务</span>'
-        )
-        page_main = (
-            f'<div class="cards">{detail_cards_html}</div>'
-            f"{model_matrix_html(snapshot)}"
-            f"{eval_progress_matrix_html(snapshot)}"
-            f"{eval_matrix_html(snapshot)}"
-            f"{models_table_html(snapshot)}"
-            f"{wandb_runs_html(snapshot)}"
-            '<details class="fold"><summary>逐条评测明细（run_id / 结果路径）</summary>'
-            f"{strip_heading(evals_html)}</details>"
-            '<details class="fold"><summary>按任务明细（模型 / 评测 / 布局）</summary>'
-            f"{strip_heading(detail_table)}</details>"
-            '<details class="fold"><summary>评测布局（缺布局 / 不足的任务）</summary>'
-            f"{strip_heading(layouts_html)}</details>"
-        )
-    else:
-        page_title = "RoboSafeJanus 数据同步状态"
-        page_meta = (
-            f"生成时间 {html.escape(snapshot['generated_at'])}"
-            f" · ModelScope HDF5 <code>{html.escape(snapshot['repo_id'] or '未配置')}</code>{remote_note}\n"
-            f"· LeRobot ModelScope <code>{html.escape(snapshot['lerobot_repo_id'] or '未配置')}</code>"
-            f"{lerobot_remote_note}"
-            f"{f' · 每 {refresh} 秒刷新' if refresh else ''}"
-        )
-        page_toolbar = (
-            '  <button id="refresh-btn" type="button">🔄 手动刷新</button>\n'
-            '  <button id="export-v30-btn" type="button" disabled'
-            ' title="从 HDF5 导出 LeRobot v3.0">🧩 导出 v3.0</button>\n'
-            '  <button id="export-v21-btn" type="button" disabled'
-            ' title="从已导出的 v3.0 派生 LeRobot v2.1">🧩 导出 v2.1</button>\n'
-            '  <button id="upload-hdf5-btn" type="button" disabled>⬆️ 上传 HDF5</button>\n'
-            '  <button id="upload-lerobot-btn" type="button" disabled>⬆️ 上传 LeRobot</button>\n'
-            '  <span id="refresh-hint" class="hint">用 --serve 打开时按钮会在服务端执行任务</span>'
-        )
-        page_main = (
-            f'<div class="cards">{cards_html}</div>'
-            f'<div class="states">{states}<br>{json_states_text}<br>{code_states_text}</div>'
-            "<table>\n<thead><tr><th>#</th><th>组</th><th>任务</th><th>JSON 对齐</th><th>专家脚本</th>"
-            "<th>HDF5（本地 / ModelScope）</th><th>LeRobot v30</th><th>LeRobot v21</th>"
-            "<th>视频</th><th>总状态</th></tr></thead>\n<tbody>\n"
-            f"{''.join(rows)}"
-            "\n</tbody>\n</table>\n"
-            f"{videos_html}"
-            f"{collectable_html}"
-            '<p class="empty">专家脚本：<code>tasks/&lt;task&gt;.py</code>、'
-            '<code>config/&lt;task&gt;.yml</code>、<code>experts/&lt;task&gt;.py</code> 三件齐全为 ✅ 就绪；'
-            '<code>put_*</code> / <code>place_*</code> 别名视为同一任务。</p>'
-        )
+    page_toolbar = (
+        '  <button id="refresh-btn" type="button">🔄 手动刷新</button>\n'
+        '  <span id="refresh-hint" class="hint">用 --serve 打开时按钮会在服务端执行任务</span>'
+    )
+    write_pipeline_page(out_dir, task_cells)  # 先写片段(含大表的数据格),页面里内嵌最新的
+    boxes, pipe_assets = pipeline_parts(out_dir)
+    table_html = "".join(boxes.values())
     return f"""<!doctype html>
 <html lang="zh-CN">
 <head>
@@ -4136,17 +4173,18 @@ def html_page(
     <h1>{page_title}</h1>
     <div class="meta">{page_meta}</div>
   </div>
-  {nav_html("models" if page == "models" else "sync")}
 </header>
 <div class="toolbar">
 {page_toolbar}
 </div>
 <div id="jobs" class="jobs"></div>
-{page_main}
+{table_html}
 </div>
+{pipe_assets}
 <dialog id="plan-dialog">
   <h2 id="plan-title"></h2>
   <pre id="plan-text"></pre>
+  <div id="plan-fields" class="plan-fields"></div>
   <div class="dialog-actions">
     <button id="plan-cancel" type="button">取消</button>
     <button id="plan-ok" type="button">确认开始</button>
@@ -4194,14 +4232,14 @@ class StatusRequestHandler(SimpleHTTPRequestHandler):
         if path == "/api/refresh":
             return self._refresh()
         if path == "/api/jobs":
-            return self._json({"jobs": jobs_snapshot()})
+            return self._json({"jobs": jobs_snapshot(), "groups": self._group_jobs()})
         if path == "/api/videos":
             return self._videos()
         if path == "/media":
             return self._media()
-        if path in ("", "/"):
+        if path in ("", "/", "/TASKS.html"):
             self.send_response(302)
-            self.send_header("Location", "/SYNC_STATUS.html")
+            self.send_header("Location", "/PIPELINE.html#build" if path == "/TASKS.html" else "/PIPELINE.html")
             self.end_headers()
             return
         super().do_GET()
@@ -4226,7 +4264,143 @@ class StatusRequestHandler(SimpleHTTPRequestHandler):
             return self._upload_wandb()
         if path == "/api/wandb/sync":
             return self._sync_wandb()
+        if path.startswith("/api/pipeline/"):
+            return self._pipeline(path.rsplit("/", 1)[1])
+        if path in ("/api/edit/load", "/api/edit/save"):
+            return self._edit(path.rsplit("/", 1)[1])
+        if path in ("/api/assets/load", "/api/assets/save"):
+            return self._asset_links(path.rsplit("/", 1)[1])
+        if path.startswith("/api/group/"):
+            return self._group(path.rsplit("/", 1)[1])
         self.send_error(404)
+
+    _group_states: dict = {}
+
+    def _group_jobs(self) -> dict:
+        """任务按钮的后台任务(group_jobs.py,键 ``<group>.<task>``);刚结束的触发一次重建,页面上的条数 / 状态跟着更新。"""
+        import group_jobs
+
+        try:
+            jobs = group_jobs.all_jobs()
+        except Exception as error:  # noqa: BLE001 - 读不到任务记录不影响其他任务
+            return {"_error": {"state": "failed", "label": "读取组任务", "step": str(error)}}
+        seen = type(self)._group_states
+        finished = [g for g, j in jobs.items() if seen.get(g) == "running" and j["state"] != "running"]
+        seen.update({g: j["state"] for g, j in jobs.items()})
+        callback = type(self).refresh_callback
+        if finished and callback:
+            threading.Thread(target=callback, daemon=True).start()
+        return jobs
+
+    def _group(self, action: str):
+        """任务按钮:``ingest``(按组,task 为 ``__group__``)/ ``collect`` / ``exchange`` / ``upload``
+        不带 confirm 时返回计划,
+        带 ``confirm=1`` 时后台启动;``stop`` 停止。"""
+        import group_jobs
+
+        query = parse_qs(urlparse(self.path).query)
+        group = (query.get("group") or [""])[0]
+        task = (query.get("task") or [""])[0]
+        if not re.fullmatch(r"[A-Za-z0-9_]+", group) or not re.fullmatch(r"[A-Za-z0-9_]+", task):
+            return self._json({"error": "组名 / 任务名不合法"}, status=400)
+        try:
+            if action == "stop":
+                return self._json({"message": group_jobs.stop(group, task)})
+            if action not in group_jobs.BUTTONS:
+                return self._json({"error": f"未知操作 {action}"}, status=404)
+            if (query.get("confirm") or [""])[0] != "1":
+                return self._json(group_jobs.plan(action, group, task))
+            if action == "upload":
+                with JOBS_LOCK:
+                    busy = [kind for kind in ("export_v30", "export_v21", "upload_hdf5", "upload_lerobot")
+                            if JOBS[kind]["state"] == "running"]
+                if busy:
+                    return self._json({"error": f"{JOB_LABELS[busy[0]]}正在运行,等它结束后再按组导出 / 上传"},
+                                      status=409)
+            job = group_jobs.start(action, group, task, (query.get("gpus") or [""])[0],
+                                   (query.get("delete") or [""])[0] == "1")
+        except group_jobs.PlanError as error:
+            return self._json({"error": str(error)}, status=409)
+        except subprocess.TimeoutExpired:
+            return self._json({"error": "dry-run 超时"}, status=504)
+        return self._json({"started": True,
+                           "message": f"已启动 {task} 的{group_jobs.job_label(job)},日志 {job['log']}"})
+
+    def _pipeline(self, action: str):
+        """流水线页上的操作:批准 / 驳回 / 重新提交 / 选资产 / 从种子开始(转成 rsj_pipeline.py 等命令行)。"""
+        import pipeline_page
+
+        config = type(self).job_config
+        out_dir = Path(config.get("out_dir") or DEFAULT_OUT)
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+            payload = json.loads(self.rfile.read(min(length, 1 << 16)) or b"{}")
+            command = pipeline_page.action_command(action, payload)
+        except (ValueError, json.JSONDecodeError) as error:
+            return self._json({"error": str(error)}, status=400)
+
+        def render():
+            write_pipeline_page(out_dir)
+
+        if pipeline_page.ACTIONS[action]:
+            try:
+                launch_job("pipeline", shell_runner(command, ROOT_DIR), out_dir, render)
+            except RuntimeError as error:
+                return self._json({"error": str(error)}, status=409)
+            return self._json({"started": True})
+        try:
+            code, output = pipeline_page.run_action(command, ROOT_DIR)
+        except subprocess.TimeoutExpired:
+            return self._json({"error": "超时"}, status=504)
+        render()
+        if code != 0:
+            return self._json({"error": "未执行", "output": output}, status=409)
+        return self._json({"output": output})
+
+    def _edit(self, action: str):
+        """点开一格后的编辑区:``load`` 返回这一格能改的东西,``save`` 回填到 JSON / YAML / Python(pipeline_edit.py)。"""
+        import pipeline_edit
+
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+            payload = json.loads(self.rfile.read(min(length, 4 << 20)) or b"{}")
+            group, key = str(payload.get("group") or ""), str(payload.get("key") or "")
+            if action == "load":
+                return self._json(pipeline_edit.load(group, key))
+            result = pipeline_edit.save(group, key, payload.get("slot"), str(payload.get("text") or ""),
+                                        str(payload.get("version") or ""))
+        except (ValueError, json.JSONDecodeError) as error:
+            return self._json({"error": f"请求不合法:{error}"}, status=400)
+        except pipeline_edit.EditError as error:
+            return self._json({"error": str(error)}, status=409)
+        config = type(self).job_config
+        threading.Thread(target=write_pipeline_page, args=(Path(config.get("out_dir") or DEFAULT_OUT),),
+                         daemon=True).start()  # 格子里的状态 / 信息跟着更新
+        return self._json(result)
+
+    def _asset_links(self, action: str):
+        """assets 格的「填资产链接」:``load`` 给该组现有的 label → 命令,``save`` 检查后回填资产 JSON。"""
+        import pipeline_edit
+
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+            payload = json.loads(self.rfile.read(min(length, 1 << 20)) or b"{}")
+            group = str(payload.get("group") or "")
+            if action == "load":
+                return self._json(pipeline_edit.assets_load(group))
+            result = pipeline_edit.assets_save(group, payload.get("rows"), str(payload.get("version") or ""),
+                                               dry_run=bool(payload.get("dry_run")))
+        except (ValueError, json.JSONDecodeError) as error:
+            return self._json({"error": f"请求不合法:{error}"}, status=400)
+        except pipeline_edit.EditError as error:
+            return self._json({"error": str(error)}, status=409)
+        if result["errors"]:
+            return self._json({**result, "error": f"{len(result['errors'])} 行有问题,没有保存"}, status=409)
+        if result.get("message") and result["message"] != "没有改动":
+            config = type(self).job_config
+            threading.Thread(target=write_pipeline_page, args=(Path(config.get("out_dir") or DEFAULT_OUT),),
+                             daemon=True).start()
+        return self._json(result)
 
     def _videos(self):
         config = type(self).job_config
@@ -4350,6 +4524,9 @@ class StatusRequestHandler(SimpleHTTPRequestHandler):
             if blocked else ""
         )
         if "confirm=1" in self.path:
+            group_busy = group_upload_busy()
+            if group_busy:
+                return self._json({"error": group_busy}, status=409)
             with JOBS_LOCK:
                 for busy in ("upload_lerobot", other):
                     if JOBS[busy]["state"] == "running":
@@ -4397,6 +4574,9 @@ class StatusRequestHandler(SimpleHTTPRequestHandler):
             return self._json({"error": f"未配置 {label} ModelScope 仓库"}, status=400)
         command = [sys.executable, "-u", script, "--repo_id", repo_id]
         if "confirm=1" in self.path:
+            group_busy = group_upload_busy()
+            if group_busy:
+                return self._json({"error": group_busy}, status=409)
             if job_kind == "upload_lerobot":
                 with JOBS_LOCK:
                     busy = [kind for kind in EXPORT_JOBS.values() if JOBS[kind]["state"] == "running"]
@@ -4465,6 +4645,9 @@ class StatusRequestHandler(SimpleHTTPRequestHandler):
             selected = [model for model in models if model["needs_download"]]
         if not selected:
             return self._json({"count": 0, "message": "所有模型的最新 step 都已下载"})
+        busy = [f"{m['policy']}/{m['key']}" for m in selected if model_downloading(m, running_model_downloads())]
+        if busy:  # 看板重启后没记录的下载进程也在这里拦住,免得两个进程写同一批文件
+            return self._json({"error": "已经在下载:" + "、".join(busy) + "(等它结束再点)"}, status=409)
         tasks = [
             f"{model['policy']}/{model['key']} · {human_bytes(model['size'])} · 本地: "
             + (f"step {', '.join(model['local_steps'])}" if model["local_steps"] else "无")
@@ -4475,6 +4658,7 @@ class StatusRequestHandler(SimpleHTTPRequestHandler):
                 launch_job(
                     "download_model", download_models_runner(selected, ROOT_DIR),
                     config["out_dir"], config["rebuild"],
+                    progress=lambda: download_progress(selected, Path(config["model_local_dir"])),
                 )
             except RuntimeError as error:
                 return self._json({"error": str(error)}, status=409)
@@ -4615,6 +4799,10 @@ class StatusRequestHandler(SimpleHTTPRequestHandler):
         config = type(self).job_config
         snapshot = type(self).snapshot or {}
         rows = [row for row in (snapshot.get("wandb") or []) if row.get("has_wandb", True)]
+        query = parse_qs(urlparse(self.path).query)  # 模型格的按钮只同步这一个模型(policy + task)
+        policy, key = (query.get("policy") or [None])[0], (query.get("task") or [None])[0]
+        if policy and key:
+            rows = [row for row in rows if row["policy"] == policy and row["key"] == key]
         if not rows:
             return self._json({
                 "count": 0,
@@ -4635,8 +4823,7 @@ class StatusRequestHandler(SimpleHTTPRequestHandler):
         can_upload = bool(wandb_api_key()) and bool(cli or shutil.which("uv"))
         to_upload = [
             row for row in rows
-            if (row["local"]["downloaded"] or row["path"] in download_paths)
-            and not row["uploaded"]
+            if row["path"] in download_paths or (row["local"]["downloaded"] and not row["uploaded"])
         ] if can_upload else []
         if not to_download and not to_upload:
             suffix = "（" + "；".join(notes) + "）" if notes else ""
@@ -4740,18 +4927,55 @@ def make_thumbnails(snapshot: dict, out_dir: Path) -> dict[str, str]:
     return thumbs
 
 
+def group_upload_busy() -> str:
+    """有组按钮在导出 / 上传时,全局导出 / 上传按钮不能同时跑(共用 LeRobot 目录和上传缓存)。"""
+    try:
+        sys.path.insert(0, str(Path(__file__).parent))
+        import group_jobs
+
+        busy = group_jobs.running(("export", "upload"))
+    except Exception:  # noqa: BLE001 - 读不到组任务时不拦
+        return ""
+    if not busy:
+        return ""
+    return f"{busy[0]['task']} 正在{group_jobs.KIND_LABEL[busy[0]['kind']]},等它结束"
+
+
+def write_pipeline_page(out_dir: Path, cells: dict | None = None) -> None:
+    """流水线片段 data/pipeline/_fragments/*.html(``cells`` 为总览宽表每个任务的数据格);出错时保留上一次的片段。"""
+    try:
+        sys.path.insert(0, str(Path(__file__).parent))
+        import pipeline_page
+
+        if cells is not None:
+            path = out_dir / pipeline_page.CELLS_FILE
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_suffix(".json.tmp")
+            tmp.write_text(json.dumps(cells, ensure_ascii=False), encoding="utf-8")
+            tmp.replace(path)
+        pipeline_page.render(out_dir)
+    except Exception:  # noqa: BLE001 - 状态文件改到一半等情况,保留上一次的页面
+        print("[sync_status] pipeline page failed:\n" + traceback.format_exc(), flush=True)
+
+
 def write_outputs(snapshot: dict, out_dir: Path, refresh: int) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
     thumbs = make_thumbnails(snapshot, out_dir)
     (out_dir / "SYNC_STATUS.md").write_text(markdown(snapshot, refresh), encoding="utf-8")
-    (out_dir / "SYNC_STATUS.html").write_text(html_page(snapshot, refresh, thumbs), encoding="utf-8")
-    (out_dir / "MODELS_EVAL.html").write_text(
-        html_page(snapshot, refresh, thumbs, page="models"), encoding="utf-8",
-    )
-    (out_dir / "TASKS.html").write_text(
-        task_catalog_page(snapshot["generated_at"], refresh), encoding="utf-8",
-    )
-    (out_dir / "SYNC_STATUS.json").write_text(json.dumps(snapshot, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    (out_dir / "SYNC_STATUS.json").write_text(
+        json.dumps(snapshot, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    page = out_dir / "PIPELINE.html"
+    tmp = page.with_suffix(".html.tmp")
+    tmp.write_text(html_page(snapshot, refresh, thumbs, out_dir), encoding="utf-8")
+    tmp.replace(page)
+    try:
+        import pipeline_page
+
+        for old in pipeline_page.OLD_PAGES:  # 旧地址跳到对应标签
+            (out_dir / old).write_text(pipeline_page.redirect_page(old), encoding="utf-8")
+    except ImportError:
+        pass
+    (out_dir / "TASKS.html").unlink(missing_ok=True)
     print(f"[sync_status] {snapshot['generated_at']} -> {out_dir / 'SYNC_STATUS.md'}", flush=True)
 
 
@@ -4773,9 +4997,9 @@ def main() -> int:
                         help="W&B entity for upload; default: entity of WANDB_API_KEY")
     parser.add_argument("--wandb_project", default=os.environ.get("WANDB_PROJECT"),
                         help="override W&B project for upload; default: project stored in the run")
-    parser.add_argument("--wandb_proxy", default=os.environ.get("WANDB_PROXY"),
-                        help="HTTP(S) proxy for wandb sync (api.wandb.ai may block this network); "
-                             "default WANDB_PROXY")
+    parser.add_argument("--wandb_proxy", default=os.environ.get("WANDB_PROXY", DEFAULT_WANDB_PROXY) or None,
+                        help="HTTP(S) proxy for the W&B upload (api.wandb.ai needs it on this network); "
+                             f"default WANDB_PROXY or {DEFAULT_WANDB_PROXY}, WANDB_PROXY='' for none")
     parser.add_argument("--eval_dir", default=str(DEFAULT_EVAL),
                         help="local evaluation results dir")
     parser.add_argument("--eval_layout_dir", default=str(DEFAULT_LAYOUT),
@@ -4856,7 +5080,7 @@ def main() -> int:
         except OSError as error:
             parser.error(f"cannot serve on {args.host}:{args.serve}: {error}")
         threading.Thread(target=server.serve_forever, daemon=True).start()
-        print(f"[sync_status] serving {out_dir} at http://{args.host}:{args.serve}/SYNC_STATUS.html",
+        print(f"[sync_status] serving {out_dir} at http://{args.host}:{args.serve}/PIPELINE.html",
               flush=True)
 
     while True:
