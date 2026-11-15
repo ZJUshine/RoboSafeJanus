@@ -118,6 +118,7 @@ def main():
     print(f"[collect] task={task_name} target={args_cli.episode_num} resume_from={suc_num} seed={seed}")
 
     env = create_collect_env(env_cfg, simulation_app)
+    broken = []
     while suc_num < args_cli.episode_num and tries < max_tries:
         tries += 1
         # 失败分类:unstable(布局不稳)/ plan_failed(规划失败)/ expert_error(专家异常)/ check_failed(判定未过)
@@ -172,6 +173,11 @@ def main():
         seed += 1
         with open(next_seed_file, "w") as fp:
             fp.write(str(seed))
+        # 物理状态坏了(articulation 炸了)就退出,让 collect_data.sh 换新进程续采;不然后面每次 reset 都失败
+        broken = env.broken_robots()
+        if broken:
+            print(f"\033[91m[collect] physics state broken ({', '.join(broken)}); exiting for a fresh process\033[0m")
+            break
 
     info = {"success": suc_num, "fail_this_run": fail_num, "tries_this_run": tries, "fail_types_this_run": fail_types}
     if args_cli.keep_failed:
@@ -180,6 +186,10 @@ def main():
     with open(os.path.join(save_path, "collect_info.json"), "w") as fp:
         json.dump(info, fp, indent=2)
     print(f"[collect] done: {suc_num}/{args_cli.episode_num} episodes, {fail_num} failures in {tries} tries")
+    if broken:
+        # 坏掉的物理状态下关 Isaac 可能卡住;结果都已写盘,直接以非 0 退出,collect_data.sh 会换新进程续采
+        sys.stdout.flush()
+        os._exit(3)
     env.close()
     simulation_app.close()
 

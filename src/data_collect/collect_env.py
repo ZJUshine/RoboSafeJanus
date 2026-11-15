@@ -233,6 +233,25 @@ def create_collect_env(config, app, **kwargs):
             """``arm``(如 ``left_arm``)对应的机器人对象。"""
             return self.robot_manager.get_robot_by_arm_name(arm)
 
+        def broken_robots(self):
+            """关节角 / 末端位姿已经不是有限值的手臂名。
+
+            PhysX 的 articulation 偶尔会炸(日志 ``Invalid PhysX transform detected for .../robot1/link*``),
+            之后同一个进程里每次 reset 都在 ``set_origin_endpose`` 报 ``LinAlgError: Eigenvalues did not converge``;
+            采集脚本据此退出进程、换新进程续采,不在坏掉的物理状态上空耗尝试次数。
+            """
+            bad = []
+            for r in self._target_robots():
+                try:
+                    q = np.asarray(self.robot_manager.get_joint(r, [0])[0], dtype=float)
+                    pose = np.asarray(self.robot_manager.get_real_endpose(r, [0])[0], dtype=float)
+                    ok = bool(np.isfinite(q).all() and np.isfinite(pose).all())
+                except Exception:  # noqa: BLE001  读状态本身出错也算坏了
+                    ok = False
+                if not ok:
+                    bad.append(r.arm_name)
+            return bad
+
         def get_arm_pose(self, arm):
             """``ee_link`` 位姿 ``[x, y, z, qw, qx, qy, qz]``(env 坐标系)。"""
             return np.asarray(self.robot_manager.get_real_endpose(self.robot(arm), [0])[0], dtype=float)

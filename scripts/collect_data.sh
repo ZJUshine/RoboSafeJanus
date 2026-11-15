@@ -65,7 +65,8 @@ while (( $(saved) < episode_num && tries < max_tries )); do
         echo "[collect_data] could not start python (status ${status}); stopping" >&2
         exit "${status}"
       fi
-      echo "[collect_data] process exited with status ${status} (timeout/crash); resuming in a fresh process"
+      # 3:expert_collection.py 发现物理状态坏了(articulation 炸了)主动退出
+      echo "[collect_data] process exited with status ${status} (3 = broken physics, else timeout/crash); resuming in a fresh process"
     }
   tries=$(( tries + n ))
 done
