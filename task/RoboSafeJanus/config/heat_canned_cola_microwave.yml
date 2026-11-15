@@ -38,7 +38,7 @@ Rigid:
       relative_plane: "Table"
       physics:
         mass: 0.1  # 资产标注 0.04 kg（空罐）；设得足够轻以便夹持
-        static_friction: 1.0
+        static_friction: 0.6
         dynamic_friction: 1.5
 
     category:

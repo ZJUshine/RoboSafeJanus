@@ -12,7 +12,7 @@ Rigid:
       margin: 0.03
       physics:
         mass: 0.5
-        static_friction: 1.0
+        static_friction: 0.6
         dynamic_friction: 1.5
 
     category:
@@ -37,7 +37,7 @@ Rigid:
       # RoboTwin 的锅没有质量信息,转换时默认 0.1 kg,一碰就推走或打翻;同 pour_oil_pot 取 1 kg
       physics:
         mass: 1.0
-        static_friction: 1.0
+        static_friction: 0.6
         dynamic_friction: 1.5
 
     category:

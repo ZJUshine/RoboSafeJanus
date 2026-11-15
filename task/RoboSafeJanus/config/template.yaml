@@ -38,7 +38,7 @@ Rigid:  # 刚体
       # zlim: [0.80, 0.80]  # 可选：固定放置高度（世界坐标）；不写时物体底面自动落在桌面上方
       physics:  # 可选：覆盖资产 metadata.json 中的物理参数
         mass: 0.1  # 质量（kg）；仿真中刚体质量上限为 0.5 kg，资产没有质量时需手动设置
-        static_friction: 1.0  # 静摩擦系数（默认 0.6）
+        static_friction: 0.6  # 静摩擦系数（与上游 rigid.py 默认一致：静 0.6 / 动 1.5）
 
     category:
       -

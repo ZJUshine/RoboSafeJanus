@@ -51,7 +51,7 @@ Rigid:
       place_tag: "up"
       physics:
         mass: 0.07
-        static_friction: 1.0
+        static_friction: 0.6  # 与 2026-11-13 采集的数据一致(当时未设,取 rigid.py 默认 0.6)
         dynamic_friction: 1.5
 
     category:

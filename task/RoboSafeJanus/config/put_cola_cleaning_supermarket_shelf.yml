@@ -41,7 +41,7 @@ Rigid:
       rotate_deg: [-20, 20]
       physics:
         mass: 0.5
-        static_friction: 1.0
+        static_friction: 0.6
         dynamic_friction: 1.5
       relative_plane: "Table"
 
@@ -66,7 +66,7 @@ Rigid:
       mirror: "zones"
       physics:
         mass: 0.5
-        static_friction: 1.0
+        static_friction: 0.6
         dynamic_friction: 1.5
 
     category:
@@ -90,7 +90,7 @@ Rigid:
       mirror: "zones"
       physics:
         mass: 0.5
-        static_friction: 1.0
+        static_friction: 0.6
         dynamic_friction: 1.5
 
     category:

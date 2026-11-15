@@ -13,7 +13,7 @@ Rigid:
       relative_plane: "Table"
       physics:
         mass: 0.2  # 0.4 kg 时夹住瓶颈一抬就从指间滑出去(data/debug/drop/r1 seed 100002)
-        static_friction: 1.0
+        static_friction: 0.6
         dynamic_friction: 1.5
 
     category:
