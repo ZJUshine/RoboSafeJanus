@@ -13,20 +13,21 @@ design 对草稿里的全部任务审(含 ``same_as`` 共用的);layout 起只�
     (assets) 不审核:用户在看板 assets 格「填资产链接」写进 task/robosafejanus_assets.json[<group>],保存就算完成
     ingest   ext_assets/integrate/simready_assets.py --group 下载 / 转换 / 挂进 Assets(看板 ingest 格「⬇ 下载资产」);
              产物 = 资产 JSON 里该组 + 每个 label 的 robodojo_format 目录与 Assets 目录(自动列出),--report 附入库报告;
-             改了资产链接 ingest 就失效
+             不审核(2026-11-15 起):检查通过即自动批准;改了资产链接 ingest 就失效,重新下载 / 提交
     design*  任务列表在这里定(set-tasks,先给用户确认),然后
              task/robosafejanus_tasks.json[<group>] 里有该任务 + robosafejanus_tasks/<group>.json 的该任务和 core_risk
              + robosafejanus_sim/<group>.json 的该任务(success 不算在内,它在 expert 阶段由 task_success_spec.py 回填)
     layout*  task/RoboSafeJanus/{config,tasks}/<task> 及其 *_X_* 组模块
-    expert*  task/RoboSafeJanus/experts/<task> 及其组模块 + sim 中该任务的 success
-    eval*    评测结果目录 / 报告(--artifact,每个 _result.json 的 eval_time >= 1)
+    expert*  task/RoboSafeJanus/experts/<task> 及其组模块 + sim 中该任务的 success;
+             小批量(--report 目录)成功率 > 0.7 且尝试 >= 10 次时自动批准,否则等人工审核
 
-批量采集、LeRobot 转换、上传 ModelScope 不是审核阶段(2026-11-13 起):expert 批准后直接用看板大表里
-collect / exchange / upload 格的按钮做(``group_jobs.py``),做完不提交。上传脚本 ``--task`` 真正上传时只要求
-该任务的 expert 已批准(``gate <group> expert --task <task> --approved``)。以前的 collect / upload 条目读状态时丢掉。
+批量采集、LeRobot 转换、上传 ModelScope(2026-11-13 起)和模型评测(2026-11-15 起)不是审核阶段:expert 批准后
+直接用看板大表里 collect / exchange / upload / eval 格的按钮做(``group_jobs.py``),做完不提交。上传脚本 ``--task``
+真正上传时只要求该任务的 expert 已批准(``gate <group> expert --task <task> --approved``)。
+以前的 collect / upload / eval 条目读状态时丢掉。
 
-旧状态读的时候自动迁移(``migrate``):assets 条目丢掉(2026-11-13 起不审);按任务的 ingest 合并成按组的一条
-(有一个任务仍然有效地"通过"就算整组通过,产物重新记 hash);更早按组审的 design / eval 拆成每个任务一条。
+旧状态读的时候自动迁移(``migrate``):assets / collect / upload / eval 条目丢掉(已不审);按任务的 ingest 合并成
+按组的一条(有一个任务仍然有效地"通过"就算整组通过,产物重新记 hash);更早按组审的 design 拆成每个任务一条。
 
 闸门:
   * 提交(submit)前,上游所有阶段必须已批准且仍然有效;提交时跑该阶段的检查(不导入 Isaac),失败则拒绝。
@@ -36,10 +37,10 @@ collect / exchange / upload 格的按钮做(``group_jobs.py``),做完不提交�
 用法::
 
     python scripts/internal/rsj_pipeline.py init pour_liquid_toaster          # 从种子建状态,提交 seed
-    # 除 seed / ingest 外每个阶段都要 --task <task>
+    # design / layout / expert 都要 --task <task>
     python scripts/internal/rsj_pipeline.py status [group]
     python scripts/internal/rsj_pipeline.py set-tasks <group> <task> ...       # design 阶段先定的任务草稿
-    python scripts/internal/rsj_pipeline.py resubmit <group> <stage> [--task T]   # 沿用上次的附件 / 指标
+    python scripts/internal/rsj_pipeline.py resubmit <group> <stage> [--task T] [--approve]  # 沿用上次的附件 / 指标;--approve 人工审核过,检查通过直接批准
     python scripts/internal/rsj_pipeline.py submit <group> <stage> [--task T] [--artifact PATH ...]
                                                [--metric k=v ...] [--report PATH] [--note TEXT]
     python scripts/internal/rsj_pipeline.py approve <group> <stage> [--task T] [--note TEXT]
@@ -94,9 +95,17 @@ ALLOWED_REPOS = (
 
 COLLECT_TARGET = int(os.environ.get("RSJ_COLLECT_TARGET", "100"))  # 每个任务的采集条数
 CONFIG_NAME = "arx_x5"
-STAGES = ("seed", "ingest", "design", "layout", "expert", "eval")
-DROPPED_STAGES = ("assets", "collect", "upload")  # 以前的审核阶段:assets 用户自己填,采集 / 上传是看板按钮直接做
+STAGES = ("seed", "ingest", "design", "layout", "expert")
+# 以前的审核阶段:assets 用户自己填,采集 / 上传(2026-11-13 起)和评测(2026-11-15 起)是看板按钮直接做
+DROPPED_STAGES = ("assets", "collect", "upload", "eval")
 GROUP_STAGES = ("seed", "ingest")  # 按组:这时还没有任务列表(任务列表在 design 定)
+# 提交时检查通过就自动批准、不等人工审核的阶段(2026-11-15 起入库不审核;--force_checks 硬提交的仍要人工审)
+AUTO_APPROVE_STAGES = ("ingest",)
+# expert:小批量成功率严格大于这个值(且至少 EXPERT_AUTO_MIN_TRIES 次尝试)时自动批准(2026-11-15 起);
+# 成功率按 --report 目录里的 seed.txt / next_seed.txt 算,不看手写的 --metric
+EXPERT_AUTO_RATE = 0.7
+EXPERT_AUTO_MIN_TRIES = 10
+SMALL_BATCH_START_SEED = 100000  # collect_data.sh / expert_collection.py 的默认起始 seed
 TASK_STAGES = tuple(s for s in STAGES if s not in GROUP_STAGES)
 DRAFT_STAGES = ("design",)  # 对草稿里全部任务审(含 same_as 共用的),之后只审自有任务
 STAGE_DESC = {
@@ -105,7 +114,6 @@ STAGE_DESC = {
     "design": "设计 / sim JSON",
     "layout": "布局 + 指令",
     "expert": "专家脚本",
-    "eval": "下载评测",
 }
 SEED_FIELDS = ("name", "background", "core_risk", "risk_reasoning", "risk_category", "action",
                "interact_object", "target_object", "risk_variation", "safe_variation")
@@ -345,7 +353,7 @@ def default_artifacts(state: dict, stage: str, task: str | None) -> list[str]:
                 f"task/robosafejanus_sim/{g}.json#tasks.{task}.success"]
     if stage == "ingest":
         return [f"task/robosafejanus_assets.json#{g}", *(p for item in ingest_targets(g) for p in item["paths"])]
-    return []  # eval:由 --artifact 给出
+    return []
 
 
 def current_hashes(state: dict, entry: dict) -> dict[str, str]:
@@ -518,6 +526,39 @@ def check_expert(state: dict, task: str | None) -> list[tuple[bool, str]]:
     return out
 
 
+def small_batch_stats(report: str | None) -> tuple[int, int] | None:
+    """``--report`` 小批量目录的 ``(成功数, 尝试数)``:成功 = seed.txt 里的 seed 个数,
+    尝试 = next_seed.txt - 起始 seed(起始取 ``SMALL_BATCH_START_SEED`` 与最小成功 seed 中较小的)。读不到为 None。"""
+    if not report:
+        return None
+    d = ROOT / report
+    seed_f, next_f = d / "seed.txt", d / "next_seed.txt"
+    if not (seed_f.is_file() and next_f.is_file()):
+        return None
+    try:
+        seeds = [int(x) for x in seed_f.read_text().split()]
+        nxt = int(next_f.read_text().strip())
+    except ValueError:
+        return None
+    start = min([SMALL_BATCH_START_SEED, *seeds])
+    tries = nxt - start
+    return (len(seeds), tries) if tries > 0 else None
+
+
+def auto_approve_reason(stage: str, entry: dict) -> str | None:
+    """提交后可以直接批准的理由;None 表示要人工审核。"""
+    if stage in AUTO_APPROVE_STAGES:
+        return "自动批准(该阶段不审核,检查已通过)"
+    if stage == "expert":
+        stats = small_batch_stats(entry.get("report"))
+        if stats is None:
+            return None
+        ok, tries = stats
+        if tries >= EXPERT_AUTO_MIN_TRIES and ok / tries > EXPERT_AUTO_RATE:
+            return f"自动批准:小批量成功率 {ok}/{tries} = {ok / tries:.3f} > {EXPERT_AUTO_RATE}"
+    return None
+
+
 def _task_rel(t: str) -> str:
     """任务在 Benchmark 里的相对目录 ``<group>/<level>/<task>``(LeRobot 镜像同样的布局)。"""
     base = ROOT / "data" / BENCHMARK_NAME
@@ -531,26 +572,6 @@ def _bench_dir(t: str) -> Path:
 
 def _hdf5_count(t: str) -> int:
     return len(list((_bench_dir(t) / "data").glob("*.hdf5")))
-
-
-def check_eval(state: dict, task: str | None) -> list[tuple[bool, str]]:
-    arts = [s for s in state["stages"].get(key_of("eval", task), {}).get("artifacts", {}) if not s.startswith("state:")]
-    out = [(bool(arts), f"--artifact 列出评测结果目录或报告({len(arts)} 个)")]
-    for spec in arts:
-        path = ROOT / spec
-        results = [path] if path.name == "_result.json" else list(path.rglob("_result.json")) if path.is_dir() else []
-        if path.suffix in (".md", ".json") and path.name != "_result.json":
-            out.append((path.exists(), f"{spec}: 报告" + ("" if path.exists() else "不存在")))
-            continue
-        bad = [r for r in results if (read_json(r).get("eval_time") or 0) < 1]
-        out.append((bool(results) and not bad,
-                    f"{spec}: {len(results)} 个 _result.json" + (f",{len(bad)} 个 eval_time < 1" if bad else "")))
-    repo = os.environ.get("MS_DATA_REPO_ID")
-    if repo:
-        out.append(run_align("--only", "modelscope", "--task", task, "--modelscope", repo))
-    else:
-        out.append((True, "未设 MS_DATA_REPO_ID,跳过远端 HDF5 核对"))
-    return out
 
 
 CHECKS = {s: globals()[f"check_{s}"] for s in STAGES}
@@ -596,8 +617,8 @@ def _merge_task_ingest(state: dict) -> bool:
 
 
 def migrate(state: dict) -> dict:
-    """丢掉已不审的 assets / collect / upload 条目(``DROPPED_STAGES``);按任务的 ingest 合并成按组
-    (``_merge_task_ingest``);把更早的组级条目(``design`` / ``eval`` 等)拆成每个任务一条。
+    """丢掉已不审的 assets / collect / upload / eval 条目(``DROPPED_STAGES``);按任务的 ingest 合并成按组
+    (``_merge_task_ingest``);把更早的组级条目(``design`` 等)拆成每个任务一条。
 
     仍然有效的"通过"拆成各任务的"通过":产物按任务重新记 hash,批准时间不变;其他状态(待审、失效、驳回……)
     丢掉,需要按任务重新提交。下游条目记的上游(如 layout 记的 ``design``)改成同一任务的 ``design/<task>``。
@@ -608,11 +629,11 @@ def migrate(state: dict) -> dict:
     for key in dropped:
         stages.pop(key)
         report_path(state["group"], key).unlink(missing_ok=True)
-    for entry in stages.values():  # eval 以前记的上游是 upload,现在是 expert(批准后重新记)
+    for entry in stages.values():  # 记的上游是已不审的阶段时去掉
         for up in [u for u in entry.get("upstream", {}) if u.split("/")[0] in DROPPED_STAGES]:
             entry["upstream"].pop(up)
     if dropped:
-        print(f"{state['group']}: assets / collect / upload 不再审核,丢掉 {len(dropped)} 条旧条目", file=sys.stderr)
+        print(f"{state['group']}: {' / '.join(DROPPED_STAGES)} 不再审核,丢掉 {len(dropped)} 条旧条目", file=sys.stderr)
     merged = _merge_task_ingest(state)
     old = [s for s in TASK_STAGES if s in stages]
     if not old:
@@ -629,13 +650,12 @@ def migrate(state: dict) -> dict:
         if status[stage] != "approved":
             print(f"{state['group']}: 组级 {stage} 是 {status[stage]},按任务拆分时丢掉,需要重新提交", file=sys.stderr)
             continue
-        extra = [s for s in entry.get("artifacts", {}) if stage == "eval"]
         for task in stage_tasks(state, stage):
             key = f"{stage}/{task}"
             if key in stages:
                 continue
             new = json.loads(json.dumps(entry))
-            specs = list(dict.fromkeys([*default_artifacts(state, stage, task), *extra]))
+            specs = default_artifacts(state, stage, task)
             new["artifacts"] = {s: artifact_hash(s, state) for s in specs}
             new["upstream"] = {u: stages[u]["approved_at"] for u in direct_upstream(state, stage, task)
                                if u in stages and stages[u].get("approved_at")}
@@ -773,6 +793,15 @@ def do_submit(state: dict, stage: str, task: str | None, artifacts=(), metrics=(
     if failed:
         note(entry, "force", "检查未通过仍提交: " + "; ".join(m.splitlines()[0] for m in failed))
         write_report(state, key)
+    elif (why := auto_approve_reason(stage, entry)) is not None:
+        entry["status"] = "approved"
+        entry["approved_at"] = now()
+        entry["upstream"] = {u: state["stages"][u]["approved_at"] for u in direct_upstream(state, stage, task)}
+        note(entry, "approve", why)
+        write_report(state, key)
+        save_state(state)
+        print(f"{key} 已提交并自动批准({why}): {rel(path)}")
+        return 0
     save_state(state)
     print(f"{key} 已提交,等待审核: {rel(path)}")
     return 0
@@ -788,7 +817,12 @@ def cmd_resubmit(a) -> int:
     defaults = set(default_artifacts(state, a.stage, a.task))
     extra = [s for s in old.get("artifacts", {}) if s not in defaults]
     metrics = [f"{k}={v}" for k, v in old.get("metrics", {}).items()]
-    return do_submit(state, a.stage, a.task, extra, metrics, old.get("report"), a.note or "重新提交")
+    rc = do_submit(state, a.stage, a.task, extra, metrics, old.get("report"), a.note or "重新提交")
+    if rc or not getattr(a, "approve", False):
+        return rc
+    # 人工审核过(看板失效格的「人工审核通过」):检查通过后直接批准
+    a.note = a.note or "人工编辑 / 审核后直接批准"
+    return cmd_review(a, True)
 
 
 def cmd_init(a) -> int:
@@ -868,7 +902,7 @@ def cmd_gate(a) -> int:
 def _adopt_one(state: dict, stage: str, task: str | None) -> bool:
     metrics = ["success_rate=adopted"] if stage == "expert" else []
     if do_submit(state, stage, task, metrics=metrics, text="adopt: 流水线之前已完成",
-                 force_checks=stage in ("ingest", "eval")) != 0:
+                 force_checks=stage == "ingest") != 0:
         return False
     save_state(state)
     ns = argparse.Namespace(group=state["group"], stage=stage, task=task, note="adopt")
@@ -952,7 +986,9 @@ def main() -> int:
     sp.add_argument("group", nargs="?")
     sp = add("set-tasks", help="设置任务草稿")
     sp.add_argument("tasks", nargs="+")
-    add("resubmit", stage=True).add_argument("--note")
+    sp = add("resubmit", stage=True)
+    sp.add_argument("--note")
+    sp.add_argument("--approve", action="store_true", help="人工审核过:检查通过后直接批准(失效 / 提交后已改的格子)")
     sp = add("submit", stage=True)
     sp.add_argument("--artifact", action="append", default=[], help="额外产物(可重复)")
     sp.add_argument("--metric", action="append", default=[], help="k=v,如 success_rate=0.9")

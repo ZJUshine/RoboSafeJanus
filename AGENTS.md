@@ -9,6 +9,7 @@
 - 同一个问题连续失败 1–2 次后停下,汇报现象、证据和 2–3 个候选方案,由用户决定,不要盲目重试。
 - 删除、覆盖、改写已采集数据或远端仓库前,先列出影响范围并征得用户确认。
 - 不改 `XPolicyLab/`、`third_party/` 子模块内容,除非用户明确要求更新 gitlink。
+- 服务器信息(SSH 地址 / 端口、GPU、仓库与数据盘路径、conda 环境、采集输出目录)读 `docs/servers.json`。
 
 ## 1. 任务定义与同步
 
@@ -30,7 +31,7 @@
 ## 2. 数据采集
 
 - 采集前确认:任务 YAML / 代码 / 专家齐全且类名 == 模块名;YAML 写法在 `LayoutGenerator` 支持范围内;依赖固定件或 Fluid 且没有自己的评测布局时,用 `--layout_template` 指向固定件相同的任务;换了资产就重新 `bash scripts/gen_grasps.sh <task> 0`。
-- 流程固定为:冒烟(`--save_dir /tmp/smoke`,1 条,`--max_tries 5 --save_fail_video`)→ 小批量(~20 条)看成功率和失败分布 → 正式采集(`collect_data_parallel.sh`)→ 抽查视频。
+- 流程固定为:冒烟(`--save_dir /tmp/smoke`,1 条,`--max_tries 5 --save_fail_video`)→ 小批量(10 条)看成功率和失败分布 → 正式采集(`collect_data_parallel.sh`)→ 抽查视频。
 - 调试运行一律加 `--save_fail_video`,并在汇报里列出视频路径:成功 `<save_dir>/.../<task>/<config>/preview_video/episode_*_<cam>.mp4`,失败 `.../video_fail/seed_<seed>_<cam>.mp4`,标明每个文件对应的 seed 和结果。
 - **seed 段不能重叠**:评测布局 `0..99999`,脚本专家 `100000+`,遥操作 `200000+`。不要用 `--layout_source eval` 产生训练数据(测试集泄漏)。
 - 续采直接重跑同一命令;`--start_seed` 只在目录里没有 `seed.txt` / `next_seed.txt` 时生效。要从头采,先征得用户同意再删除任务目录。

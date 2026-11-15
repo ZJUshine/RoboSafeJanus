@@ -2,7 +2,7 @@
 
 本文说明 RoboSafeJanus 当前采用的策略评测协议、命令、结果目录、并行方式、视频抽查和报告规范。实现入口在 `scripts/robodojo.sh`、`scripts/internal/run_policy_eval.sh`、`scripts/eval_policy.sh`、`src/eval_client/` 与 `XPolicyLab/`。
 
-服务器、GPU、磁盘和远端路径见 [`docs/servers.md`](servers.md)。
+服务器、GPU、磁盘和远端路径见 [`docs/servers.json`](servers.json)。
 
 ---
 
@@ -11,7 +11,7 @@
 | 项目 | 约定 |
 | :-- | :-- |
 | 评测范围 | 任务定义(`task/robosafejanus_tasks`) 中的组;每组评测**全部** safe + risky 任务 |
-| 机器 | 本地 8× RTX 5880 Ada,或远端 8× RTX 5090;见 `docs/servers.md` |
+| 机器 | 本地 8× RTX 5880 Ada,或远端 8× RTX 5090;见 `docs/servers.json` |
 | 环境 | sim: conda `RoboDojo`;policy: `uv`(如 Pi_05 / Pi_0)或策略自己的 conda 环境 |
 | env config | `arx_x5` |
 | action type | `joint` |
@@ -718,7 +718,7 @@ ls Assets/Eval_Layout/RoboDojo/arx_x5/0/<task>_*.json | wc -l
 
 ## 13. 相关文档
 
-- 服务器与 GPU:[`docs/servers.md`](servers.md)
+- 服务器与 GPU:[`docs/servers.json`](servers.json)
 - 数据采集与布局生成:[`docs/data_collection.md`](data_collection.md)
 - 评测报告示例:`docs/eval_reports/`
 - XPolicyLab 策略说明:`XPolicyLab/README.md` 与 `XPolicyLab/policy/<POLICY>/README.md`

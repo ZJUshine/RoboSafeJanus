@@ -8,7 +8,6 @@
     design   设计文件里该任务的 instruction、S1、S2(S1 / S2 并排),sim 里该任务(不含 success)、core_risk
     layout   task/RoboSafeJanus/config/<task>.yml、tasks/<task>.py 及其 *_X_* 组模块
     expert   experts/<task>.py 及其组模块、sim 里该任务的 success
-    eval     提交时附的报告(.md / .json)
 
 槽的种类(``kind``):``json``(JSON 文件里的一段,按选择器 ``a.b`` / ``[k=v]`` 定位)、``jsonstr``(JSON 里的一个字符串,
 直接编辑文字)、``json-nosuccess``(sim 里的任务,保存时保留原来的 success)、``text``(整个文本文件)。
@@ -101,7 +100,7 @@ def slots(state: dict, key: str) -> list[dict]:
                 name = Path(path_s).name
                 shared = "组模块,同组其他任务共用" if "_X_" in name else ""
                 out.append(_slot(name, path_s, note=shared))
-    else:  # eval 等:提交时附的文本报告
+    else:  # 其他:提交时附的文本报告
         entry = state["stages"].get(key) or {}
         for spec in [entry.get("report"), *entry.get("artifacts", {})]:
             if spec and "#" not in spec and not spec.startswith("state:") and spec.endswith(TEXT_SUFFIXES) \

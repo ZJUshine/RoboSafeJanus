@@ -371,7 +371,7 @@ ffmpeg -loglevel error -sseof -0.5 -i $D/preview_video/episode_0000000_cam_head.
 3. 生成抓取缓存:`bash scripts/gen_grasps.sh <task> 0`(7.10 节)。
 4. 写专家 `task/RoboDojo/experts/<task>.py`(第 7.1 节)。
 5. 本地 GPU 冒烟:`ROBODOJO_COLLECT_LOG=INFO ROBODOJO_COLLECT_CHUNK=5 bash scripts/collect_data.sh <task> 1 0 --max_tries 5 --save_fail_video --save_dir /tmp/smoke`,看视频。
-6. 本地小批量(如 20 条)看成功率和失败分布(2.4),针对性调专家。
+6. 小批量(10 条)看成功率和失败分布(2.4),针对性调专家。
 7. 本地正式采集 100 条:`bash scripts/collect_data_parallel.sh <task> 100 <gpu_ids>`。
 8. 抽查(第 5 节)。
 9. 若在外部服务器上采集,把数据拉回本地(8.6 节)。
@@ -640,7 +640,7 @@ python src/data_collect/eval_layouts.py derive --source make_toast --task make_t
 
 ## 8.4 资产:从 ModelScope 下载(`scripts/init_assets.sh`)
 
-`Assets/` 和 `ext_assets/` 放在私有 dataset `zjushine/RoboSafeJanus-Asset`。它以 Hugging Face `RoboDojo-Benchmark/RoboDojo` 的 `Assets/` 为基础,加上 RoboSafeJanus 的改动:X5 官方关节限位(`Robots/x5/ARX.usd`、`Robots/x5/X5A.urdf`)、`Robots/*/curobo.yml`、`Eval_Layout/RoboDojo/arx_x5/0/` 评测布局、ArtVIP / GenieSim / SimReady 等包装物体,以及包装物体引用的原件 `ext_assets/robodojo_format/`、`ext_assets/integrate/`。
+`Assets/` 和 `ext_assets/` 放在私有 dataset `zjushine/RoboSafeJanus-Asset`。它以 Hugging Face `RoboDojo-Benchmark/RoboDojo` 的 `Assets/` 为基础,加上 RoboSafeJanus 的改动:X5 官方关节限位(`Robots/x5/ARX.usd`、`Robots/x5/X5A.urdf`)、`Robots/*/curobo.yml`、`Eval_Layout/RoboDojo/arx_x5/0/` 评测布局、`SimReady_*` 包装物体,以及 `ext_assets/robodojo_format/`(包装物体的来源:指向原件的软链 + metadata)和 `ext_assets/integrate/`(转换脚本)。SimReady 原件 `ext_assets/SimReady/` 不在 dataset 里:软链解析不到原件时,`python ext_assets/integrate/simready_assets.py --no_write_json` 按 `task/robosafejanus_assets.json` 的 `hf download` 命令重新下载(走 hf-mirror),再转换、挂入。
 
 ```bash
 pip install -U "modelscope>=1.40"
@@ -722,7 +722,7 @@ rsync -av --partial -e "ssh -p $PORT" ext_assets/robodojo_format ext_assets/inte
 ```
 
 - 也可以不传资产:在服务器上 `bash scripts/init_assets.sh` 直接从 ModelScope 下载(8.4 节),绝对路径会自动替换,下面的 rsync `Assets/`、`ext_assets` 和 sed 步骤都可以省掉。
-- 资产里有本地仓库的**绝对路径**:`ArtVIP_*` / `GenieSim_*` 包装的 `object.usd`(均为 ASCII usda)和 `metadata.json` 引用 `ext_assets/robodojo_format/...`,`Assets/Robots/*/curobo.yml` 里有 `asset_root_path` / `urdf_path`,`ext_assets/integrate/manifest.json` 也有。服务器上的仓库路径不同,同步后在服务器上统一替换,否则这些资产加载失败:
+- 资产里有本地仓库的**绝对路径**:`SimReady_*` 包装的 `object.usd`(均为 ASCII usda)引用 `ext_assets/SimReady/...` 原件,`metadata.json` 记了原件路径,`Assets/Robots/*/curobo.yml` 里有 `asset_root_path` / `urdf_path`,`ext_assets/integrate/manifest.json` 也有。服务器上的仓库路径不同,同步后在服务器上统一替换,否则这些资产加载失败:
 
   ```bash
   ssh -p $PORT $SERVER "cd $REPO && grep -rlZ --include='*.usd' --include='*.json' --include='*.yml' /home/xuancun/RoboSafeJanus/ Assets ext_assets/integrate \
@@ -836,7 +836,7 @@ python scripts/internal/sync_status.py --watch 120 --serve 8765
 ```
 
 - **流水线大表**:每行一个任务,横向很长(左右滚动)。从左到右:任务构造 seed · assets(你填,不审)· ingest · design ·
-  layout · expert(审核)→ 数据收集与上传 collect · exchange · upload(**不审核**)→ 模型评测 模型 · eval · 评测结果 · 评测布局
+  layout · expert(审核;expert 小批量成功率 > 0.7 且尝试 ≥ 10 次时自动批准)→ 数据收集与上传 collect · exchange · upload(**不审核**)→ 模型评测 评测布局 · 模型 · eval · 评测结果(**不审核**)
   (没有"下一步"列,先做什么自己定)。左边只有 `#` · 组 · 任务三列(名字在下划线处换行),没有层级列:
   **任务格的底色就是层级**(绿 safe / 红 risky,悬停看指令)。**seed、assets、ingest 按组**(跨行合并成一格,这时还没有
   任务列表),**design 起按任务审**,每个任务一格,一个任务通过就能单独往下走。`same_as` 的任务 design 在本组审,
@@ -853,13 +853,16 @@ python scripts/internal/sync_status.py --watch 120 --serve 8765
 - **列头只写列名**(seed、assets、ingest…评测布局),说明放在悬停提示里。
 - **模型列**:每个模型(本任务的 / 组模型)写 policy 和远端最新 step;本地已有最新 step 是 ✅,没有是 ☁️ 并带「⬇ 下载 <大小>」,
   点了弹出确认框,确认后后台跑 `download_models_from_modelscope.py --policy <p> --task <key> --step latest`,下载完链接到
-  checkpoints(同一时间只下一个,下载中按钮灰掉)。组模型在同组同层级的每一行都显示,点哪一行都一样。以前的 collect / upload 审核条目读状态时丢掉;eval 的上游改成 expert。
+  checkpoints(同一时间只下一个,下载中按钮灰掉)。组模型在同组同层级的每一行都显示,点哪一行都一样。以前的 collect / upload / eval 审核条目读状态时丢掉。
+- **eval 列(不审核,2026-11-15 起)**:每个模型一行,写这一行模型已评几条(`n/50`,同一 ckpt 取 `eval_time` 最大的一次;
+  评满绿、评了一部分蓝),risky 用同组 safe 模型时标 zero-shot。模型下载完、评测布局够 50 个后有「▶ 评测」,只评这一行的模型,
+  评完不提交;报告需要时按 `docs/model_evaluation.md` 自己写。
 - **所有点击都在屏幕中间弹出对话框**,表里不插行。审核:点审核格里的字,弹出这一阶段的审核条目(检查结果、相对 HEAD 的改动、
   产物、记录,待审时有说明框和批准 / 驳回,失效时有重新提交);点组名弹出风险种子和该组全部阶段,单个条目的对话框顶上有
   「看这个组的全部阶段」。点「关闭」、按 Esc 或点对话框外面关闭。地址是 `#e-<group>-<阶段>` / `#g/<group>`,
   直接打开这样的地址也会弹出,可以发给别人;批准 / 驳回后页面刷新,对话框会重新打开显示新状态。
 - **任务构造的顺序(2026-11-13 起)**:seed 批准 → 你在 assets 格「🔗 填资产链接」(**保存就算完成,不审核**)→
-  ingest 格「⬇ 下载资产」(后台下载 / 转换 / 入库,全部入库后自动提交 ingest,你审)→ design 格「▶ Claude」拿提示词,
+  ingest 格「⬇ 下载资产」(后台下载 / 转换 / 入库,全部入库后自动提交 ingest,检查通过即自动批准,不用你审)→ design 格「▶ Claude」拿提示词,
   Claude 先拟任务列表给你确认(`set-tasks`),再逐个任务写设计、提交 → layout → expert。以前按任务的 assets 条目读状态时丢掉,
   按任务的 ingest 合并成按组的一条(有一个任务仍然有效地通过就算整组通过;备份在 `data/pipeline/_backup_groupingest_20261113/`)。
 - **「⬇ 下载资产」**(ingest 格,按组):seed 批准、资产链接填好且来源合规后可点。计划是 `simready_assets.py --group <g> --dry_run`
@@ -878,8 +881,7 @@ python scripts/internal/sync_status.py --watch 120 --serve 8765
   - ingest:`task/robosafejanus_assets.json[<group>]`(整组的下载命令)、入库报告;
   - design:设计文件里该任务的 instruction(纯文字)、**S1 和 S2 并排**、sim 里该任务(不含 success,保存时原来的 success
     原样保留)、core_risk(整组);
-  - layout:`config/<task>.yml`、`tasks/<task>.py` 和 `*_X_*` 组模块;expert:`experts/<task>.py`、组模块、sim 里的 success;
-  - eval:提交时附的报告。
+  - layout:`config/<task>.yml`、`tasks/<task>.py` 和 `*_X_*` 组模块;expert:`experts/<task>.py`、组模块、sim 里的 success。
   保存前检查格式(JSON / YAML / Python 语法),格式不对不写;JSON 按文件原来的缩进写回。打开之后文件被别人(Claude /
   终端)改过就拒绝保存,要关掉重新打开。只能写这里列出的位置(页面只传第几项)。
   改已批准的格子会变成「失效」、改待审的会变成「提交后已改」,下游闸门随之关闭,保存后点「重新提交这一格」。

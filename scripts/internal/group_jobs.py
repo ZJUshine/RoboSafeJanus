@@ -3,7 +3,8 @@
 
 任务在独立会话里后台运行,看板重启不会中断。状态在 ``<RSJ_PIPELINE_DIR>/_jobs/<group>.<task>.json``,
 日志在 ``data/.cache/jobs/task_<task>_<kind>_<时间>.log``(``RSJ_PIPELINE_DIR`` 的上一级)。每个任务同一时间只跑一个,
-转换 / 上传同一时间只有一个(LeRobot 转换和上传脚本共用缓存);不同任务的采集可以同时跑在不同的卡上。
+转换同一时间只有一个(共用扁平视图),上传同一时间只有一个(共用 ModelScope 缓存和硬链接视图);
+转换 A 和上传 B 可以同时跑。不同任务的采集可以同时跑在不同的卡上。
 
 按钮对应四种任务(``kind``;任务构造各格的「▶ Claude」不在这里,只给出提示词让用户贴进终端的 Claude 交互着做,
 见 ``pipeline_page.claude_prompt``。2026-11-13 前有过后台无人值守的 ``claude`` 任务,旧记录还能在 status 里看到):
@@ -20,19 +21,28 @@
     eval     「评测」(eval 格):expert 批准、模型下载完、评测布局够 50 个后,用已下载的 Pi_0 / Pi_05 checkpoint
              各评 50 条(``robodojo.sh eval``,seed 0,arx_x5,joint);risky 没有自己的模型时用同组 safe 模型 zero-shot。
              没评满的接着同一个 ``ROBODOJO_RUN_ID`` 续评,评满的跳过。每条流水线用一对 GPU(policy + sim),
-             填几对就并行几条。评完不提交:报告和提交 eval 审核让 Claude 做(/rsj-eval)
+             填几对就并行几条。评测不审核(2026-11-15 起),评完不提交
     layouts  「生成布局」(评测布局格):layout 批准后,在 Isaac 里分批(每批 20 个 seed,一个进程)检查哪些 seed
              能稳定沉降(``eval_layouts.py check``),取前 50 个写评测布局(``eval_layouts.py write``)。同组还缺布局的
              自有任务一起生成,共用同一批 seed(safe / risky 逐条可比);已有一部分(不到 50 个)的会被替换
 
-采集 / 转换 / 上传不审核(2026-11-13 起),做完不提交;只要求该任务的 expert 已批准。命令行(看板调用的就是这些函数)::
+采集和评测先选机器(``docs/servers.json``,``servers.py``):本机直接跑;远端机器走 SSH——同步代码
+(``servers.CODE_DIRS`` + ``data/grasp_pose``,评测再加该任务的评测布局和要续评的结果,都不加 ``--delete``)→ 远端
+``setsid nohup`` 运行(目录 ``data/.rsj_remote/<task>_<kind>_<时间>``,日志 ``<目录>.log``,退出码 ``<目录>/exit_code``)→
+本地后台进程每分钟看一次远端进度、把远端日志接到本地日志 → 跑完把结果拉回:采集拉到 ``data/.cache/remote_pull/`` 再用
+``merge_shards.py`` 接到本地数据之后(编号接续、seed 去重),评测拉回 ``eval_result/RoboDojo/<task>/`` 和 ``eval_logs/``。
+远端没跑完时再点一次、选同一台机器就续上(远端还在跑就接着看,跑完了就拉回);采集没拉回前不能换机器(seed 段会撞)。
+远端的数据不删,资产和模型不自动同步(缺的在计划里列出来)。
+
+采集 / 转换 / 上传(2026-11-13 起)和评测(2026-11-15 起)不审核,做完不提交;只要求该任务的 expert 已批准。
+命令行(看板调用的就是这些函数)::
 
     python scripts/internal/group_jobs.py plan ingest <group> __group__
     python scripts/internal/group_jobs.py plan collect|exchange|upload <group> <task>
-    python scripts/internal/group_jobs.py start collect <group> <task> --gpus 0,1
+    python scripts/internal/group_jobs.py start collect <group> <task> --gpus 0,1 [--machine autodl] [--per_gpu 2]
     python scripts/internal/group_jobs.py start exchange <group> <task>
     python scripts/internal/group_jobs.py start upload <group> <task> [--delete]
-    python scripts/internal/group_jobs.py start eval <group> <task> --gpus 2,3,5,7
+    python scripts/internal/group_jobs.py start eval <group> <task> --gpus 2,3,5,7 [--machine autodl]
     python scripts/internal/group_jobs.py start layouts <group> <task> --gpus 2
     python scripts/internal/group_jobs.py status
     python scripts/internal/group_jobs.py stop <group> <task>
@@ -47,6 +57,7 @@ import os
 from pathlib import Path
 import re
 import shlex
+import shutil
 import signal
 import subprocess
 import sys
@@ -55,6 +66,7 @@ import time
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import rsj_pipeline as rp  # noqa: E402
+import servers as sv  # noqa: E402
 
 ROOT = rp.ROOT
 JOB_DIR = rp.STATE_DIR / "_jobs"
@@ -66,12 +78,12 @@ LEROBOT_REPO = os.environ.get("MS_LEROBOT_REPO_ID", f"{HDF5_REPO}-Lerobot")
 START_SEED = 100000
 SEED_STRIDE = int(os.environ.get("ROBODOJO_SEED_STRIDE", "1000"))
 FREE_GPU_MIB = 2000  # 显存占用低于这个值算空闲卡
-TEMPLATE_RE = re.compile(r"--layout_template\s+([^\s。,,;;))]+)")
+TEMPLATE_RE = re.compile(r"--layout_template\s+([^\s,;()。，；（）]+)")
 KIND_LABEL = {"ingest": "下载资产", "collect": "采集", "export": "转换 LeRobot", "upload": "上传 ModelScope",
               "eval": "评测", "layouts": "生成布局", "claude": "Claude"}
 DATA_BUTTONS = ("collect", "exchange", "upload")  # 不审核,expert 批准后直接做
 BUTTONS = ("ingest", *DATA_BUTTONS, "eval", "layouts")
-# 评测(rsj-eval / docs/model_evaluation.md 的固定协议)
+# 评测(docs/model_evaluation.md 的固定协议)
 EVAL_POLICIES = ("Pi_0", "Pi_05")
 EVAL_NUM = 50
 EVAL_SEED = 0
@@ -88,6 +100,11 @@ GROUP_TASK = "__group__"  # 按组的任务(ingest)的任务名
 PXRENV = "ext_assets/integrate/pxrenv.sh"
 HF_ENDPOINT = os.environ.get("HF_ENDPOINT", "https://hf-mirror.com")
 NAME_RE = re.compile(r"[A-Za-z0-9_]+")
+MACHINE_KINDS = ("collect", "eval")  # 这两种先选机器(docs/servers.json)
+REMOTE_DIR = "data/.rsj_remote"  # 远端仓库下每次运行的目录
+PULL_DIR = ROOT / "data" / ".cache" / "remote_pull"  # 远端采集拉回来先放这里,再 merge_shards 合并
+REMOTE_POLL = 60  # 秒
+ASSET_ROOT = "Assets/Object/RoboDojo"
 
 
 def now() -> str:
@@ -149,7 +166,10 @@ def _alive(pid: int | None) -> bool:
 def job_label(job: dict) -> str:
     if job.get("kind") == "claude":
         return f"Claude {job.get('stage', '')}"
-    return KIND_LABEL.get(job.get("kind"), job.get("kind"))
+    label = KIND_LABEL.get(job.get("kind"), job.get("kind"))
+    if job.get("machine") and job["machine"] != sv.default_key():
+        label = f"{label}@{job['machine']}"
+    return f"{job['policy']} {label}" if job.get("policy") else label
 
 
 def job_state(job: dict) -> str:
@@ -288,6 +308,15 @@ def job_progress(job: dict) -> dict | None:
     """任务面板 / 格子里的进度 ``{text, done, total}``(total 为 0 时只有文字);算不出来时 None(只显示步骤)。"""
     try:
         kind, task = job.get("kind"), job.get("task", "")
+        r = job.get("remote")
+        if kind == "collect" and r and not r.get("merged"):
+            have = min(rp._hdf5_count(task) + int(r.get("count") or 0), rp.COLLECT_TARGET)
+            return {"text": f"{r['machine']} 已采 {r.get('count') or 0}/{r['episode_num']} · 合计 {have}/{rp.COLLECT_TARGET} 条",
+                    "done": have, "total": rp.COLLECT_TARGET}
+        if kind == "eval" and r and r.get("counts") and job_state(job) == "running":
+            counts = r["counts"]
+            return {"text": f"{r['machine']} · " + " · ".join(f"{p} {n}/{EVAL_NUM}" for p, n in counts.items()),
+                    "done": sum(counts.values()), "total": EVAL_NUM * len(counts)}
         if kind == "eval":
             return eval_progress(job["group"], task)
         if kind == "collect":
@@ -308,6 +337,73 @@ def job_progress(job: dict) -> dict | None:
 
 class PlanError(Exception):
     """不能开始(闸门没过、任务在跑等),消息直接给用户看。"""
+
+
+def machine_cfg(machine: str = "") -> dict:
+    """``docs/servers.json`` 里的一台机器(空 = default_machine);配置不全时 PlanError。"""
+    try:
+        m = sv.get(machine or sv.default_key())
+    except sv.ServerError as error:
+        raise PlanError(str(error)) from None
+    why = sv.problems(m)
+    if why:
+        raise PlanError(f"{m['key']} 还不能用:{'; '.join(why)}")
+    return m
+
+
+def job_machine(job: dict) -> str:
+    """任务跑在哪台机器上(以前的记录没有 machine,都是本机)。"""
+    return job.get("machine") or sv.default_key()
+
+
+def busy_gpus(kinds, jid: str, machine: str) -> set[int]:
+    """同一台机器上别的任务占着的卡。"""
+    return {g for j in running(kinds, exclude=jid) if job_machine(j) == machine for g in j.get("gpus", [])}
+
+
+def machine_gpus(m: dict) -> list[dict]:
+    if sv.is_local(m):
+        return gpu_usage()
+    try:
+        return sv.gpu_usage(m)
+    except sv.ServerError as error:
+        raise PlanError(str(error)) from None
+
+
+def gpu_lines(gpus: list[dict], busy: set[int], m: dict) -> list[str]:
+    def gpu_text(g: dict) -> str:
+        mark = "(别的任务在用)" if g["index"] in busy else ""
+        return f"{g['index']}:{g['used'] // 1024}/{g['total'] // 1024}G{mark}"
+
+    return ["", f"{m['key']} GPU 显存占用:" + "  ".join(gpu_text(g) for g in gpus)] if gpus else []
+
+
+def _machine_fields(m: dict) -> dict:
+    """计划里带给页面的机器信息(选择框 + 当前选的)。"""
+    try:
+        options = sv.machines()
+    except sv.ServerError:
+        options = []
+    return {"machine": m["key"], "machine_local": sv.is_local(m), "machines": options}
+
+
+def task_asset_dirs(task: str) -> list[str]:
+    """任务 YAML 里用到的物体资产目录 ``Assets/Object/RoboDojo/<Section>/<name>/<index>``(本地存在的)。"""
+    import yaml
+
+    path = rp.MIRROR / "config" / f"{task}.yml"
+    if not path.exists():
+        path = ROOT / "task" / "RoboDojo" / "config" / f"{task}.yml"
+    cfg = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    out = []
+    for section, items in cfg.items():
+        for item in items if isinstance(items, list) else []:
+            for cat in (item.get("category") or []) if isinstance(item, dict) else []:
+                for idx in cat.get("index") or []:
+                    rel = f"{ASSET_ROOT}/{section}/{cat.get('name')}/{int(idx):05d}"
+                    if (ROOT / rel).exists():
+                        out.append(rel)
+    return sorted(set(out))
 
 
 def label_problem(problem: str) -> str:
@@ -388,7 +484,7 @@ def _state(group: str, task: str, stage: str) -> dict:
     if not rp.state_path(group).exists():
         raise PlanError(f"{group}: 还没有流水线状态")
     state = rp.load_state(group)
-    tasks = rp.own_tasks(state) if stage in (*DATA_BUTTONS, "layouts") else rp.stage_tasks(state, stage)
+    tasks = rp.own_tasks(state) if stage in (*DATA_BUTTONS, "layouts", "eval") else rp.stage_tasks(state, stage)
     if task not in tasks:
         raise PlanError(f"{task} 不是 {group} 的自有任务(same_as 引用的在归属组里做)")
     return state
@@ -419,14 +515,28 @@ def _busy(group: str, task: str) -> None:
         raise PlanError(f"{task} 已有任务在运行:{what}(开始于 {job.get('started_at')})")
 
 
-def collect_plan(group: str, task: str) -> dict:
+def pending_remote_collect(group: str, task: str) -> dict | None:
+    """上一次远端采集还没合并回本地的记录 ``{machine, dir, episode_num, start_seed, template, ...}``。"""
+    job = read_job(job_id(group, task)) or {}
+    r = job.get("remote")
+    return r if job.get("kind") == "collect" and r and not r.get("merged") else None
+
+
+def collect_plan(group: str, task: str, machine: str = "") -> dict:
     state = _state(group, task, "collect")
     _expert_ok(state, task, "采集")
+    m = machine_cfg(machine)
+    pending = pending_remote_collect(group, task)
+    if pending and pending["machine"] != m["key"]:
+        raise PlanError(f"{task} 在 {pending['machine']} 上还有一批没拉回(远端 {pending['dir']}):"
+                        f"选 {pending['machine']} 再点一次,接着看 / 拉回 / 续采;拉回之前不能换机器(seed 段会撞)")
+    if not sv.is_local(m):
+        return remote_collect_plan(group, task, m, pending)
     t = task_collect_plan(task)
     jid = job_id(group, task)
-    busy_gpus = {g for j in running(("collect",), exclude=jid) for g in j.get("gpus", [])}
+    busy = busy_gpus(("collect",), jid, m["key"])
     gpus = gpu_usage()
-    free = [g["index"] for g in gpus if g["used"] < FREE_GPU_MIB and g["index"] not in busy_gpus]
+    free = [g["index"] for g in gpus if g["used"] < FREE_GPU_MIB and g["index"] not in busy]
     if t["resume"]:
         what = f"续采残留分片(原 {t['episode_num']} 条)"
     elif t["episode_num"]:
@@ -434,19 +544,57 @@ def collect_plan(group: str, task: str) -> dict:
     else:
         what = "已够,不用采"
     tpl = f",模板 {t['template']}" if t["template"] else ""
-    lines = [f"{task}:采到 {rp.COLLECT_TARGET} 条", f"已有 {t['have']} 条 → {what}{tpl}"]
-    if gpus:
-        def gpu_text(g: dict) -> str:
-            busy = "(别的任务在用)" if g["index"] in busy_gpus else ""
-            return f"{g['index']}:{g['used'] // 1024}/{g['total'] // 1024}G{busy}"
-
-        lines += ["", "GPU 显存占用:" + "  ".join(gpu_text(g) for g in gpus)]
+    lines = [f"{task}:在 {m['key']}(本机)上采到 {rp.COLLECT_TARGET} 条", f"已有 {t['have']} 条 → {what}{tpl}"]
+    lines += gpu_lines(gpus, busy, m)
     if t["episode_num"]:
-        per_gpu = os.environ.get("ROBODOJO_PER_GPU", "3")
-        lines += ["", f"用下面填的所有卡(每卡 {per_gpu} 个 worker,一个约 9 GB)。中断后再点一次就续采。",
+        lines += ["", "用下面填的所有卡,每卡跑「每卡 worker 数」个(一个约 14–20 GB)。中断后再点一次就续采。",
                   "采完不用审核,接着点 exchange 格的「转换」。"]
     return {"group": group, "task": task, "kind": "collect", "plan": t, "free_gpus": free,
+            "per_gpu": sv.per_gpu_default(m), **_machine_fields(m),
             "need_gpus": bool(t["episode_num"]), "nothing": not t["episode_num"], "text": "\n".join(lines)}
+
+
+def remote_collect_plan(group: str, task: str, m: dict, pending: dict | None) -> dict:
+    """在远端机器上采:续上次没拉回的,或者按本地已有的条数补采(seed 段接在本地已用的 seed 之后)。"""
+    jid = job_id(group, task)
+    if pending:
+        t = {"task": task, "have": rp._hdf5_count(task), "target": rp.COLLECT_TARGET,
+             "episode_num": pending["episode_num"], "start_seed": pending["start_seed"],
+             "template": pending.get("template"), "resume": True}
+        what = (f"续上次 {pending.get('started_at', '')} 在 {m['key']} 上的采集({pending['episode_num']} 条,"
+                f"远端 {pending['dir']}):还在跑就接着看,跑完了就拉回合并,没跑完就续采")
+    else:
+        if (SHARDS / task).exists():
+            raise PlanError(f"本地有残留分片 _shards/{task}(本机采集没跑完):先选本机续采完,再用远端补")
+        t = task_collect_plan(task)
+        what = (f"补采 {t['episode_num']} 条,seed 从 {t['start_seed'] or START_SEED} 起" if t["episode_num"]
+                else "已够,不用采")
+    tpl = f",模板 {t['template']}" if t["template"] else ""
+    lines = [f"{task}:在 {m['key']}(远端 {sv.target(m)}:{m['repo_path']})上采到 {rp.COLLECT_TARGET} 条",
+             f"本地已有 {t['have']} 条 → {what}{tpl}"]
+    if not t["episode_num"]:
+        return {"group": group, "task": task, "kind": "collect", "plan": t, **_machine_fields(m),
+                "need_gpus": False, "nothing": True, "text": "\n".join(lines)}
+    try:
+        missing = sv.missing_paths(m, task_asset_dirs(task))
+    except sv.ServerError as error:
+        raise PlanError(str(error)) from None
+    if missing:
+        raise PlanError(f"{m['key']} 上缺这个任务的资产(资产文件里有本机绝对路径,不自动同步;按 "
+                        "docs/data_collection.md 8.6 节传过去或在远端从 ModelScope 拉):\n"
+                        + "\n".join(f"  - {p}" for p in missing))
+    busy = busy_gpus(("collect", "eval"), jid, m["key"])
+    gpus = machine_gpus(m)
+    free = [g["index"] for g in gpus if g["used"] < FREE_GPU_MIB and g["index"] not in busy]
+    lines += gpu_lines(gpus, busy, m)
+    lines += ["", "步骤(后台自动做,关掉页面也继续):",
+              f"  1. 同步代码 {' '.join(sv.CODE_DIRS)} + data/grasp_pose 到远端(rsync,不加 --delete)",
+              f"  2. 远端 collect_data_parallel.sh 采 {t['episode_num']} 条(用下面填的卡,每卡「每卡 worker 数」个)",
+              "  3. 采完把远端数据拉回本地,merge_shards.py 接到本地已有数据之后(编号接续,seed 去重)",
+              "远端的数据不删。中断后再点一次、选同一台机器就续上;采完不用审核,接着点 exchange 格的「转换」。"]
+    return {"group": group, "task": task, "kind": "collect", "plan": t, "free_gpus": free,
+            "per_gpu": sv.per_gpu_default(m), **_machine_fields(m), "remote_dir": (pending or {}).get("dir"),
+            "need_gpus": True, "nothing": False, "text": "\n".join(lines)}
 
 
 def export_needed(task: str) -> str | None:
@@ -469,8 +617,10 @@ UPLOADERS = (("HDF5", "src/data_collect/upload_to_modelscope.py", HDF5_REPO),
              ("LeRobot", "src/data_collect/upload_lerobot_to_modelscope.py", LEROBOT_REPO))
 
 
-def _no_other_transfer(group: str, task: str) -> None:
-    busy = running(("export", "upload"), exclude=job_id(group, task))
+def _no_other_transfer(group: str, task: str, kind: str) -> None:
+    """同类任务串行:两个转换会互相删扁平视图 RoboSafeJanus-Benchmark-flat 的软链接,两个上传共用
+    ``.cache/modelscope`` 断点 / 哈希缓存和硬链接视图目录。转换 A 和上传 B 只读写各自的任务目录,可以同时跑。"""
+    busy = running((kind,), exclude=job_id(group, task))
     if busy:
         raise PlanError(f"{busy[0]['task']} 正在{KIND_LABEL[busy[0]['kind']]},等它结束")
 
@@ -482,7 +632,7 @@ def export_plan(group: str, task: str) -> dict:
     reason = _collected(task)
     if reason:
         raise PlanError(f"{task} 还不能转换:{reason}")
-    _no_other_transfer(group, task)
+    _no_other_transfer(group, task, "export")
     need = export_needed(task)
     lines = [f"{task}:导出 LeRobot v3.0 + v2.1(export_lerobot.sh --format both)", "",
              f"现在:{need}" if need else "已经转换过,v3.0 / v2.1 条数都和 hdf5 一致,不用再转",
@@ -501,7 +651,7 @@ def upload_plan(group: str, task: str, dry_run: bool = True) -> dict:
     need = export_needed(task)
     if need:
         raise PlanError(f"{task} 还不能上传:LeRobot 没转换好({need}),先点 exchange 格的「转换」")
-    _no_other_transfer(group, task)
+    _no_other_transfer(group, task, "upload")
     lines = [f"{task}:上传 HDF5 + LeRobot 到 ModelScope(只动这个任务的目录)", ""]
     deletes = uploads = 0
     if dry_run:
@@ -540,7 +690,7 @@ def ingest_report(group: str) -> str:
 
 
 def ingest_plan(group: str, task: str) -> dict:
-    """ingest 格的「下载资产」:资产链接填好后按组下载 / 转换 / 入库,完了提交 ingest 审核。"""
+    """ingest 格的「下载资产」:资产链接填好后按组下载 / 转换 / 入库,完了提交 ingest(检查通过自动批准)。"""
     if task != GROUP_TASK or not NAME_RE.fullmatch(group):
         raise PlanError("ingest 是按组的(任务名用 __group__)")
     if not rp.state_path(group).exists():
@@ -548,7 +698,7 @@ def ingest_plan(group: str, task: str) -> dict:
     state = rp.load_state(group)
     status, why = rp.entry_status(state, "ingest")
     if status == "awaiting_review":
-        raise PlanError("ingest 已提交,等你审核(点 ingest 格)")
+        raise PlanError("ingest 已提交、还没批准(旧的待审条目,点 ingest 格批准)")
     if status == "approved":
         raise PlanError("ingest 已批准;改了资产链接后会失效,那时再下载")
     problems = rp.upstream_problems(state, "ingest", None)
@@ -652,59 +802,99 @@ def eval_runs(task: str, policy: str, ckpt: str) -> list[tuple[str, int]]:
     return out
 
 
-def eval_blocked(state: dict, group: str, task: str, downloading: set | None = None) -> str:
-    """评测按钮不能点的原因(看板 eval 格用);空串表示可以点。"""
+def eval_blocked(state: dict, group: str, task: str, downloading: set | None = None, policy: str = "") -> str:
+    """评测按钮不能点的原因(看板 eval 格用);空串表示可以点。``policy`` 给出时只看这个模型。"""
     status, why = rp.entry_status(state, f"expert/{task}")
     if status != "approved":
         return "expert 要先批准(现在:" + (rp.STATUS_LABEL.get(status) or "未提交") + ")"
-    models = eval_models(group, task, downloading)
+    models = [m for m in eval_models(group, task, downloading) if not policy or m["policy"] == policy]
     if not models:
         return "还没有模型:远端有了以后在模型列点「⬇ 下载」"
     if not any(m["ready"] for m in models):
         return "模型还不能用:" + ";".join(f"{m['policy']} {m['why']}" for m in models)
     n = eval_layouts(task)
     if n < EVAL_NUM:
-        return f"评测布局只有 {n}/{EVAL_NUM} 个(让 Claude 按 /rsj-eval 第 2 步补齐)"
+        return f"评测布局只有 {n}/{EVAL_NUM} 个(在评测布局格点「⊕ 生成布局」)"
     return ""
 
 
-def eval_plan(group: str, task: str) -> dict:
-    """eval 格的「评测」:已下载的 Pi_0 / Pi_05 各评 50 条,没评满的续评。"""
+def policy_venv(policy: str) -> str:
+    """policy 的 uv 环境目录(相对仓库根):deploy.yml 的 ``policy_uv_env_path``(相对 policy 目录)。"""
+    import yaml
+
+    pdir = Path("XPolicyLab") / "policy" / policy
+    try:
+        cfg = yaml.safe_load((ROOT / pdir / "deploy.yml").read_text(encoding="utf-8")) or {}
+    except OSError:
+        cfg = {}
+    env = Path(str(cfg.get("policy_uv_env_path") or "openpi")).expanduser()
+    return str(env if env.is_absolute() else pdir / env)
+
+
+def remote_eval_missing(m: dict, item: dict) -> list[str]:
+    """远端评这个模型还缺什么:uv 环境、checkpoint 链接、模型文件(都按本地的 ckpt / step 找)。"""
+    pdir = f"XPolicyLab/policy/{item['policy']}"
+    need = [f"{policy_venv(item['policy'])}/.venv/bin/activate", f"{pdir}/checkpoints/{item['ckpt']}",
+            f"{rp.rel(MODEL_DIR)}/{item['policy']}/{item['key']}/{item['ckpt']}/{item['step']}"]
+    return sv.missing_paths(m, need)
+
+
+def eval_plan(group: str, task: str, policy: str = "", machine: str = "") -> dict:
+    """eval 格的「评测」:已下载的 Pi_0 / Pi_05 各评 50 条,没评满的续评;``policy`` 给出时只评这个模型。
+
+    ``machine`` 是远端机器时,模型 / uv 环境要远端已经有(按本地的 ckpt / step 查),缺的这次不评。"""
+    if policy and policy not in EVAL_POLICIES:
+        raise PlanError(f"未知模型 {policy}(可选 {'、'.join(EVAL_POLICIES)})")
+    m = machine_cfg(machine)
+    remote = not sv.is_local(m)
     state = _state(group, task, "eval")
-    reason = eval_blocked(state, group, task)
+    reason = eval_blocked(state, group, task, policy=policy)
     if reason:
-        raise PlanError(f"{task} 还不能评测:{reason}")
-    queue, lines = [], [f"{task}:每个模型评 {EVAL_NUM} 条(seed {EVAL_SEED},{EVAL_CFG},joint,policy-env uv)", ""]
-    for m in eval_models(group, task):
-        name = f"{m['policy']} · {m['ckpt']}(step {m['step'] or '?'}{',zero-shot' if m['zero_shot'] else ''})"
-        if not m["ready"]:
-            lines.append(f"  ⏭ {name}:{m['why']},这次不评")
+        raise PlanError(f"{task} {policy + ' ' if policy else ''}还不能评测:{reason}")
+    who = f"{policy} " if policy else "每个模型"
+    where = f"在 {m['key']}(远端 {sv.target(m)}:{m['repo_path']})上" if remote else f"在 {m['key']}(本机)上"
+    queue, lines = [], [f"{task}:{where}{who}评 {EVAL_NUM} 条(seed {EVAL_SEED},{EVAL_CFG},joint,policy-env uv)", ""]
+    for item in eval_models(group, task):
+        if policy and item["policy"] != policy:
             continue
-        runs = eval_runs(task, m["policy"], m["ckpt"])
+        name = f"{item['policy']} · {item['ckpt']}(step {item['step'] or '?'}{',zero-shot' if item['zero_shot'] else ''})"
+        if not item["ready"]:
+            lines.append(f"  ⏭ {name}:{item['why']},这次不评")
+            continue
+        runs = eval_runs(task, item["policy"], item["ckpt"])
         best = max(runs, key=lambda r: r[1]) if runs else None
         if best and best[1] >= EVAL_NUM:
             lines.append(f"  ✅ {name}:已评满 {best[1]} 条({best[0]}),跳过")
             continue
         resume = best[0] if best and best[1] > 0 else None
+        if remote:
+            try:
+                missing = remote_eval_missing(m, item)
+            except sv.ServerError as error:
+                raise PlanError(str(error)) from None
+            if missing:
+                lines.append(f"  ⏭ {name}:{m['key']} 上缺 " + "、".join(missing) + ",这次不评")
+                continue
         lines.append(f"  ▶ {name}:" + (f"续评 {best[0]}(已有 {best[1]}/{EVAL_NUM})" if resume else "新评"))
-        queue.append({**m, "run_id": resume})
+        queue.append({**item, "run_id": resume})
     if not queue:
-        lines += ["", "都评满了,不用再跑。报告和提交审核让 Claude 做:/rsj-eval " + group]
-        return {"group": group, "task": task, "kind": "eval", "queue": [], "nothing": True, "text": "\n".join(lines)}
+        tail = (f"{m['key']} 上没有能评的模型:先在远端装好 uv 环境、下好模型(和本地同一个 ckpt / step),再点一次。"
+                if remote and any(ln.startswith("  ⏭") for ln in lines) else
+                "都评满了,不用再跑。")
+        return {"group": group, "task": task, "kind": "eval", "policy": policy, "queue": [], "nothing": True,
+                **_machine_fields(m), "text": "\n".join([*lines, "", tail])}
     jid = job_id(group, task)
-    busy_gpus = {g for j in running(("collect", "eval"), exclude=jid) for g in j.get("gpus", [])}
-    gpus = gpu_usage()
-    free = [g["index"] for g in gpus if g["used"] < FREE_GPU_MIB and g["index"] not in busy_gpus]
-    if gpus:
-        def gpu_text(g: dict) -> str:
-            busy = "(别的任务在用)" if g["index"] in busy_gpus else ""
-            return f"{g['index']}:{g['used'] // 1024}/{g['total'] // 1024}G{busy}"
-
-        lines += ["", "GPU 显存占用:" + "  ".join(gpu_text(g) for g in gpus)]
+    busy = busy_gpus(("collect", "eval", "layouts"), jid, m["key"])
+    gpus = machine_gpus(m)
+    free = [g["index"] for g in gpus if g["used"] < FREE_GPU_MIB and g["index"] not in busy]
+    lines += gpu_lines(gpus, busy, m)
     lines += ["", "下面填的卡两两一对(policy 卡 + sim 卡),一对跑一条,填几对就并行几条;只填 1 张时 policy 和 sim 共用。",
-              f"每条约 1–2 小时。中断后再点一次就续评;日志在 {rp.rel(EVAL_LOGS)}/。",
-              f"评完不用审核这一步;报告和提交 eval 审核让 Claude 做:/rsj-eval {group}"]
-    return {"group": group, "task": task, "kind": "eval", "queue": queue, "free_gpus": free[: 2 * len(queue)],
+              f"每条约 1–2 小时。中断后再点一次就续评;日志在 {rp.rel(EVAL_LOGS)}/。"]
+    if remote:
+        lines += [f"远端:先同步代码 + 这个任务的评测布局 + 要续评的结果,评完把 eval_result/RoboDojo/{task}/ 和日志拉回本地。"]
+    lines += ["评测不审核,评完不用提交。"]
+    return {"group": group, "task": task, "kind": "eval", "policy": policy, "queue": queue,
+            "free_gpus": free[: 2 * len(queue)], **_machine_fields(m),
             "need_gpus": True, "nothing": False, "text": "\n".join(lines)}
 
 
@@ -759,9 +949,9 @@ def layouts_plan(group: str, task: str) -> dict:
               "一个进程约 21 GB 显存,同一张卡写两次就在这张卡上跑两个。卡越多越快;"
               f"{len(tasks)} 个任务约要查 {len(tasks) * 60} 个 seed,一个 seed 约 20 秒。",
               "生成完评测格的「▶ 评测」才会出现。"]
-    busy_gpus = {g for j in running(("collect", "eval", "layouts"), exclude=jid) for g in j.get("gpus", [])}
+    busy = busy_gpus(("collect", "eval", "layouts"), jid, sv.default_key())  # 生成布局只在本机跑
     gpus = gpu_usage()
-    free = [g["index"] for g in gpus if g["used"] < FREE_GPU_MIB and g["index"] not in busy_gpus]
+    free = [g["index"] for g in gpus if g["used"] < FREE_GPU_MIB and g["index"] not in busy]
     if gpus:
         lines += ["", "GPU 显存占用:" + "  ".join(
             f"{g['index']}:{g['used'] // 1024}/{g['total'] // 1024}G" for g in gpus)]
@@ -902,15 +1092,15 @@ def run_layouts(group: str, task: str, gpus: str) -> int:
     return 0
 
 
-def plan(button: str, group: str, task: str, dry_run: bool = True) -> dict:
+def plan(button: str, group: str, task: str, dry_run: bool = True, policy: str = "", machine: str = "") -> dict:
     if button == "ingest":
         return ingest_plan(group, task)
     if button == "eval":
-        return eval_plan(group, task)
+        return eval_plan(group, task, policy, machine)
     if button == "layouts":
         return layouts_plan(group, task)
     if button == "collect":
-        return collect_plan(group, task)
+        return collect_plan(group, task, machine)
     if button == "exchange":
         return export_plan(group, task)
     return upload_plan(group, task, dry_run=dry_run)
@@ -921,10 +1111,16 @@ def plan(button: str, group: str, task: str, dry_run: bool = True) -> dict:
 # ---------------------------------------------------------------------------
 
 
-def start(button: str, group: str, task: str, gpus: str = "", delete: bool = False) -> dict:
-    """重新算一遍计划,通过后在新会话里后台运行 ``run``;返回任务记录。"""
+def start(button: str, group: str, task: str, gpus: str = "", delete: bool = False, policy: str = "",
+          machine: str = "", per_gpu: int | None = None) -> dict:
+    """重新算一遍计划,通过后在新会话里后台运行 ``run``;返回任务记录。``policy`` 只用于 eval(只评这个模型);
+    ``machine`` 只用于 collect / eval(``docs/servers.json`` 的键,空 = 默认机器);``per_gpu`` 只用于 collect。"""
     _busy(group, task)
-    p = plan(button, group, task, dry_run=False)
+    policy = policy if button == "eval" else ""
+    if button not in MACHINE_KINDS:
+        machine, per_gpu = "", None
+    machine = machine_cfg(machine)["key"] if button in MACHINE_KINDS else ""
+    p = plan(button, group, task, dry_run=False, policy=policy, machine=machine)
     if p["nothing"]:
         raise PlanError("没有要做的事")
     kind = p["kind"]
@@ -940,12 +1136,23 @@ def start(button: str, group: str, task: str, gpus: str = "", delete: bool = Fal
         args += ["--gpus", ",".join(map(str, gpu_list))]
     if kind == "upload" and delete:
         args.append("--delete")
+    if policy:
+        args += ["--policy", policy]
+    if machine:
+        args += ["--machine", machine]
+    if per_gpu:
+        if not 1 <= int(per_gpu) <= 8:
+            raise PlanError(f"每卡 worker 数要在 1–8 之间(填了 {per_gpu})")
+        args += ["--per_gpu", str(int(per_gpu))]
     LOG_DIR.mkdir(parents=True, exist_ok=True)
     log = LOG_DIR / f"task_{task}_{kind}_{datetime.now():%Y%m%d_%H%M%S}.log"
     job = {"group": group, "task": task, "kind": kind, "pid": None, "log": str(log), "started_at": now(),
            "tasks": p.get("tasks") or [task],
            "finished_at": None, "returncode": None, "step": "启动中", "gpus": gpu_list, "delete": bool(delete),
-           "args": args}
+           "policy": policy, "machine": machine, "args": args}
+    old = read_job(job_id(group, task)) or {}
+    if kind == "collect" and old.get("remote") and not old["remote"].get("merged"):
+        job["remote"] = old["remote"]  # 上次远端没拉回的:同一台机器接着做(collect_plan 已经查过是同一台)
     write_job(job)
     with open(log, "w", encoding="utf-8") as fp:
         fp.write(f"[group_jobs] {now()} {job_label(job)} {group}/{task}\n{p['text']}\n\n")
@@ -960,9 +1167,19 @@ def stop(group: str, task: str) -> str:
     job = read_job(job_id(group, task))
     if not job or job_state(job) != "running":
         raise PlanError(f"{task} 没有在运行的任务")
+    note = ""
+    r = job.get("remote")
+    if r and r.get("pid"):  # 远端的也停掉(setsid 起的:pgid == pid)
+        try:
+            m = machine_cfg(r["machine"])
+            sv.run(m, f"kill -TERM -- -{int(r['pid'])} 2>/dev/null; sleep 2; kill -KILL -- -{int(r['pid'])} 2>/dev/null; true",
+                   timeout=40)
+            note = f",{r['machine']} 上的进程也停了(远端数据保留)"
+        except (PlanError, sv.ServerError) as error:
+            note = f";⚠ 远端没停掉:{error}"
     os.killpg(job["pid"], signal.SIGTERM)  # 新会话:pgid == pid,连同采集 worker 一起停
     update_job(group, task, stopped=True, step="已停止", returncode=-15, finished_at=now())
-    return f"已停止 {task} 的{job_label(job)};再点一次按钮会续上"
+    return f"已停止 {task} 的{job_label(job)}{note};再点一次按钮会续上"
 
 
 # ---------------------------------------------------------------------------
@@ -977,13 +1194,21 @@ def _step(group: str, task: str, text: str) -> None:
 
 def _sh(cmd: list[str]) -> int:
     print("$ " + " ".join(cmd), flush=True)
-    return subprocess.call(cmd, cwd=str(ROOT))
+    # 子脚本(collect_data.sh 等)直接调 `python`:当前解释器目录放到 PATH 最前,
+    # 看板没 conda activate 启动时也能用到 RoboDojo 环境
+    path = f"{Path(sys.executable).parent}{os.pathsep}{os.environ.get('PATH', '')}"
+    return subprocess.call(cmd, cwd=str(ROOT), env={**os.environ, "PATH": path})
 
 
-def run_collect(group: str, task: str, gpus: str) -> int:
-    t = collect_plan(group, task)["plan"]
+def run_collect(group: str, task: str, gpus: str, machine: str = "", per_gpu: int | None = None) -> int:
+    m = machine_cfg(machine)
+    if not sv.is_local(m):
+        return run_collect_remote(group, task, gpus, m, per_gpu)
+    t = collect_plan(group, task, m["key"])["plan"]
     if not t["episode_num"]:
         return 0
+    if per_gpu:
+        os.environ["ROBODOJO_PER_GPU"] = str(per_gpu)
     _step(group, task, f"采集({t['have']} → {rp.COLLECT_TARGET})")
     cmd = ["bash", "scripts/collect_data_parallel.sh", task, str(t["episode_num"]), gpus]
     if t["start_seed"]:
@@ -1010,7 +1235,7 @@ def run_ingest(group: str) -> int:
             "--note", "看板「下载资产」"]) != 0:
         _step(group, GROUP_TASK, "检查没过,没有提交(看日志)")
         return 1
-    _step(group, GROUP_TASK, "已提交,等你审核")
+    _step(group, GROUP_TASK, "已提交并自动批准(入库不审核)")
     return 0
 
 
@@ -1037,8 +1262,11 @@ def run_upload(group: str, task: str, delete: bool) -> int:
                 "--modelscope", HDF5_REPO])
 
 
-def run_eval(group: str, task: str, gpus: str) -> int:
-    queue = eval_plan(group, task)["queue"]  # 再确认一次闸门,重新算续评
+def run_eval(group: str, task: str, gpus: str, policy: str = "", machine: str = "") -> int:
+    m = machine_cfg(machine)
+    if not sv.is_local(m):
+        return run_eval_remote(group, task, gpus, policy, m)
+    queue = eval_plan(group, task, policy, m["key"])["queue"]  # 再确认一次闸门,重新算续评
     ids = [int(x) for x in gpus.split(",") if x.strip()]
     pairs = [(ids[i], ids[i + 1] if i + 1 < len(ids) else ids[i]) for i in range(0, len(ids), 2)] or [(0, 0)]
     EVAL_LOGS.mkdir(exist_ok=True)
@@ -1081,28 +1309,282 @@ def run_eval(group: str, task: str, gpus: str) -> int:
     if short:
         _step(group, task, f"没评满:{'、'.join(short)}(再点一次续评)")
         return 1
-    _step(group, task, f"评完:{done};报告和提交审核让 Claude 做(/rsj-eval {group})")
+    _step(group, task, f"评完:{done}")
     return 0
 
 
-def run(kind: str, group: str, task: str, gpus: str = "", delete: bool = False) -> int:
+# ---------------------------------------------------------------------------
+# 远端机器(docs/servers.json):同步 → 远端后台运行 → 轮询 → 拉回
+# ---------------------------------------------------------------------------
+
+
+def _rsync(m: dict, *args: str) -> int:
+    return _sh(["rsync", "-a", "--partial", "-e", sv.rsync_rsh(m), *args])
+
+
+def sync_code(m: dict) -> None:
+    """代码 + 抓取缓存同步到远端仓库(不加 --delete;task/RoboDojo 的相对软链接原样保留)。"""
+    dest = f"{sv.target(m)}:{m['repo_path']}/"
+    if _rsync(m, "--checksum", "--exclude", "__pycache__", *sv.CODE_DIRS, dest) != 0:
+        raise PlanError(f"同步代码到 {m['key']} 失败")
+    if (ROOT / "data" / "grasp_pose").is_dir():
+        sv.run(m, "mkdir -p data", timeout=30)
+        if _rsync(m, "data/grasp_pose", f"{dest}data/") != 0:
+            raise PlanError(f"同步 data/grasp_pose 到 {m['key']} 失败")
+
+
+def remote_launch(m: dict, rdir: str, inner: str) -> int:
+    """远端 ``setsid nohup`` 跑 ``inner``(已在 conda 环境里),日志 ``<rdir>.log``,结束写 ``<rdir>/exit_code``。
+    已经在跑时不重复启动,返回正在跑的 pid。"""
+    body = f"{sv.conda_activate(m)} && export OMNI_KIT_ACCEPT_EULA=YES && {{ {inner} ; }}; echo $? > {shlex.quote(rdir)}/exit_code"
+    q = shlex.quote
+    script = f"""mkdir -p {q(rdir)}
+if [ -f {q(rdir)}.pid ] && kill -0 "$(cat {q(rdir)}.pid)" 2>/dev/null; then echo "PID $(cat {q(rdir)}.pid)"; exit 0; fi
+rm -f {q(rdir)}/exit_code
+echo "[group_jobs] $(date -Iseconds) start on $(hostname)" >> {q(rdir)}.log
+setsid nohup bash -c {q(body)} >> {q(rdir)}.log 2>&1 < /dev/null &
+echo $! > {q(rdir)}.pid
+echo "PID $!"
+"""
+    out = sv.run(m, script, timeout=60).stdout
+    found = re.search(r"PID (\d+)", out)
+    if not found:
+        raise PlanError(f"{m['key']} 上启动失败:{out.strip()[-300:]}")
+    return int(found.group(1))
+
+
+def remote_status(m: dict, rdir: str, offset: int, count_cmd: str = "") -> dict:
+    """``{alive, exit, size, new, count}``:进程还在不在、退出码、日志新增的最后几十行、``count_cmd`` 的输出。"""
+    q = shlex.quote
+    log = q(f"{rdir}.log")
+    script = f"""pid=$(cat {q(rdir)}.pid 2>/dev/null || echo 0)
+if kill -0 "$pid" 2>/dev/null; then echo "@@ALIVE 1"; else echo "@@ALIVE 0"; fi
+echo "@@EXIT $(cat {q(rdir)}/exit_code 2>/dev/null)"
+n=$(stat -c %s {log} 2>/dev/null || echo 0)
+echo "@@SIZE $n"
+{('echo "@@COUNT $(' + count_cmd + ')"') if count_cmd else ''}
+if [ "$n" -gt {offset} ]; then tail -c +{offset + 1} {log} | head -c $((n - {offset})) | tr '\\r' '\\n' | tail -n 40; fi
+"""
+    out = sv.run(m, script, timeout=90).stdout
+    info = {"alive": False, "exit": None, "size": offset, "count": None, "new": []}
+    for line in out.splitlines():
+        if line.startswith("@@ALIVE "):
+            info["alive"] = line.endswith("1")
+        elif line.startswith("@@EXIT "):
+            value = line[7:].strip()
+            info["exit"] = int(value) if value.lstrip("-").isdigit() else None
+        elif line.startswith("@@SIZE "):
+            info["size"] = int(line[7:].strip() or offset)
+        elif line.startswith("@@COUNT "):
+            info["count"] = line[8:].strip()
+        else:
+            info["new"].append(line)
+    return info
+
+
+def remote_watch(group: str, task: str, m: dict, rdir: str, what: str, count_cmd: str = "", on_count=None) -> int:
+    """每分钟看一次远端,把远端日志新增的部分接到本地日志;返回远端退出码(进程没了又没写退出码时 -1)。
+    SSH 偶尔断开不算失败,连着 10 次连不上才放弃(远端照样在跑,再点一次按钮会接上)。"""
+    offset, failures = 0, 0
+    while True:
+        try:
+            info = remote_status(m, rdir, offset, count_cmd)
+            failures = 0
+        except sv.ServerError as error:
+            failures += 1
+            print(f"[group_jobs] {now()} {error}(第 {failures} 次)", flush=True)
+            if failures >= 10:
+                raise PlanError(f"连不上 {m['key']},不再等;远端进程不受影响,恢复后再点一次按钮接上") from None
+            time.sleep(REMOTE_POLL)
+            continue
+        if info["new"]:
+            print("\n".join(f"  [{m['key']}] {ln}" for ln in info["new"]), flush=True)
+        offset = info["size"]
+        if on_count and info["count"] is not None:
+            on_count(info["count"])
+        if not info["alive"]:
+            return info["exit"] if info["exit"] is not None else -1
+        update_job(group, task, step=f"{what}({m['key']} 上运行中)")
+        time.sleep(REMOTE_POLL)
+
+
+def run_collect_remote(group: str, task: str, gpus: str, m: dict, per_gpu: int | None) -> int:
+    p = collect_plan(group, task, m["key"])  # 再确认一次闸门;有没拉回的就续那一批
+    t = p["plan"]
+    if not t["episode_num"]:
+        return 0
+    old = pending_remote_collect(group, task)
+    r = dict(old) if old else {"machine": m["key"], "dir": f"{REMOTE_DIR}/{task}_collect_{datetime.now():%Y%m%d_%H%M%S}",
+                               "episode_num": t["episode_num"], "start_seed": t["start_seed"] or START_SEED,
+                               "template": t["template"], "started_at": now()}
+    rdir = r["dir"]
+    update_job(group, task, remote=r)
+    # 已合并的(<rdir>/<task>/<config>/data)和分片里的取大的:采到一半只有分片,采完分片删掉,失败时两边都有
+    q = shlex.quote
+    count_cmd = (f"a=$(ls {q(f'{rdir}/{task}/{rp.CONFIG_NAME}/data')} 2>/dev/null | grep -c '[.]hdf5$'); "
+                 f"b=$(find {q(f'{rdir}/_shards/{task}')} -path '*/{task}/{rp.CONFIG_NAME}/data/*.hdf5' 2>/dev/null"
+                 " | grep -c .); echo $(( a > b ? a : b ))")
+    info = remote_status(m, rdir, 0) if old else {"alive": False, "exit": None}
+    if info["alive"]:
+        _step(group, task, f"{m['key']} 上还在采,接着看({rdir})")
+    elif info["exit"] == 0:
+        _step(group, task, f"{m['key']} 上已采完,直接拉回")
+    else:
+        _step(group, task, f"同步代码到 {m['key']}")
+        sync_code(m)
+        n = per_gpu or sv.per_gpu_default(m)
+        cmd = ["bash", "scripts/collect_data_parallel.sh", task, str(r["episode_num"]), gpus,
+               "--save_dir", rdir, "--start_seed", str(r["start_seed"])]
+        if r.get("template"):
+            cmd += ["--layout_template", r["template"]]
+        inner = f"export ROBODOJO_PER_GPU={n} && " + " ".join(shlex.quote(c) for c in cmd)
+        _step(group, task, f"{m['key']} 上采集 {r['episode_num']} 条(GPU {gpus},每卡 {n} 个 worker)")
+        print(f"$ [{m['key']}] {inner}", flush=True)
+        r["pid"] = remote_launch(m, rdir, inner)
+        update_job(group, task, remote=r)
+
+    def on_count(value: str) -> None:
+        if value.isdigit():
+            r["count"] = int(value)
+            update_job(group, task, remote=r)
+
+    code = remote_watch(group, task, m, rdir, f"采集 {r['episode_num']} 条", count_cmd, on_count)
+    if code != 0:
+        _step(group, task, f"{m['key']} 上没采完(exit {code}):远端分片保留在 {rdir},再点一次、选 {m['key']} 续采")
+        return 1
+    # 拉回:远端合并好的 <rdir>/<task>[_failed]/<config> 放进 PULL_DIR/<run>/w0/,再 merge_shards 接到本地数据之后
+    staging = PULL_DIR / Path(rdir).name
+    (staging / "w0").mkdir(parents=True, exist_ok=True)
+    _step(group, task, f"从 {m['key']} 拉回数据")
+    src = f"{sv.target(m)}:{m['repo_path']}/{rdir}/"
+    if _rsync(m, "--include", f"/{task}/***", "--include", f"/{task}_failed/***", "--exclude", "*",
+              src, f"{staging / 'w0'}/") != 0:
+        _step(group, task, "拉回失败(远端数据还在);再点一次重新拉")
+        return 1
+    pulled = len(list((staging / "w0" / task / rp.CONFIG_NAME / "data").glob("*.hdf5")))
+    remote_n = int(r.get("count") or 0)
+    if remote_n and pulled < remote_n:
+        _step(group, task, f"拉回的条数不对:本地 {pulled},远端 {remote_n};再点一次重新拉")
+        return 1
+    _step(group, task, f"合并 {pulled} 条到本地")
+    # --keep_shards:先不删拉回的副本,确认远端的 seed 都进了本地 seed.txt 再删(合并按 seed 去重,重跑安全)
+    if _sh([sys.executable, "src/data_collect/merge_shards.py", "--task_name", task, "--shard_root", str(staging),
+            "--save_dir", f"data/{rp.BENCHMARK_NAME}", "--config_name", rp.CONFIG_NAME, "--keep_shards"]) != 0:
+        _step(group, task, f"合并失败:拉回的数据在 {rp.rel(staging)},让 Claude 看一下")
+        return 1
+    local_seeds = set(_seeds(rp._bench_dir(task) / "seed.txt"))
+    lost = [x for x in _seeds(staging / "w0" / task / rp.CONFIG_NAME / "seed.txt") if x not in local_seeds]
+    if lost:
+        _step(group, task, f"合并后本地缺 {len(lost)} 个远端 seed(如 {lost[:3]}),拉回的数据留在 {rp.rel(staging)}")
+        return 1
+    shutil.rmtree(staging, ignore_errors=True)
+    r["merged"] = True
+    update_job(group, task, remote=r)
+    n = rp._hdf5_count(task)
+    if _collected(task):
+        _step(group, task, f"合并后 {n}/{rp.COLLECT_TARGET} 条,还不够;再点一次补采")
+        return 1
+    _step(group, task, f"采够 {n} 条({m['key']} 采的 {pulled} 条已合并;远端数据保留在 {rdir})")
+    return 0
+
+
+def run_eval_remote(group: str, task: str, gpus: str, policy: str, m: dict) -> int:
+    queue = eval_plan(group, task, policy, m["key"])["queue"]  # 再确认一次闸门(含远端模型检查),重新算续评
+    if not queue:
+        return 0
+    rdir = f"{REMOTE_DIR}/{task}_eval_{datetime.now():%Y%m%d_%H%M%S}"
+    r = {"machine": m["key"], "dir": rdir, "started_at": now(),
+         "counts": {item["policy"]: 0 for item in queue}}
+    update_job(group, task, remote=r)
+    _step(group, task, f"同步代码 + 评测布局到 {m['key']}")
+    sync_code(m)
+    dest = f"{sv.target(m)}:{m['repo_path']}"
+    layout_rel = rp.rel(EVAL_LAYOUT)
+    sv.run(m, f"mkdir -p {shlex.quote(layout_rel)} {shlex.quote(rp.rel(EVAL_LOGS))}", timeout=30)
+    if _rsync(m, "--include", f"{task}_*.json", "--exclude", "*", f"{EVAL_LAYOUT}/", f"{dest}/{layout_rel}/") != 0:
+        raise PlanError(f"同步评测布局到 {m['key']} 失败")
+    result_rel = rp.rel(EVAL_RESULT / task)
+    for item in queue:  # 要续评的结果先推过去(ROBODOJO_RUN_ID 接着同一个目录评)
+        if item["run_id"]:
+            base = EVAL_RESULT / task / item["policy"] / EVAL_CFG / f"{EVAL_SEED}_ckpt_name={item['ckpt']},action_type=joint"
+            rel = rp.rel(base / item["run_id"])
+            sv.run(m, f"mkdir -p {shlex.quote(rel)}", timeout=30)
+            if _rsync(m, f"{base / item['run_id']}/", f"{dest}/{rel}/") != 0:
+                raise PlanError(f"推送续评结果 {rel} 到 {m['key']} 失败")
+    ids = [int(x) for x in gpus.split(",") if x.strip()]
+    pairs = [(ids[i], ids[i + 1] if i + 1 < len(ids) else ids[i]) for i in range(0, len(ids), 2)] or [(0, 0)]
+    lanes: list[list[str]] = [[] for _ in pairs]  # 每对卡一条流水线,模型轮流分到各条上,同一条上依次评
+    stamp = f"{datetime.now():%Y%m%d_%H%M%S}"
+    for i, item in enumerate(queue):
+        pair = pairs[i % len(pairs)]
+        cmd = ["bash", "scripts/robodojo.sh", "eval", "--policy-dir", f"XPolicyLab/policy/{item['policy']}",
+               "--task", task, "--ckpt", item["ckpt"], "--policy-env", "uv", "--action-type", "joint",
+               "--env-cfg", EVAL_CFG, "--eval-num", str(EVAL_NUM), "--seed", str(EVAL_SEED),
+               "--policy-gpu", str(pair[0]), "--env-gpu", str(pair[1])]
+        log = f"{rp.rel(EVAL_LOGS)}/{task}_{item['policy']}_p{pair[0]}_{stamp}.log"
+        run_id = f"ROBODOJO_RUN_ID={shlex.quote(item['run_id'])} " if item["run_id"] else ""
+        lanes[i % len(pairs)].append(f"{run_id}{' '.join(shlex.quote(c) for c in cmd)} > {shlex.quote(log)} 2>&1"
+                                     f" || fail=1")
+    body = "fail=0; " + " ".join(f"( {'; '.join(lane)}; exit $fail ) & sleep 8;" for lane in lanes if lane)
+    inner = body + " ok=0; for j in $(jobs -p); do wait $j || ok=1; done; (exit $ok)"  # 不能 exit:后面要写退出码
+    _step(group, task, f"{m['key']} 上评测 {len(queue)} 个模型({len(pairs)} 条并行)")
+    print(f"$ [{m['key']}] {inner}", flush=True)
+    r["pid"] = remote_launch(m, rdir, inner)
+    update_job(group, task, remote=r)
+    # 进度:远端各模型最新一次 _result.json 的 eval_time
+    probes = []
+    for item in queue:
+        base = f"{result_rel}/{item['policy']}/{EVAL_CFG}/{EVAL_SEED}_ckpt_name={item['ckpt']},action_type=joint"
+        probes.append(f"echo -n \"{item['policy']}=$(cat {shlex.quote(base)}/*/_result.json 2>/dev/null"
+                      " | grep -o '\"eval_time\": *[0-9]*' | grep -o '[0-9]*$' | sort -n | tail -1) \"")
+    count_cmd = "; ".join(probes)
+
+    def on_count(value: str) -> None:
+        for part in value.split():
+            name, _, n = part.partition("=")
+            if name in r["counts"] and n.isdigit():
+                r["counts"][name] = int(n)
+        update_job(group, task, remote=r)
+
+    code = remote_watch(group, task, m, rdir, f"评测 {len(queue)} 个模型", count_cmd, on_count)
+    _step(group, task, f"从 {m['key']} 拉回评测结果和日志")
+    (EVAL_RESULT / task).mkdir(parents=True, exist_ok=True)
+    pulled = _rsync(m, f"{dest}/{result_rel}/", f"{EVAL_RESULT / task}/")
+    _rsync(m, "--include", f"{task}_*_{stamp}.log", "--exclude", "*", f"{dest}/{rp.rel(EVAL_LOGS)}/", f"{EVAL_LOGS}/")
+    if pulled != 0:
+        _step(group, task, f"拉回评测结果失败(远端结果还在 {result_rel});再点一次会重新拉")
+        return 1
+    counts = {item["policy"]: max((n for _, n in eval_runs(task, item["policy"], item["ckpt"])), default=0)
+              for item in queue}
+    short = [f"{p} {n}/{EVAL_NUM}" for p, n in counts.items() if n < EVAL_NUM]
+    if short or code != 0:
+        _step(group, task, f"没评满:{'、'.join(short) or '(远端 exit ' + str(code) + ')'};再点一次续评")
+        return 1
+    _step(group, task, "评完:" + "、".join(f"{p} {n} 条" for p, n in counts.items())
+          + f"({m['key']})")
+    return 0
+
+
+def run(kind: str, group: str, task: str, gpus: str = "", delete: bool = False, policy: str = "",
+        machine: str = "", per_gpu: int | None = None) -> int:
     update_job(group, task, pid=os.getpid())
     code = 1
     try:
         if kind == "ingest":
             code = run_ingest(group)
         elif kind == "collect":
-            code = run_collect(group, task, gpus)
+            code = run_collect(group, task, gpus, machine, per_gpu)
         elif kind == "export":
             code = run_export(group, task)
         elif kind == "eval":
-            code = run_eval(group, task, gpus)
+            code = run_eval(group, task, gpus, policy, machine)
         elif kind == "layouts":
             code = run_layouts(group, task, gpus)
         else:
             code = run_upload(group, task, delete)
-    except PlanError as error:
+    except (PlanError, sv.ServerError) as error:
         print(f"[group_jobs] {error}", flush=True)
+        update_job(group, task, step=str(error).splitlines()[0][:200])
     finally:
         job = read_job(job_id(group, task)) or {}
         if not job.get("stopped"):
@@ -1121,15 +1603,21 @@ def main() -> int:
         s.add_argument("button", choices=BUTTONS)
         s.add_argument("group")
         s.add_argument("task")
+        s.add_argument("--policy", default="", help="eval 时只评这个模型(Pi_0 / Pi_05);默认都评")
+        s.add_argument("--machine", default="", help="collect / eval 在哪台机器上跑(docs/servers.json 的键;默认 default_machine)")
         if name == "start":
             s.add_argument("--gpus", default="")
             s.add_argument("--delete", action="store_true", help="上传时删除远端多余文件(默认保留)")
+            s.add_argument("--per_gpu", type=int, default=None, help="collect:每卡几个 worker")
     s = sub.add_parser("run", help="内部用:后台会话里执行")
     s.add_argument("kind", choices=("ingest", "collect", "export", "upload", "eval", "layouts"))
     s.add_argument("group")
     s.add_argument("task")
     s.add_argument("--gpus", default="")
     s.add_argument("--delete", action="store_true")
+    s.add_argument("--policy", default="")
+    s.add_argument("--machine", default="")
+    s.add_argument("--per_gpu", type=int, default=None)
     sub.add_parser("status")
     s = sub.add_parser("stop")
     s.add_argument("group")
@@ -1137,15 +1625,16 @@ def main() -> int:
     a = ap.parse_args()
     try:
         if a.cmd == "plan":
-            print(plan(a.button, a.group, a.task)["text"])
+            print(plan(a.button, a.group, a.task, policy=a.policy, machine=a.machine)["text"])
         elif a.cmd == "start":
-            job = start(a.button, a.group, a.task, a.gpus, a.delete)
+            job = start(a.button, a.group, a.task, a.gpus, a.delete, a.policy, a.machine, a.per_gpu)
             print(f"已启动 {job_label(job)} {a.group}/{a.task}:pid {job['pid']},日志 {job['log']}")
         elif a.cmd == "run":
-            return run(a.kind, a.group, a.task, a.gpus, a.delete)
+            return run(a.kind, a.group, a.task, a.gpus, a.delete, a.policy, a.machine, a.per_gpu)
         elif a.cmd == "status":
             for jid, j in all_jobs(tail=False).items():
-                print(f"{jid}: {j['label']} {j['state']} · {j.get('step')} · {j.get('started_at')} · {j.get('log')}")
+                where = f" @{j['machine']}" if j.get("machine") else ""
+                print(f"{jid}: {j['label']}{where} {j['state']} · {j.get('step')} · {j.get('started_at')} · {j.get('log')}")
         else:
             print(stop(a.group, a.task))
     except PlanError as error:

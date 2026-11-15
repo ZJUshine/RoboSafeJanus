@@ -1,8 +1,8 @@
 # ruff: noqa: E501  -- 主要是 HTML / CSS / JS 模板,长行按页面结构排版
 """看板的流水线部分,由 ``sync_status.py`` 和 ``rsj_pipeline.py`` 生成。看板只有一个页面 ``data/PIPELINE.html``
 (sync_status 生成),内容只有一张流水线大表(``table_html``):每行一个任务,从左到右是任务构造 seed … expert
-(审核阶段)、数据收集与上传 collect / exchange / upload(``JOB_HEADS``,不审核)、模型评测 模型 / eval / 结果 / 布局
-(``WIDE_COLUMNS``,模型 / 结果 / 布局与视频、远端状态由 sync_status 写进 ``CELLS_FILE``)。
+(审核阶段)、数据收集与上传 collect / exchange / upload(``JOB_HEADS``,不审核)、模型评测 布局 / 模型 / eval / 结果
+(``WIDE_COLUMNS``,不审核;模型 / 结果 / 布局与视频、远端状态由 sync_status 写进 ``CELLS_FILE``)。
 
 - 点状态格:屏幕中间弹出这一阶段的审核条目(检查、改动、批准 / 驳回);点组名:弹出风险种子和全部阶段。
   条目预先写在隐藏的 ``#gstores`` 里,脚本挪进对话框 ``#pipe-dialog``(``ROUTE_JS``),关闭时放回;
@@ -10,14 +10,18 @@
 - 审核格底色是审核状态,字是这一格做出来的东西(``stage_info``:物体数、入库数、题数、成功率…);任务格底色是层级。
 - assets 列不审核、按组一格(``assets_cell``):seed 批准后有「🔗 填资产链接」(``link_button`` → ``#assets-dialog`` /
   ``ASSETS_JS`` → ``/api/assets/load|save`` → ``pipeline_edit.assets_save``),一行一个物体填链接,保存就算完成。
-- ingest 按组一格,「⬇ 下载资产」(``ingest_button``,group_jobs ``ingest``)后台下载 / 转换 / 入库,完了提交给你审。
+- ingest 按组一格,「⬇ 下载资产」(``ingest_button``,group_jobs ``ingest``)后台下载 / 转换 / 入库,完了提交并自动批准(入库不审核)。
 - 点开后条目里有编辑区(``EDIT_JS`` → ``/api/edit/load|save`` → ``pipeline_edit.py``):这一格的 JSON / YAML / Python
   直接改,保存后回填到对应文件。
 - collect / exchange / upload 格写实际数据(``job_info``:条数 + 视频、v3.0 / v2.1 条数、远端同步),expert 批准后可点。
 - 任务构造各格的「▶ Claude」(``claude_button``)只给提示词(``claude_prompt``,弹出 ``#prompt-dialog`` / ``PROMPT_JS``),
   复制到终端里的 Claude Code 交互着做,不在后台起会话;只在未开始 / 驳回 / 失效 / 提交后已改的格子上有。
+  未开始(从零开始)的格子点格子本身就直接弹出提示词(``data-direct``)。
+- 失效 / 提交后已改的格子另有「✎ 人工审核」(``manual_button``):弹出审核条目,在编辑区里改、看相对 HEAD 的改动,
+  点「✔ 人工审核通过」(``reapprove`` = ``resubmit --approve``,重新跑检查,通过即批准),不必交给 Claude 重做。
 - 「采集」「转换」「上传」按钮由 sync_status 页面脚本处理:点了弹出计划对话框,确认后后台运行 ``group_jobs.py``。
-- eval 格的「▶ 评测」(``eval_button``)在模型下载完后出现,同样走 group_jobs(``eval``),评完不提交。
+- eval 格(``eval_cell``,不审核,2026-11-15 起)写这一行模型已评几条;「▶ 评测」(``eval_button``)在模型下载完后出现,
+  同样走 group_jobs(``eval``),评完不提交。
 - 表尾是还没开始的种子,带「从种子开始」。
 
 片段 ``data/pipeline/_fragments/table.html`` 页面生成时内嵌,打开时再读一次最新的,所以页面上操作完立刻看到新状态。
@@ -29,6 +33,7 @@
     approve   批准某阶段(可附说明)
     reject    驳回某阶段(必须写意见,Claude 重做时会读)
     resubmit  沿用上次的附件 / 指标重新提交(后台运行检查)
+    reapprove 人工审核过:重新提交并直接批准(失效 / 提交后已改的格子,后台运行检查)
     pick      选定某个候选资产写进 robosafejanus_assets.json(ingest 会失效,要重新下载)
 
 页面上的操作都转成对应的命令行(``rsj_pipeline.py`` / ``asset_candidates.py``),与在终端里执行完全相同。
@@ -45,6 +50,7 @@ import sys
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
+from group_jobs import EVAL_POLICIES  # noqa: E402
 import rsj_pipeline as rp  # noqa: E402
 
 PAGE = "PIPELINE.html"
@@ -59,22 +65,18 @@ PHASES = (
      "风险种子 → 任务列表与资产 → 设计 / sim JSON → 布局与指令 → 专家脚本"),
     ("data", "数据收集与上传", "#data", (),
      "批量采集 → LeRobot 转换 → 上传 ModelScope(格子里点按钮,不审核)"),
-    ("eval", "模型评测", "#eval", ("eval",),
-     "下载数据 / 模型 → 评测 → 结果汇总"),
+    ("eval", "模型评测", "#eval", (),
+     "评测布局 → 下载模型 → 评测 → 结果汇总(格子里点按钮,不审核)"),
 )
 PHASE_OF = {stage: phase for phase in PHASES for stage in phase[3]}
 # 动作 -> 在后台运行(检查可能要几分钟)还是同步运行
-ACTIONS = {"init": False, "approve": False, "reject": False, "resubmit": True, "pick": False}
+ACTIONS = {"init": False, "approve": False, "reject": False, "resubmit": True, "reapprove": True, "pick": False}
 NAME_RE = re.compile(r"[A-Za-z0-9_]+")
 CAND_RE = re.compile(r"[A-Za-z0-9_:/.\-]+")
 STATUS_CLASS = {"approved": "good", "awaiting_review": "warn", "changed": "bad", "rejected": "bad",
                 "stale": "stale", "none": "idle"}
 # Claude 负责的阶段:页面上提示怎么让 Claude 开始 / 重做
-CLAUDE_STAGES = {"design": "design 阶段", "layout": "布局阶段",
-                 "expert": "专家调试阶段", "eval": "评测"}
-# 开始前要用户先做的事
-USER_FIRST = {"eval": "先确认该组模型已在外部训练好并传到 <code>zjushine/RoboSafeJanus-Model</code>,然后"}
-# 任务构造各格也可以直接点格子里的按钮
+CLAUDE_STAGES = {"design": "design 阶段", "layout": "布局阶段", "expert": "专家调试阶段"}
 
 
 def esc(value) -> str:
@@ -104,7 +106,9 @@ def action_command(action: str, payload: dict) -> list[str]:
     stage = str(payload.get("stage") or "")
     if stage not in rp.STAGES:
         raise ValueError("阶段不合法")
-    cmd = [*py, str(HERE / "rsj_pipeline.py"), action, group, stage]
+    cmd = [*py, str(HERE / "rsj_pipeline.py"), "resubmit" if action == "reapprove" else action, group, stage]
+    if action == "reapprove":
+        cmd.append("--approve")
     task = payload.get("task")
     if task:
         if not NAME_RE.fullmatch(str(task)):
@@ -238,11 +242,10 @@ def entry_html(state: dict, stage: str, key: str, task: str | None, out_dir: Pat
         if problems:
             hint = "<p><small>等待上游:" + esc("; ".join(problems)) + "</small></p>"
         elif stage == "ingest":
-            hint = "<p>可以开始:点表里 ingest 格的「⬇ 下载资产」,后台下载、转换、入库,完了提交给你审。</p>"
+            hint = "<p>可以开始:点表里 ingest 格的「⬇ 下载资产」,后台下载、转换、入库,完了自动批准(入库不审核)。</p>"
         elif stage in CLAUDE_STAGES:
-            first = USER_FIRST.get(stage, "").format(g=esc(g))
             btn = claude_button(state, stage, task) if stage in BUILD_STAGES else ""
-            hint = (f'<p>可以开始。{first}点 {btn or "终端里的 Claude"} 拿提示词,贴到终端里的 Claude Code 交互着做'
+            hint = (f'<p>可以开始。点 {btn or "终端里的 Claude"} 拿提示词,贴到终端里的 Claude Code 交互着做'
                     f'(或者直接说<code class="copy">开始 {esc(g)} 的{CLAUDE_STAGES[stage]}{task_suffix}</code>)。</p>')
         else:
             hint = "<p>可以开始。</p>"
@@ -261,7 +264,7 @@ def entry_html(state: dict, stage: str, key: str, task: str | None, out_dir: Pat
     parts.append(editbox)
     parts.append(notes_html(entry))
     parts.append(checks_html(entry))
-    if status in ("awaiting_review", "changed", "rejected"):
+    if status in ("awaiting_review", "changed", "rejected", "stale"):
         diff = rp.git_diff(entry.get("artifacts", {}))
         if diff:
             parts.append(f'<details class="fold"><summary>相对 HEAD 的改动</summary><pre class="diff">{esc(diff)}</pre></details>')
@@ -274,7 +277,10 @@ def entry_html(state: dict, stage: str, key: str, task: str | None, out_dir: Pat
         buttons.append(f'<button class="act primary" data-action="approve" {data}>批准</button>')
         buttons.append(f'<button class="act" data-action="reject" {data}>驳回</button>')
     if status in ("changed", "stale"):
-        buttons.append(f'<button class="act primary" data-action="resubmit" {data}>重新提交</button>')
+        # 人工编辑 / 审核:编辑区里改好、看过改动后直接批准;也可以只重新提交等以后审,或交给 Claude 重做
+        buttons.append(f'<button class="act primary" data-action="reapprove" {data} '
+                       f'title="重新跑检查,通过即批准(你已经人工看过 / 改过)">✔ 人工审核通过</button>')
+        buttons.append(f'<button class="act" data-action="resubmit" {data} title="重新跑检查,变成待审">重新提交(待审)</button>')
     if status == "rejected":
         buttons.append(f'<button class="act" data-action="resubmit" {data}>改好了,重新提交</button>')
     if stage in BUILD_STAGES and task:
@@ -283,6 +289,11 @@ def entry_html(state: dict, stage: str, key: str, task: str | None, out_dir: Pat
     if buttons:
         note = ('<textarea class="note" rows="2" placeholder="说明 / 驳回意见(驳回必填,Claude 重做时会逐条读)">'
                 "</textarea>" if status == "awaiting_review" else "")
+        if status in ("changed", "stale"):
+            note = ('<p class="manual"><b>人工编辑 / 审核</b>:在上面编辑区直接改这一格的文件(保存即写回),'
+                    '再看下面「相对 HEAD 的改动」;确认没问题点「✔ 人工审核通过」(重新跑检查,通过即批准)。'
+                    '不想自己改就点「↻ 重做」拿提示词交给 Claude。</p>'
+                    '<textarea class="note" rows="2" placeholder="审核说明(可选,记进审核记录)"></textarea>')
         parts.insert(parts.index(editbox) + 1, f'<div class="actions">{note}<div class="btns">{"".join(buttons)}</div></div>')
     return f'<div class="entry" {anchor}>{"".join(p for p in parts if p)}</div>'
 
@@ -295,8 +306,8 @@ def entry_html(state: dict, stage: str, key: str, task: str | None, out_dir: Pat
 LEGEND = ('<p class="legend"><span class="badge good">通过</span><span class="badge warn">待审</span>'
           '<span class="badge bad">驳回 / 提交后已改</span><span class="badge stale">失效</span><span class="badge idle">未开始</span>'
           '<span class="legend-item lvl-safe">safe 任务</span><span class="legend-item lvl-risky">risky 任务</span>'
-          '<small>任务构造 / 评测格子底色是审核状态,字是这一格做出来的东西(物体数、入库数、题数、成功率…);'
-          'collect / exchange / upload 不审核,绿 = 做完,蓝 = 做了一部分;'
+          '<small>任务构造格子底色是审核状态,字是这一格做出来的东西(物体数、入库数、题数、成功率…);'
+          'collect / exchange / upload / eval 不审核,绿 = 做完,蓝 = 做了一部分;'
           'seed 按组(跨行合并),其余阶段每个任务各审一次;多个组都有的任务从 layout 起各组显示同一份(在哪一行审都一样)</small></p>')
 
 # 一次 render 内复用的文件读取(sync_status 常驻,每次 render 开头清空)
@@ -385,6 +396,10 @@ def stage_info(state: dict, stage: str, task: str) -> dict | None:
                 "small": "固定布局模板" if re.search(r"--layout_template\s", text) else "随机布局"}
     if stage == "expert":
         rate = metrics.get("success_rate")
+        numeric = rate not in (None, "adopted")
+        if metrics.get("smoke") == "passed":  # 已通过冒烟测试(2026-11-15 起格子按这个写)
+            return {**info, "main": "冒烟通过", "small": f"小批量 {rate}" if numeric else "",
+                    "tip": "已通过冒烟测试" + (f";小批量成功率 {rate}" if numeric else "")}
         if rate is None:
             return None
         if rate == "adopted":
@@ -466,22 +481,31 @@ def status_cell(state: dict, key: str, span: int = 1, extra: str = "") -> str:
 
 # 总览宽表里穿插的数据列:sync_status 每次重建时把每个任务的格子写进 CELLS_FILE
 CELLS_FILE = "pipeline/_fragments/cells.json"
-DATA_HEADS = {"model": ("模型", "Pi_0 / Pi_05"), "result": ("评测结果", "success"), "eval_layout": ("评测布局", "seed 0")}
+DATA_HEADS = {"eval_layout": ("评测布局", "seed 0"), "model:*": ("模型", "每个模型(Pi_0 / Pi_05)一行:checkpoint"),
+              "result:*": ("评测结果", "每个模型一行:success")}
 # 数据收集与上传:不审核,格子里写实际数据 + 按钮(job_cell)
 JOB_HEADS = {"collect": ("collect", "批量采集 · 视频"), "exchange": ("exchange", "转换 LeRobot v3.0 + v2.1"),
              "upload": ("upload", "上传 ModelScope")}
 # 大表列头的中文名(英文阶段名放在悬停提示里)
 COL_LABEL = {"seed": "种子", "assets": "资产", "ingest": "入库", "design": "设计", "layout": "布局", "expert": "专家",
              "collect": "采集", "exchange": "转换", "upload": "上传", "eval": "评测"}
-# (大类, 列):列是阶段名、JOB_HEADS 或 DATA_HEADS 的键(不能重名)
+# (大类, 列):列是阶段名、JOB_HEADS 或 DATA_HEADS 的键(不能重名)。
+# 模型评测:评测布局在最前;``*:*`` 三列按模型分行——每个任务每个模型(EVAL_POLICIES)一行,
+# 同一模型的模型 / 评测 / 结果在同一行,其他列上下合并。格子数据在 cells 的 ``model:<policy>`` /
+# ``result:<policy>``;评测格(``eval_cell``,不审核)写这一行模型已评几条,「▶ 评测」只评这一行的模型。
 WIDE_COLUMNS = (
     *[("build", s) for s in PHASES[0][3]],
     *[("data", c) for c in JOB_HEADS],
-    ("eval", "model"), ("eval", "eval_layout"), ("eval", "eval"), ("eval", "result"),
+    ("eval", "eval_layout"), ("eval", "model:*"), ("eval", "eval:*"), ("eval", "result:*"),
 )
 
 
 assert not (set(DATA_HEADS) | set(JOB_HEADS)) & set(rp.STAGES), "数据列的键与阶段重名"
+
+
+def _rowspan(td: str, k: int) -> str:
+    """按模型分行时,不分模型的任务格上下合并 ``k`` 行(``data-t`` 让 CSS 保留它的下边线)。"""
+    return td if k <= 1 else td.replace("<td", f'<td rowspan="{k}" data-t', 1)
 
 
 def load_cells(out_dir: Path) -> dict:
@@ -534,7 +558,7 @@ def ingest_button(state: dict) -> str:
     problems = rp.upstream_problems(state, "ingest", None)
     label = "⬇ 下载资产" if status == "none" else "↻ 重新下载"
     tip = ("; ".join(p.split(": ", 1)[-1] for p in problems) if problems else
-           "后台下载 SimReady 原始模型、转换成 robodojo_format、挂进 Assets,写入库报告后提交给你审")
+           "后台下载 SimReady 原始模型、转换成 robodojo_format、挂进 Assets,写入库报告后提交,检查通过自动批准")
     dis = " disabled data-blocked=1" if problems else ""
     return (f'<button class="gact" data-kind="ingest" data-group="{g}" data-task="{GROUP_TASK}" title="{esc(tip)}"{dis}>'
             f'{label}</button><div class="gjob" data-group="{g}" data-task="{GROUP_TASK}" data-kind="ingest"></div>')
@@ -559,31 +583,53 @@ def layouts_button(state: dict, task: str) -> str:
             f'<div class="gjob" data-group="{esc(g)}" data-task="{esc(task)}" data-kind="layouts"></div>')
 
 
-def eval_button(state: dict, task: str) -> str:
+def eval_button(state: dict, task: str, policy: str = "") -> str:
     """eval 格的「▶ 评测」:这个任务的模型(Pi_0 / Pi_05)下载完、评测布局够 50 个才出现;expert 没批准时灰掉。
 
     点了弹出计划(group_jobs ``eval``:要评的模型、已评 / 续评、GPU),确认后后台跑 ``robodojo.sh eval``。
-    eval 已提交 / 已批准时没有(报告和提交审核让 Claude 做)。"""
+    ``policy`` 给出时(宽表按模型分开的 eval 格)只管这个模型。评完不提交(eval 不审核)。"""
     import group_jobs as gj
 
-    status, _ = rp.entry_status(state, f"eval/{task}")
-    if status not in PROMPT_STATUS:
-        return ""
     g = state["group"]
     downloading = _cached("downloading", gj._downloading) or set()
     try:
-        models = gj.eval_models(g, task, downloading)
+        models = [m for m in gj.eval_models(g, task, downloading) if not policy or m["policy"] == policy]
     except (OSError, ValueError, KeyError):
         return ""
     ready = [m for m in models if m["ready"]]
     if not ready or gj.eval_layouts(task) < gj.EVAL_NUM:
         return ""
-    blocked = gj.eval_blocked(state, g, task, downloading)
+    blocked = gj.eval_blocked(state, g, task, downloading, policy)
     names = "、".join(f"{m['policy']}{'(zero-shot)' if m['zero_shot'] else ''}" for m in ready)
-    tip = blocked or f"用已下载的 {names} 各评 {gj.EVAL_NUM} 条(点了先列计划、选 GPU,确认后后台运行)"
+    each = "" if policy else "各"
+    tip = blocked or f"用已下载的 {names} {each}评 {gj.EVAL_NUM} 条(点了先列计划、选 GPU,确认后后台运行)"
     dis = " disabled data-blocked=1" if blocked else ""
-    return (f'<button class="gact" data-kind="eval" data-group="{esc(g)}" data-task="{esc(task)}" title="{esc(tip)}"{dis}>'
-            f'▶ 评测</button><div class="gjob" data-group="{esc(g)}" data-task="{esc(task)}" data-kind="eval"></div>')
+    pol = f' data-policy="{esc(policy)}"' if policy else ""
+    return (f'<button class="gact" data-kind="eval" data-group="{esc(g)}" data-task="{esc(task)}"{pol} '
+            f'title="{esc(tip)}"{dis}>▶ 评测</button>'
+            f'<div class="gjob" data-group="{esc(g)}" data-task="{esc(task)}" data-kind="eval"{pol}></div>')
+
+
+def eval_cell(state: dict, task: str, policy: str, buttons: bool) -> str:
+    """宽表 eval 格(按模型分行,不审核):这一行模型已评几条(同一个 ckpt 取 ``eval_time`` 最大的一次)+「▶ 评测」。
+    底色:评满绿、评了一部分蓝、没评 / 没模型灰。"""
+    import group_jobs as gj
+
+    downloading = _cached("downloading", gj._downloading) or set()
+    try:
+        model = next((m for m in gj.eval_models(state["group"], task, downloading) if m["policy"] == policy), None)
+        done = max((n for _, n in gj.eval_runs(task, policy, model["ckpt"])), default=0) if model else 0
+    except (OSError, ValueError, KeyError):
+        model, done = None, 0
+    if model is None:
+        main, klass, small = "—", "idle", "还没有模型"
+    else:
+        klass = "good" if done >= gj.EVAL_NUM else ("todo" if done else "idle")
+        main = f"{done}/{gj.EVAL_NUM} 条"
+        small = "zero-shot" if model["zero_shot"] else ""
+    extra = eval_button(state, task, policy) if buttons else ""
+    sub = f"<br><small>{esc(small)}</small>" if small else ""
+    return f'<td class="pc st jc {klass}"><span class="jmain">{esc(main)}</span>{sub}{extra}</td>'
 
 
 def link_button(state: dict, label: str = "🔗 填资产链接") -> str:
@@ -650,6 +696,16 @@ def claude_button(state: dict, stage: str, task: str | None) -> str:
             f'data-prompt="{esc(claude_prompt(state, stage, task))}" title="{esc(tip)}"{dis}>{esc(label)}</button>')
 
 
+def manual_button(state: dict, stage: str, task: str) -> str:
+    """失效 / 提交后已改的格子的「✎ 人工审核」:打开这一格的审核条目(编辑区 + 改动 + 「✔ 人工审核通过」)。"""
+    status, why = rp.entry_status(state, f"{stage}/{task}")
+    if status not in ("stale", "changed"):
+        return ""
+    tip = f"{why}\n自己改 / 看改动,确认后直接批准" if why else "自己改 / 看改动,确认后直接批准"
+    return (f'<a class="act small mreview" href="{stage_href(state["group"], f"{stage}/{task}")}" '
+            f'title="{esc(tip)}">✎ 人工审核</a>')
+
+
 JOB_LABEL = {"collect": ("▶ 采集", "补采到目标条数(不审核)"),
              "exchange": ("⇄ 转换", "导出 LeRobot v3.0 + v2.1(不审核)"),
              "upload": ("⬆ 上传", "先 dry-run 给你看清单,确认后上传 HDF5 + LeRobot 到 ModelScope(不审核)")}
@@ -687,6 +743,20 @@ def _wbr(name: str) -> str:
     return esc(name).replace("_", "_<wbr>")
 
 
+def policy_cell(state: dict, by_group: dict, t: dict, col: str, policy: str, cells: dict, buttons: bool) -> str:
+    """按模型分行的一格:``model`` / ``result`` 是 sync_status 写的数据,``eval`` 是 ``eval_cell``(不审核:
+    已评几条)+ 只评 ``policy`` 的「▶ 评测」。same_as 引用的任务照搬归属组的格子。"""
+    tag = f'<span class="polname">{esc(policy)}</span>'
+    if col == "eval":
+        src = state if t["name"] in rp.own_tasks(state) else by_group.get(t["owner"] or "")
+        if not t["name"] or src is None:
+            return '<td class="st idle pc">·</td>'
+        return eval_cell(src, t["name"], policy, buttons)
+    value = cells.get(t["name"], {}).get(f"{col}:{policy}") if t["name"] else None
+    lead = tag + "<br>" if col == "model" else ""
+    return f'<td class="dc pc">{lead}{value or "<small>—</small>"}</td>'
+
+
 def group_task_table(states: list[dict], stages, *, phases: bool = False, filterable: bool = False,
                      buttons: bool = False, cells: dict | None = None, seeds: list[dict] | None = None) -> str:
     """每行一个任务的表,``#`` / 组 / 组级阶段(seed)跨行合并,按任务的阶段每行一格。
@@ -708,6 +778,9 @@ def group_task_table(states: list[dict], stages, *, phases: bool = False, filter
         if col in DATA_HEADS:
             name, sub = DATA_HEADS[col]
             return f'<th class="dh" title="{esc(sub)}">{esc(name)}</th>'
+        if col == "eval:*":
+            return (f'<th title="eval · 评测进度(不审核;每个模型一行,按钮只评这一行的模型)">'
+                    f'{esc(COL_LABEL["eval"])}</th>')
         desc = "资产链接(你来填,不审)" if col == "assets" else rp.STAGE_DESC[col]
         return f'<th title="{esc(col)} · {esc(desc)}">{esc(COL_LABEL.get(col, col))}</th>'
 
@@ -723,14 +796,17 @@ def group_task_table(states: list[dict], stages, *, phases: bool = False, filter
         thead = "<tr>" + "".join(f'<th class="lhead">{h}</th>' for h in fixed) + col_heads + "</tr>"
     bodies = []
     by_group = {s["group"]: s for s in states}
+    policies = EVAL_POLICIES if any(c.endswith(":*") for _, c in columns) else ()
+    k = max(1, len(policies))  # 每个任务占几行
     for index, state in enumerate(states, 1):
         g = state["group"]
         tasks = task_info(state)
         n = len(tasks)
-        rs = f' rowspan="{n}"' if n > 1 else ""
+        rs = f' rowspan="{n * k}"' if n * k > 1 else ""
         rows = []
         for i, t in enumerate(tasks):
             row = []
+            sub_rows: list[list[str]] = [[] for _ in policies]  # 按模型分的格子:每个模型一行
             if i == 0:
                 adopted = ' <span class="badge idle" title="流水线之前完成,登记进流水线">adopt</span>' if state.get("adopted") else ""
                 row.append(f'<td class="group-index"{rs}>{index}</td>')
@@ -740,10 +816,15 @@ def group_task_table(states: list[dict], stages, *, phases: bool = False, filter
                 tip = f'{t["level"] or "层级未定(还没写设计)"} · {t["instruction"]}'.strip(" ·")
                 if t["owner"]:
                     tip += f'\nlayout 起和 {t["owner"]} 组的同一份'
-                row.append(f'<td class="tname{lvl}" title="{esc(tip)}"><code>{_wbr(t["name"])}</code></td>')
+                row.append(_rowspan(f'<td class="tname{lvl}" title="{esc(tip)}"><code>{_wbr(t["name"])}</code></td>', k))
             else:
-                row.append('<td class="tname"><small class="muted">还没有任务草稿</small></td>')
+                row.append(_rowspan('<td class="tname"><small class="muted">还没有任务草稿</small></td>', k))
             for _, col in columns:
+                if col.endswith(":*"):  # 按模型分行:第 j 个模型的格子放进第 j 行
+                    for j, policy in enumerate(policies):
+                        sub_rows[j].append(policy_cell(state, by_group, t, col[:-2], policy, cells or {}, buttons))
+                    continue
+                before = len(row)
                 if col in JOB_HEADS:
                     # same_as 引用的任务在归属组采 / 转 / 传:照搬归属组的格子
                     src = state if t["name"] in rp.own_tasks(state) else by_group.get(t["owner"] or "")
@@ -760,7 +841,7 @@ def group_task_table(states: list[dict], stages, *, phases: bool = False, filter
                     row.append(f'<td class="dc">{value or "<small>—</small>"}{extra}</td>')
                 elif col == "assets":
                     if i == 0:
-                        row.append(assets_cell(state, n, buttons))
+                        row.append(assets_cell(state, n * k, buttons))
                 elif col == "design" and not t["name"]:  # 还没有任务列表:design 先拟任务
                     btn = claude_button(state, "design", None) if buttons else ""
                     row.append(f'<td class="st todo">{btn}<small>先拟任务列表</small></td>' if btn else '<td class="st idle">·</td>')
@@ -773,13 +854,27 @@ def group_task_table(states: list[dict], stages, *, phases: bool = False, filter
                         row.append('<td class="st idle">·</td>')
                     else:
                         extra = claude_button(src, col, t["name"]) if buttons and col in BUILD_STAGES else ""
-                        if buttons and col == "eval":
-                            extra = eval_button(src, t["name"])
-                        row.append(status_cell(src, f"{col}/{t['name']}", extra=extra))
+                        if buttons and col in BUILD_STAGES:
+                            extra = manual_button(src, col, t["name"]) + extra
+                        td = status_cell(src, f"{col}/{t['name']}", extra=extra)
+                        # 从零开始(未开始且按钮可点):点格子直接弹出 Claude 提示词(PROMPT_JS)
+                        if (col in BUILD_STAGES and "cprompt" in extra and " disabled" not in extra
+                                and rp.entry_status(src, f"{col}/{t['name']}")[0] == "none"):
+                            td = td.replace("<td", "<td data-direct", 1)
+                        row.append(td)
                 elif i == 0:
                     extra = ingest_button(state) if buttons and col == "ingest" else ""
-                    row.append(status_cell(state, col, span=n, extra=extra))
-            rows.append(f'<tr>{"".join(row)}</tr>')
+                    row.append(status_cell(state, col, span=n * k, extra=extra))
+                    continue  # 组级格子已经跨整组
+                if len(row) > before and col not in ("assets",):
+                    row[-1] = _rowspan(row[-1], k)
+            last = " tlast" if i == n - 1 else ""
+            if not policies:
+                rows.append(f'<tr>{"".join(row)}</tr>')
+            for j, cells_j in enumerate(sub_rows):  # 第一个模型的行带上不分模型的格子
+                lead = "".join(row) if j == 0 else ""
+                cls = ("tfirst" if j == 0 else "psub") + (" plast" if j == k - 1 else "") + last
+                rows.append(f'<tr class="{cls}">{lead}{"".join(cells_j)}</tr>')
         search = ""
         if filterable:
             words = " ".join([g] + [f"{t['name']} {t['level']} {t['instruction']}" for t in tasks]).lower()
@@ -839,7 +934,7 @@ def table_html(out_dir: Path) -> str:
 <span id="filter-count" class="muted"></span>
 <span class="muted">每行一个任务(任务格底色:绿 safe / 红 risky)· 左右滚动看全部列 · 点格子里的字弹出该阶段的审核(批准 / 驳回)·
 点组名弹出风险种子和全部阶段 · 任务构造各格点「▶ Claude」拿提示词,贴到终端里的 Claude 交互着做 ·
-collect / exchange / upload 格点「采集」「转换」「上传」直接做(不审核)</span></div>
+collect / exchange / upload / eval 格点「采集」「转换」「上传」「评测」直接做(不审核)</span></div>
 <div id="glist">{table}</div><div id="gstores" hidden>{stores}</div>"""
 
 
@@ -961,6 +1056,11 @@ COMPONENT_CSS = """
   table.pipe th.dh { background: var(--panel-2); }
   table.pipe th.phead.ph-data { box-shadow: inset 0 3px 0 var(--accent); }
   table.pipe th.phead.ph-eval { box-shadow: inset 0 3px 0 var(--good); }
+  /* 模型评测按模型分行:同一任务的两个模型之间虚线,任务之间实线;合并的任务格保留下边线 */
+  table.pipe td[rowspan][data-t] { border-bottom: 1px solid var(--line); }
+  table.pipe tbody.grp > tr.tlast > td[data-t] { border-bottom: 0; }
+  table.pipe tr:not(.plast) > td.pc { border-bottom: 1px dashed var(--border); }
+  table.pipe td .polname { font-weight: 600; font-size: 11px; color: var(--muted); }
   table.pipe td.st button.gact { display: block; margin: 5px auto 0; }  /* 按钮单独一行,不跟在小字后面 */
   table.pipe td.st .gjob { margin: 3px auto 0; text-align: center; }
   table.pipe td.st.jc .jmain { font-weight: 500; }
@@ -1046,6 +1146,11 @@ PAGE_CSS = """
     border: 1px solid var(--border); border-radius: 7px; padding: 8px 10px; resize: vertical; }
   #prompt-dialog .abar { display: flex; gap: 8px; align-items: center; }
   table.pipe td.st button.cprompt { margin-top: 5px; display: block; margin-left: auto; margin-right: auto; }
+  table.pipe td.st a.mreview { display: block; width: max-content; margin: 5px auto 0; padding: 2px 9px; font-size: 12px;
+    background: var(--panel); color: var(--text); border: 1px solid var(--border); border-radius: 6px; }
+  table.pipe td.st a.mreview:hover { border-color: var(--faint); background: var(--hover); }
+  table.pipe td.st[data-direct] > a { cursor: copy; }
+  .entry p.manual { margin: 0 0 6px; font-size: 13px; }
   #assets-dialog { width: min(1000px, calc(100% - 48px)); max-height: calc(100vh - 64px); padding: 0; display: none; }
   #assets-dialog[open] { display: flex; flex-direction: column; }
   #assets-dialog::backdrop { background: rgba(0, 0, 0, .35); }
@@ -1119,7 +1224,8 @@ ACTION_JS = """
     if (d.action === 'reject' && !note) { say('驳回需要在文本框里写意见', true); if (noteEl) noteEl.focus(); return; }
     const key = d.stage + (d.task ? '/' + d.task : '');
     const what = { init: '从种子新建 ' + d.group, approve: '批准 ' + key, reject: '驳回 ' + key,
-      resubmit: '重新提交 ' + key, pick: d.label + ' 选用 ' + d.candidate }[d.action];
+      resubmit: '重新提交 ' + key, reapprove: '人工审核通过 ' + key + '(重新跑检查,通过即批准)',
+      pick: d.label + ' 选用 ' + d.candidate }[d.action];
     if (!confirm(d.group + ':' + what + '?')) return;
     btn.disabled = true;
     say('执行中…');
@@ -1434,6 +1540,10 @@ PROMPT_JS = r"""
   document.addEventListener('click', (ev) => {
     const btn = ev.target.closest('.pipe-ui button.cprompt[data-prompt]');
     if (btn) { ev.preventDefault(); ev.stopPropagation(); if (!btn.disabled) open(btn); return; }
+    // 未开始的格子(data-direct):点格子本身直接给提示词,不先弹审核条目
+    const direct = ev.target.closest('#glist td.st[data-direct] > a');
+    const dbtn = direct && direct.parentElement.querySelector('button.cprompt[data-prompt]');
+    if (dbtn && !dbtn.disabled) { ev.preventDefault(); ev.stopPropagation(); open(dbtn); return; }
     const d = byId('prompt-dialog');
     if (ev.target.closest('#prompt-dialog-close') || (d && ev.target === d)) { d.close(); return; }
     if (ev.target.closest('#prompt-copy')) {

@@ -1,0 +1,116 @@
+{
+  "default_machine": "hierophant",
+  "machines": {
+    "hierophant": {
+      "role": "local",
+      "description": "本地开发 / 采集 / 评测机",
+      "ssh": {
+        "user": "xuancun",
+        "host": "10.14.101.148",
+        "port": 31415,
+        "command": "ssh -p 31415 xuancun@10.14.101.148"
+      },
+      "os": "Ubuntu 24.04.2 LTS",
+      "cpu": {
+        "model": "Intel Xeon Gold 6526Y",
+        "threads": 64
+      },
+      "memory_gib": 755,
+      "gpus": [
+        {
+          "model": "NVIDIA RTX 5880 Ada Generation",
+          "count": 8,
+          "memory_gib_per_gpu": 48
+        }
+      ],
+      "driver": {
+        "version": "580.159.04",
+        "cuda": "13.0"
+      },
+      "repo_path": "/mnt/hierophant-1/xuancun/RoboSafeJanus",
+      "assets": {
+        "path": "Assets/",
+        "symlink_target": ".cache/robodojo_assets_repo/Assets",
+        "size_gb": 39
+      },
+      "conda_root": "/home/xuancun/miniconda3",
+      "conda_env": {
+        "name": "RoboDojo",
+        "activate": "conda activate RoboDojo",
+        "python": "3.11.17",
+        "torch": "2.7.0+cu128"
+      },
+      "collect_output": "data/RoboSafeJanus-Benchmark/<group>/<level>/<task>/<config>/"
+    },
+    "autodl": {
+      "role": "remote",
+      "description": "远端采集 / 评测服务器",
+      "ssh": {
+        "user": "root",
+        "host": "connect.westd.seetacloud.com",
+        "port": 50801,
+        "command": "ssh -p 50801 root@connect.westd.seetacloud.com"
+      },
+      "os": "Ubuntu 22.04.5 LTS",
+      "cpu": {
+        "model": null,
+        "threads": 208
+      },
+      "memory_gib": 1007,
+      "gpus": [
+        {
+          "model": "NVIDIA RTX PRO 6000 Blackwell Server Edition",
+          "count": 1,
+          "memory_gib_per_gpu": 96
+        }
+      ],
+      "driver": {
+        "version": "580.95.05",
+        "cuda": "13.x",
+        "isaac_sim_compatible": true,
+        "required_major": 580
+      },
+      "repo_path": "/root/autodl-fs/RoboDojo",
+      "data_root": "/root/autodl-fs",
+      "assets": {
+        "path": "data/RoboSafeJanus-Asset/Assets"
+      },
+      "conda_root": "/root/miniconda3",
+      "conda_env": {
+        "name": "RoboDojo",
+        "activate": "conda activate RoboDojo",
+        "python": "3.11.17",
+        "torch": "2.7.0+cu128",
+        "isaacsim": "5.1.0"
+      },
+      "collect_output": "data/RoboSafeJanus-Benchmark/<group>/<level>/<task>/<config>/"
+    },
+    "chpc": {
+      "role": "remote",
+      "description": "外部采集 / 评测服务器",
+      "ssh": {
+        "user": "u12310077",
+        "host": "10.202.94.52",
+        "port": 21195,
+        "command": "ssh -p 21195 u12310077@10.202.94.52"
+      },
+      "os": null,
+      "cpu": null,
+      "memory_gib": null,
+      "gpus": [
+        {
+          "model": "NVIDIA RTX 5090",
+          "count": 8,
+          "memory_gib_per_gpu": null
+        }
+      ],
+      "driver": null,
+      "repo_path": null,
+      "data_disk": null,
+      "assets": null,
+      "conda_root": null,
+      "conda_env": null,
+      "collect_output": null
+    }
+  }
+}

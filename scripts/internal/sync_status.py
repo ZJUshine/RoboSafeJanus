@@ -3109,6 +3109,14 @@ DASHBOARD_CSS = BASE_CSS + """
   .gjob.running { color: var(--warn-fg); } .gjob.done { color: var(--good-fg); }
   .gjob.failed, .gjob.interrupted { color: var(--bad-fg); }
   .plan-fields { display: flex; flex-direction: column; gap: 8px; margin: 8px 0; font-size: 13px; }
+  .plan-machine:empty { display: none; }
+  .plan-machine { margin: 4px 0 10px; font-size: 13px; }
+  .plan-machine .mq { font-weight: 600; margin-bottom: 6px; }
+  .plan-machine label.mopt { display: flex; gap: 8px; align-items: baseline; padding: 6px 8px; margin: 4px 0;
+    border: 1px solid var(--border); border-radius: 7px; cursor: pointer; }
+  .plan-machine label.mopt:has(input:checked) { border-color: var(--accent); background: var(--hover); }
+  .plan-machine label.mopt.off { opacity: .5; cursor: not-allowed; }
+  .plan-machine label.mopt small { color: var(--muted); }
   .plan-fields input[type=text] { margin-left: 6px; font: inherit; background: var(--panel); color: var(--text);
     border: 1px solid var(--border); border-radius: 6px; padding: 4px 8px; width: 160px; }
   .job { background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); padding: 10px 14px; margin-bottom: 8px; font-size: 13px; }
@@ -3313,11 +3321,12 @@ def html_page(
                 episodes = f"{remote_export['episodes']} 条" if remote_export["episodes"] is not None else "未知"
                 remote_html += f'<br><small>{episodes} / {human_bytes(remote_export["size"])}</small>'
             lerobot_cells.append(local_html + "<br>" + remote_html)
-        model_parts = [model_item_html(model, row["name"], False, wandb_rows, downloading) for model in row["models"]]
-        model_parts += [model_item_html(model, row["name"], True, wandb_rows, downloading)
-                        for model in row["group_models"]]
-        model_cell = "".join(model_parts) if model_parts else "—"
-        eval_parts = []
+        # 模型 / 评测结果格按模型(policy)分开:pipeline_page 的宽表每个模型一组「模型 · 评测 · 结果」列
+        model_parts: dict[str, list[str]] = {}
+        for model, is_group in [(m, False) for m in row["models"]] + [(m, True) for m in row["group_models"]]:
+            model_parts.setdefault(model["policy"], []).append(
+                model_item_html(model, row["name"], is_group, wandb_rows, downloading))
+        eval_parts: dict[str, list[str]] = {}
         for result in row["evals"]:
             label = eval_label(result, row, json_tasks)
             kind = eval_kind(result, row, json_tasks)
@@ -3333,12 +3342,11 @@ def html_page(
                 f' title="看这次评测的视频(✅ 成功 / ❌ 失败,{n_video} 条)">🎬 {n_video}</button>'
                 if n_video else ""
             )
-            eval_parts.append(
+            eval_parts.setdefault(result.get("policy") or "?", []).append(
                 f'<div class="eval-item" title="{html.escape(kind)}">'
                 f'<code class="eval-name">{html.escape(label)}</code><br>'
                 f"<strong>{rate:.1f}%</strong> <small>({n_text})</small>{video_btn}</div>"
             )
-        eval_cell = "".join(eval_parts) if eval_parts else "—"
         layout_stats = summary["eval_layouts"]
         layout = row.get("eval_layouts") or {}
         layout_count = layout.get("count", 0)
@@ -3372,8 +3380,11 @@ def html_page(
             video_cell = "—"
         task_cells[row["name"]] = {
             "hdf5": hdf5_cell, "v30": lerobot_cells[0], "v21": lerobot_cells[1], "video": video_cell,
-            "model": model_cell, "result": eval_cell, "eval_layout": layout_cell, "sync": sync,
+            "eval_layout": layout_cell, "sync": sync,
         }
+        for policy in sorted(set(model_parts) | set(eval_parts)):
+            task_cells[row["name"]][f"model:{policy}"] = "".join(model_parts.get(policy, [])) or "—"
+            task_cells[row["name"]][f"result:{policy}"] = "".join(eval_parts.get(policy, [])) or "—"
 
     remote_note = f" · <span class='bad'>{html.escape(snapshot['remote_error'])}</span>" if snapshot["remote_error"] else ""
     lerobot_remote_note = (
@@ -3457,6 +3468,7 @@ def html_page(
     ok.style.display = settings.pending ? 'none' : '';
     ok.disabled = Boolean(settings.pending);
     $('plan-fields').innerHTML = '';
+    $('plan-machine').innerHTML = '';
     if (!dialog.open) dialog.showModal();
     return {dialog, ok, cancel};
   }
@@ -3797,6 +3809,7 @@ def html_page(
     document.querySelectorAll('.gjob[data-group]').forEach((cell) => {
       let job = jobOf(cell);
       if (job && cell.dataset.kind && kindOf(job) !== cell.dataset.kind) job = null;
+      if (job && cell.dataset.policy && job.policy && job.policy !== cell.dataset.policy) job = null;
       const prog = job && job.progress && job.progress.text;
       cell.textContent = !job ? '' : job.state === 'running'
         ? job.label + '中 · ' + (prog || job.step || '')
@@ -3977,7 +3990,9 @@ def html_page(
     eval: '评测', layouts: '生成评测布局'};
   async function groupAction(button, kind, group, task) {
     button.disabled = true;
-    const title = (actionTitle[kind] || kind) + ' · ' + (task === '__group__' ? group : task);
+    const policy = button.dataset.policy || '';
+    const title = (policy ? policy + ' ' : '') + (actionTitle[kind] || kind) + ' · '
+      + (task === '__group__' ? group : task);
     const pending = kind === 'upload' ? '正在生成计划…\\n要对 ModelScope 做 dry-run,可能需要 1–3 分钟。'
       : (kind === 'ingest' ? '正在生成计划…\\n要跑一次 simready_assets.py --dry_run,可能要几十秒。' : '正在生成计划…');
     const {dialog, ok, cancel} = planDialog(title, pending, {pending: true});
@@ -4003,13 +4018,72 @@ def html_page(
     };
     cancel.onclick = close;
     dialog.oncancel = (event) => { event.preventDefault(); close(); };
-    const base = 'api/group/' + kind + '?group=' + encodeURIComponent(group) + '&task=' + encodeURIComponent(task);
-    try {
-      const plan = await api(base, {method: 'POST', signal: controller.signal});
-      if (closed) return;
+    const base0 = 'api/group/' + kind + '?group=' + encodeURIComponent(group) + '&task=' + encodeURIComponent(task)
+      + (policy ? '&policy=' + encodeURIComponent(policy) : '');
+    let base = base0;
+    // 采集 / 评测:先问在哪台机器上跑(docs/servers.json),选了再生成那台机器的计划;换机器就重新生成
+    let machineCtl = null;
+    if (kind === 'collect' || kind === 'eval') {
+      try {
+        const res = await api('api/group/machines?group=' + encodeURIComponent(group) + '&task=' + encodeURIComponent(task),
+          {method: 'POST', signal: controller.signal});
+        if (closed) return;
+        const box = $('plan-machine');
+        const head = document.createElement('div');
+        head.className = 'mq';
+        head.textContent = '在哪台机器上跑?(docs/servers.json)';
+        box.append(head);
+        let last = '';
+        try { last = localStorage.getItem('rsj-machine-' + kind) || ''; } catch (e) { last = ''; }
+        const radios = [];
+        for (const m of res.machines || []) {
+          const label = document.createElement('label');
+          label.className = 'mopt' + (m.usable ? '' : ' off');
+          const radio = document.createElement('input');
+          radio.type = 'radio';
+          radio.name = 'plan-machine';
+          radio.value = m.key;
+          radio.disabled = !m.usable;
+          const name = document.createElement('b');
+          name.textContent = m.label;
+          const info = document.createElement('small');
+          info.textContent = [m.gpus, m.description, m.usable ? '' : '不能用:' + m.why,
+            m.key === last ? '上次用的' : ''].filter(Boolean).join(' · ');
+          label.append(radio, name, info);
+          box.append(label);
+          radios.push(radio);
+        }
+        machineCtl = radios;
+        text.textContent = '先选一台机器,选了再生成计划(远端要通过 SSH 查 GPU 和缺的东西,可能要几十秒)。';
+      } catch (error) {
+        if (closed || error.name === 'AbortError') return;
+        fail('读机器列表失败:' + error.message);
+        return;
+      }
+    }
+    let planSeq = 0;
+    async function loadPlan(machine) {
+      const seq = ++planSeq;
+      base = base0 + (machine ? '&machine=' + encodeURIComponent(machine) : '');
+      fields.innerHTML = '';
+      ok.style.display = 'none';
+      cancel.textContent = '取消';
+      text.textContent = machine ? '正在生成 ' + machine + ' 上的计划…' : '正在生成计划…';
+      try {
+        const plan = await api(base, {method: 'POST', signal: controller.signal});
+        if (closed || seq !== planSeq) return;
+        showPlan(plan, machine);
+      } catch (error) {
+        if (closed || error.name === 'AbortError' || seq !== planSeq) return;
+        text.textContent = '⚠ ' + error.message;
+        cancel.textContent = '关闭';
+      }
+    }
+    function showPlan(plan, machine) {
       text.textContent = plan.text || '';
       if (plan.nothing) { cancel.textContent = '关闭'; return; }
       let gpuInput = null;
+      let perGpuInput = null;
       let deleteBox = null;
       if (['collect', 'eval', 'layouts'].includes(plan.kind) && plan.need_gpus) {
         const label = document.createElement('label');
@@ -4019,7 +4093,17 @@ def html_page(
         gpuInput.type = 'text';
         gpuInput.value = (plan.free_gpus || []).join(',');
         gpuInput.placeholder = '例:1,2,3';
-        label.append(gpuInput, '(默认是现在空闲的卡,逗号分隔)');
+        label.append(gpuInput, '(默认是' + (plan.machine ? ' ' + plan.machine + ' 上' : '') + '现在空闲的卡,逗号分隔)');
+        fields.append(label);
+      }
+      if (plan.kind === 'collect' && plan.need_gpus) {
+        const label = document.createElement('label');
+        label.textContent = '每卡 worker 数:';
+        perGpuInput = document.createElement('input');
+        perGpuInput.type = 'text';
+        perGpuInput.size = 3;
+        perGpuInput.value = String(plan.per_gpu || 1);
+        label.append(perGpuInput, '(一个 worker 约 14–20 GB 显存;默认按这台机器每卡显存估)');
         fields.append(label);
       }
       if (plan.kind === 'upload' && plan.deletes) {
@@ -4038,15 +4122,26 @@ def html_page(
         ok.disabled = true;
         const params = new URLSearchParams({confirm: '1'});
         if (gpuInput) params.set('gpus', gpuInput.value.trim());
+        if (perGpuInput && perGpuInput.value.trim()) params.set('per_gpu', perGpuInput.value.trim());
         if (deleteBox && deleteBox.checked) params.set('delete', '1');
         try {
           const started = await api(base + '&' + params.toString(), {method: 'POST'});
+          if (machine) { try { localStorage.setItem('rsj-machine-' + kind, machine); } catch (e) { /* 无痕模式 */ } }
           hint.textContent = started.message || '已启动';
           close();
         } catch (error) {
           fail('启动失败:' + error.message);
         }
       };
+    }
+    if (machineCtl) {
+      machineCtl.forEach((radio) => { radio.onchange = () => { if (radio.checked) loadPlan(radio.value); }; });
+      return;  // 等用户选机器
+    }
+    try {
+      const plan = await api(base, {method: 'POST', signal: controller.signal});
+      if (closed) return;
+      showPlan(plan, '');
     } catch (error) {
       if (closed || error.name === 'AbortError') return;
       fail(error.message);
@@ -4183,6 +4278,7 @@ def html_page(
 {pipe_assets}
 <dialog id="plan-dialog">
   <h2 id="plan-title"></h2>
+  <div id="plan-machine" class="plan-machine"></div>
   <pre id="plan-text"></pre>
   <div id="plan-fields" class="plan-fields"></div>
   <div class="dialog-actions">
@@ -4301,15 +4397,32 @@ class StatusRequestHandler(SimpleHTTPRequestHandler):
         query = parse_qs(urlparse(self.path).query)
         group = (query.get("group") or [""])[0]
         task = (query.get("task") or [""])[0]
+        policy = (query.get("policy") or [""])[0]  # eval 格按模型分开:只评这个模型
+        machine = (query.get("machine") or [""])[0]  # 采集 / 评测:docs/servers.json 里选的机器
+        per_gpu_s = (query.get("per_gpu") or [""])[0]
+        if action == "machines":  # 采集 / 评测对话框里先选机器
+            import servers
+
+            try:
+                return self._json({"machines": servers.machines()})
+            except servers.ServerError as error:
+                return self._json({"error": str(error)}, status=500)
+        if machine and not re.fullmatch(r"[A-Za-z0-9_.-]+", machine):
+            return self._json({"error": "机器名不合法"}, status=400)
+        if per_gpu_s and not per_gpu_s.isdigit():
+            return self._json({"error": "每卡 worker 数要填数字"}, status=400)
+        per_gpu = int(per_gpu_s) if per_gpu_s else None
         if not re.fullmatch(r"[A-Za-z0-9_]+", group) or not re.fullmatch(r"[A-Za-z0-9_]+", task):
             return self._json({"error": "组名 / 任务名不合法"}, status=400)
+        if policy and not re.fullmatch(r"[A-Za-z0-9_]+", policy):
+            return self._json({"error": "模型名不合法"}, status=400)
         try:
             if action == "stop":
                 return self._json({"message": group_jobs.stop(group, task)})
             if action not in group_jobs.BUTTONS:
                 return self._json({"error": f"未知操作 {action}"}, status=404)
             if (query.get("confirm") or [""])[0] != "1":
-                return self._json(group_jobs.plan(action, group, task))
+                return self._json(group_jobs.plan(action, group, task, policy=policy, machine=machine))
             if action == "upload":
                 with JOBS_LOCK:
                     busy = [kind for kind in ("export_v30", "export_v21", "upload_hdf5", "upload_lerobot")
@@ -4318,7 +4431,7 @@ class StatusRequestHandler(SimpleHTTPRequestHandler):
                     return self._json({"error": f"{JOB_LABELS[busy[0]]}正在运行,等它结束后再按组导出 / 上传"},
                                       status=409)
             job = group_jobs.start(action, group, task, (query.get("gpus") or [""])[0],
-                                   (query.get("delete") or [""])[0] == "1")
+                                   (query.get("delete") or [""])[0] == "1", policy, machine, per_gpu)
         except group_jobs.PlanError as error:
             return self._json({"error": str(error)}, status=409)
         except subprocess.TimeoutExpired:
