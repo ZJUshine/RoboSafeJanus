@@ -3,7 +3,7 @@
 
 from task.RoboDojo.experts import put_X_refrigerator as fridge
 
-SPEC = fridge.Spec("sandwich", grasp="top", full_close=True)
+SPEC = fridge.Spec("sandwich", grasp="top")
 
 
 def play_once(env):

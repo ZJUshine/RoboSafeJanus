@@ -9,7 +9,7 @@
 1. 初始 -> 抓取:水平地从机器人一侧抓物体顶边中部。GraspGenX 候选里只留接近方向接近水平(z 分量在 ``APPROACH_Z`` 内)、
    与 ``PREFER`` 夹角不超过 ``MAX_YAW``、手指横跨物体厚度方向(余弦 > ``FINGER_ACROSS``)、TCP 在顶边以下 ``TOP_DEPTH``、
    沿接近方向在宽度的 ``WIDTH_FRAC`` 之间的,再沿手指方向平移到物体厚度中面上;相机朝上的排前面。
-   取第一个第 1 段(夹爪张开,物体是障碍物)和预测的第 2 段都能规划的候选。合拢夹爪只合到比物体薄 ``Spec.squeeze``。
+   取第一个第 1 段(夹爪张开,物体是障碍物)和预测的第 2 段都能规划的候选。夹爪合到 0(默认速度,60 步)。
 2. 抓取 -> 槽里的松手位姿:物体竖直、厚度方向沿槽宽、包围盒中心对准槽中心,手指最低处离面包机顶面 ``FINGER_CLEAR``
    (槽比物体深,手指不进槽);两个槽 x 两个朝向 x 三个高度,取第一个能规划的。物体按实测的 ee->物体 变换挂到夹爪上
    (薄片上按 ``common.SLAB_SPACING`` 排一层碰撞球,半径 ``Spec.held_r``;物体在面包架槽里离铁丝只有 2 mm,起点按需缩小球半径),整条轨迹按 ``CARRY_SLOW`` 放慢。
@@ -29,7 +29,6 @@ ARM = "right_arm"
 @dataclass(frozen=True)
 class Spec:
     label: str
-    squeeze: float = 0.004  # 夹爪合到比物体包围盒厚度窄这么多(手指驱动刚度 2300 N/m,每指约 4.6 N)
     # 手中物体碰撞球半径;None 时取 common.SLAB_R_FRAC x 包围盒半厚度(碰撞体比外观厚的物体要给真实半厚度)
     held_r: float = None
 
@@ -62,7 +61,6 @@ FINGER_ACROSS = 0.95  # 手指与物体厚度方向夹角余弦的下限:斜着�
 TOP_DEPTH = (0.015, 0.05)  # TCP 在物体顶边以下的深度
 WIDTH_FRAC = (0.35, 0.65)  # TCP 沿接近方向在物体宽度上的位置(0 = 靠机器人的边)
 MAX_GRASPS = 40
-GENTLE_STEPS = 150
 # 放入
 FINGER_CLEAR = (
     0.01,
@@ -250,7 +248,7 @@ def _play(env, spec):
     refresh_shelf()
     lo, hi = common._bbox(env, label)
     width = float(hi[2] - lo[2])
-    closed = common._finger_spheres(width - spec.squeeze, FINGER_SPACING)
+    closed = common._finger_spheres(width, FINGER_SPACING)
 
     def set_world(with_obj, tool):
         obstacles = dict(fixed)
@@ -276,9 +274,9 @@ def _play(env, spec):
         open_tool=common._finger_spheres(common.GRIPPER_OPEN, FINGER_SPACING),
         held_tool=held_tool,
         releases=releases,
-        # 只合到比物体薄 spec.squeeze、并且慢慢合:X5 的手指驱动很硬,一下合到底时两指压进 1.2 cm 的吐司片 7 mm
-        # (PhysX 接触被挤穿),抬起时吐司片从指间滑掉
-        close=lambda g: env.close_gripper(ARM, common._grip_val(env, width - spec.squeeze), GENTLE_STEPS),
+        # 合到 0、默认 60 步:只合到比物体窄几毫米时夹紧力太小,评测逐步执行动作时物体从指间滑掉;
+        # 10 步就合到底时抬起即滑掉(2026-11-15 put_bread_toaster 实测,60 / 150 步都 8/8)
+        close=lambda g: env.close_gripper(ARM),
         carry_slow=CARRY_SLOW,
         after_close=refresh_shelf,
     )

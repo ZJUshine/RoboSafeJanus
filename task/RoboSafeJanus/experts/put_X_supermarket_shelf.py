@@ -16,7 +16,7 @@ risky 任务与对应 safe 任务的交互物相同、货架陈列不同,复用�
    方向(+y)夹角不超过 ``Spec.max_yaw``,TCP 离桌面在 ``Spec.tcp_z`` 之间、离物体顶面不少于 ``Spec.top_margin``,
    夹持宽度不超过 ``FINGER_MAX``。
    ``"top"``(矮的商品):自上而下(接近方向 z 分量在 ``TOP_APPROACH_Z`` 内,偏好朝货架里向下倾 45 度)。
-   合拢:``Spec.full_close`` 时慢慢合到底,否则慢慢合到比物体窄 ``Spec.squeeze``。
+   合拢:夹爪合到 0(默认速度,60 步)。
 2. 松手位姿:``side`` 时手中物体先扶正(物体 z 轴转到竖直),再绕竖直轴转到"接近方向的水平投影朝货架里"(再加
    ``YAW_EXTRA``);``top`` 时夹爪转到朝货架里、向下倾 ``INSERT_PITCHES``。物体包围盒中心落在层板上 ``TARGETS``
    (货架坐标系:x 是进深,y 朝陈列区那一侧取正)处,离层板前沿 / 背板 / 侧板 / 陈列品不少于 ``CLEAR``,物体底面离层板
@@ -45,11 +45,9 @@ class Spec:
     label: str
     grasp: str = "side"  # "side" | "top",见模块说明第 1 条
     tcp_z: tuple = (0.08, 0.16)  # side:TCP 离桌面
-    squeeze: float = 0.006  # 夹爪合到比物体(沿手指方向)窄这么多
     top_margin: float = 0.025  # side:TCP 离物体顶面至少这么远
     finger_max: float = common.FINGER_MAX  # 夹持宽度上限(个别略宽于默认 7.5 cm 的物体单独放宽)
     max_yaw: float = 50.0  # side:接近方向的水平投影与货架朝里方向的最大夹角
-    full_close: bool = False  # 慢慢合到底(用满夹紧力)
     # 物体当障碍物时长宽方向的缩放:圆角、细颈的瓶子包围盒比瓶身大,抓取 / 松手位姿上 cuRobo 偏保守的腕部碰撞球就伸进了
     # 包围盒,判碰撞,要缩小(同 put_X_refrigerator)
     obstacle_shrink: tuple = (1.0, 1.0, 1.0)
@@ -91,7 +89,6 @@ APPROACH_Z = (-0.35, 0.35)
 FINGER_Z_MAX = 0.35
 TOP_APPROACH_Z = (-1.0, -0.6)
 MAX_GRASPS = 40
-GENTLE_STEPS = 150
 FINGER_SPACING = 0.008  # 手指碰撞球铺满的间距(同 put_X_refrigerator)
 BOTTLE_SHRINK = (0.8, 0.8, 1.0)
 DISPLAY_SHRINK = 0.95  # 陈列品当障碍物时按这个比例缩小(都竖着立在层板上,手中物体从旁边擦过)
@@ -167,16 +164,6 @@ def _grasps(env, spec, inward):
     if not keep:
         raise PlanFailError(f"{arm}: no {spec.grasp} grasp for {label} ({len(candidates)} candidates)")
     return keep[:MAX_GRASPS]
-
-
-def _close(env, spec, grasp):
-    """慢慢合拢(同 put_X_refrigerator)。"""
-    fingers = common._mat(grasp)[:3, 1]
-    width = float(np.ptp(common._bbox_points(env, spec.label)[common.FACE_CENTERS] @ fingers))
-    if spec.full_close or width > spec.finger_max:
-        env.close_gripper(common.ARM, 0.0, GENTLE_STEPS)
-    else:
-        env.close_gripper(common.ARM, common._grip_val(env, width - spec.squeeze), GENTLE_STEPS)
 
 
 def _display_rects(env, shelf):
@@ -273,7 +260,7 @@ def _play(env, spec):
         open_tool=common._finger_spheres(common.GRIPPER_OPEN, FINGER_SPACING),
         held_tool=held_tool,
         releases=lambda ee, ee_T_obj: _release_poses(env, spec, geom, shelf, sign, inward, ee, ee_T_obj, local),
-        close=lambda g: _close(env, spec, g),
+        close=lambda g: env.close_gripper(common.ARM),
         carry_slow=CARRY_SLOW,
         retreat=RETREAT if spec.grasp == "side" else 0.0,
     )

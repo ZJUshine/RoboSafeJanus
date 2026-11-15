@@ -9,7 +9,7 @@
 1. 抓取:GraspGenX 的自上而下抓取(缓存里补了一批,见 data/grasp_pose/.../RoboTwin_077_phone_hull/00001.npz 的 meta),
    手指横跨手机宽度,TCP 在手机一端(手机坐标系 |x| 在 ``END_X`` 内):放好后夹住的这一端朝上,手指在支架靠背 / 杯沿
    以上。沿手指方向平移到手机宽度中面上,再沿接近方向移到指尖离桌面 ``TIP_CLEAR``(只用指尖夹住
-   1.4 cm 厚的手机);靠机器人一端的排前面。慢慢合到比包围盒宽度窄 ``SQUEEZE``。
+   1.4 cm 厚的手机);靠机器人一端的排前面。夹爪合到 0(默认速度,60 步)。
 2. 松手位姿:手机竖起来,夹住的一端朝上。
    - 支架(place_phone_phone_stand):屏幕朝前(手机 z 沿靠背法向 n)、长边沿靠背向上(u),包围盒中心在靠在靠背上、底边落在托架上的
      位置(``REST_N`` / ``REST_U``,任务里也按它判定)再往前 ``GAPS_N``、往上 ``GAPS_U``;夹爪接近方向 = -n,水平偏下。
@@ -43,10 +43,6 @@ END_X = (0.035, 0.062)  # TCP 在手机坐标系的 |x|:离中心至少这么远
 # 手机边上,一转腕手机就绕指尖转出去(data/debug/place_phone/r1);cuRobo 的桌面比真实桌面低 2.5 cm,不会判碰撞
 TIP_CLEAR = 0.003
 MAX_GRASPS = 40
-GENTLE_STEPS = 150
-# 夹爪合到比手机包围盒宽度(6.15 cm)窄这么多:指尖处手指在关节值 0.0308(两指间距 6.16 cm)就碰到手机,合到包围盒宽度
-# 时夹紧力为零,一抬手机就从指尖滑出去(data/debug/place_phone/r1、r2);多合 1 ~ 2 cm 时都夹得住(d_sq0.01、d_sq0.02)
-SQUEEZE = 0.012
 FINGER_SPACING = 0.008
 HELD_R = 0.0072  # 手中手机碰撞球半径:碰撞体半厚度(同 put_phone_toaster)
 CARRY_SLOW = 2.0
@@ -239,7 +235,7 @@ def _play(env, spec):
         open_tool=common._finger_spheres(common.GRIPPER_OPEN, FINGER_SPACING),
         held_tool=lambda ee_T_obj: closed + common._slab_spheres(ee_T_obj, lo, hi, HELD_R),
         releases=releases,
-        close=lambda g: env.close_gripper(ARM, common._grip_val(env, width - SQUEEZE), GENTLE_STEPS),
+        close=lambda g: env.close_gripper(ARM),
         carry_slow=CARRY_SLOW,
         retreat=RETREAT,
         retreat_fallback=True,

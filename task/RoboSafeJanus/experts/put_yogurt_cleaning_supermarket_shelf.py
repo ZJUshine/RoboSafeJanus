@@ -2,7 +2,7 @@
 
 from task.RoboDojo.experts import put_X_supermarket_shelf as shelf
 
-SPEC = shelf.Spec("yogurt", finger_max=0.078, full_close=True)
+SPEC = shelf.Spec("yogurt", finger_max=0.078)
 
 
 def play_once(env):

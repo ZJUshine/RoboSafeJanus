@@ -14,7 +14,7 @@
    ``Spec.top_margin``。
    ``"top"``(矮的物体:苹果、彩椒、打火机、充电宝、三明治):自上而下(接近方向 z 分量在 ``TOP_APPROACH_Z`` 内,偏好朝冰箱里
    向下倾 45 度),夹持宽度不超过 ``FINGER_MAX``。
-   合拢:``Spec.full_close`` 时慢慢合到底,否则慢慢合到比物体窄 ``Spec.squeeze``。
+   合拢:夹爪合到 0(默认速度,60 步)。
 2. 松手位姿:``side`` 时手中物体绕竖直轴转到"接近方向的水平投影朝冰箱里"(再加 ``YAW_EXTRA``;先试把物体扶正,物体自己的
    z 轴转到竖直),``top`` 时夹爪转到朝冰箱里、向下倾 ``INSERT_PITCHES``(物体随之倾斜,松手后落到隔板上;竖直的夹爪加腕部
    比 30 cm 的净高还高)。物体包围盒中心落在隔板上 ``TARGETS`` 处、离隔板前沿 / 后壁 / 侧壁不少于 ``SHELF_MARGIN``,
@@ -40,10 +40,8 @@ FRIDGE = "refrigerator"
 class Spec:
     label: str
     grasp: str = "side"  # "side" | "top",见模块说明第 1 条
-    squeeze: float = 0.006  # 夹爪合到比物体(沿手指方向)窄这么多
     top_margin: float = 0.025  # side:TCP 离物体顶面至少这么远(瓶颈细的瓶子要抓在瓶身上)
     max_yaw: float = 60.0  # side:接近方向的水平投影与冰箱朝里方向的最大夹角
-    full_close: bool = False  # 慢慢合到底(用满夹紧力):重的瓶子只合到比物体窄 squeeze 时抬起就滑掉
     carry_slow: float = None  # 搬运那段轨迹的放慢倍数;None 时取 CARRY_SLOW
     # 物体当障碍物时长宽方向的缩放:瓶子(圆角、细颈)的包围盒比瓶身大,抓取 / 松手位姿上 cuRobo 偏保守的腕部碰撞球就
     # 伸进了包围盒,判碰撞,要缩小;方盒子用原尺寸,缩小了手臂会擦着它过去把它碰倒
@@ -89,7 +87,6 @@ FINGER_Z_MAX = 0.35
 TCP_Z = (0.10, 0.16)  # side:TCP 离桌面
 TOP_APPROACH_Z = (-1.0, -0.6)
 MAX_GRASPS = 40
-GENTLE_STEPS = 150
 # 手指碰撞球铺满的间距(见 common._finger_spheres):竖着的高瓶子从稀疏的手指球之间漏过去,
 # 规划出的路径让手指从侧面扫倒它
 FINGER_SPACING = 0.008
@@ -190,17 +187,6 @@ def _ik_sorted(env, planner, root, grasps, set_grasp_world):
     return [c for c, k in zip(grasps, ok) if k] + [c for c, k in zip(grasps, ok) if not k]
 
 
-def _close(env, spec, grasp):
-    """慢慢合拢(同 put_X_toaster):X5 手指驱动很硬,一下合到底会把物体挤歪、挤穿。包围盒沿手指方向比
-    ``FINGER_MAX`` 宽时(GraspGenX 夹的是细的地方)包围盒量不出夹持宽度,慢慢合到底。"""
-    fingers = common._mat(grasp)[:3, 1]
-    width = float(np.ptp(common._bbox_points(env, spec.label)[common.FACE_CENTERS] @ fingers))
-    if spec.full_close or width > common.FINGER_MAX:
-        env.close_gripper(ARM, 0.0, GENTLE_STEPS)
-    else:
-        env.close_gripper(ARM, common._grip_val(env, width - spec.squeeze), GENTLE_STEPS)
-
-
 def _release_poses(spec, geom, fridge, inward, ee, ee_T_obj, local):
     """隔板上的松手位姿候选 ``[ee 位姿, ...]``,见模块说明第 2 条;``local`` 是物体包围盒采样点(物体坐标系)。"""
     obj = ee @ ee_T_obj
@@ -286,7 +272,7 @@ def _play(env, spec):
         open_tool=open_tool,
         held_tool=held_tool,
         releases=lambda ee, ee_T_obj: _release_poses(spec, geom, fridge, inward, ee, ee_T_obj, local),
-        close=lambda g: _close(env, spec, g),
+        close=lambda g: env.close_gripper(ARM),
         carry_slow=spec.carry_slow or CARRY_SLOW,
         retreat=(spec.retreat or RETREAT) if spec.grasp == "side" else 0.0,
         return_fallback=spec.return_grow is not None,

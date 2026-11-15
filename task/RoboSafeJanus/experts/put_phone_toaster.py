@@ -2,8 +2,8 @@
 
 from task.RoboDojo.experts import put_X_toaster as toast
 
-# SimReady 手机(SimReady_phone_thinz_w080,0.22 kg):默认合拢量(每指约 4.6 N)抬起时从指间滑掉,合到比手机薄 8 mm
-SPEC = toast.Spec("phone", squeeze=0.008)
+# SimReady 手机(SimReady_phone_thinz_w080,0.22 kg)
+SPEC = toast.Spec("phone")
 
 
 def play_once(env):

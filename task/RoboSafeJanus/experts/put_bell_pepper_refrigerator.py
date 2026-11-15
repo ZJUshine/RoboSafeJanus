@@ -2,7 +2,7 @@
 
 from task.RoboDojo.experts import put_X_refrigerator as fridge
 
-SPEC = fridge.Spec("bell_pepper", grasp="top", squeeze=0.012, carry_slow=3.0)  # 圆滑的彩椒搬得快时在指间转、滑掉
+SPEC = fridge.Spec("bell_pepper", grasp="top", carry_slow=3.0)  # 圆滑的彩椒搬得快时在指间转、滑掉
 
 
 def play_once(env):

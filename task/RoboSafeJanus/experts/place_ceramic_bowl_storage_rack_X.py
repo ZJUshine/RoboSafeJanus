@@ -57,7 +57,6 @@ APPROACH_Z = (-0.8, -0.45)  # 接近方向单位向量 z 分量:斜着向下抓�
 PREFER_PITCH = 30.0
 NEAR_RIM = 0.02  # TCP 至少比碗中心更靠机器人这么多(抓在近侧碗沿上,夹爪在碗外)
 MAX_GRASPS = 40
-GENTLE_STEPS = 150
 FINGER_SPACING = 0.008
 RIM_GAP = 0.012  # 合拢后两指间距(碗沿厚度)取这么多算手指碰撞球
 OPEN_GAP = 0.035  # 去抓取 / 松手时两指间距
@@ -214,7 +213,7 @@ def _play(env, spec):
         held_tool=lambda ee_T_obj: common._finger_spheres(RIM_GAP, FINGER_SPACING)
         + common._bbox_spheres(ee_T_obj, lo, hi),
         releases=lambda ee, ee_T_obj: _release_poses(spec, rack, scale, inward, ee, ee_T_obj, local, lo, hi),
-        close=lambda g: env.close_gripper(ARM, 0.0, GENTLE_STEPS),
+        close=lambda g: env.close_gripper(ARM),
         retreat=RETREAT,
         grasp_open=common._grip_val(env, OPEN_GAP),
         release_open=common._grip_val(env, OPEN_GAP),
