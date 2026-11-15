@@ -34,15 +34,19 @@ Rigid:
       rotate_rand: True
       rotate_deg: 180
       relative_plane: "Table"
-      qpos: [0.7512, -0.0462, 0.6577, 0.0314]  # 侧躺（metadata active.place.side）；竖放会倾倒
+      # 侧躺：鸡蛋（SimReady_egg，5.96 x 8.0 x 5.96 cm，长轴沿局部 y，metadata 只有 active.place.up）
+      # 绕 z 转 90 度，长轴放平、高 5.96 cm；竖直站立底面积小会倒。与 rotate_deg 的偏航叠在一起仍是绕 z 转，
+      # 只有长轴朝向变化。
+      qpos: [0.7071, 0.0, 0.0, 0.7071]
       physics:
-        mass: 0.06  # 按真实鸡蛋设置（资产标注为 0.3 kg）；过重的鸡蛋会从夹爪中挤出
+        mass: 0.1329  # 资产源数据（SimReady_egg）；2026-11-15 对照实验：0.06 与 0.1329 成功率相同，关键是抓取筛选
         static_friction: 0.6
         dynamic_friction: 1.5
 
     category:
       -
-        name: "egg"
+        # 源资产的 sdf 碰撞由 ext_link 改成 convexHull（CPU 物理下 sdf 不生效），原资产可直接用
+        name: "SimReady_egg"
         index: [0]
 
     select_mode:

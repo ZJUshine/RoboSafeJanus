@@ -3,7 +3,7 @@
 
 三步(``common._pick_place_direct``,只在夹爪开合时停):
 
-1. 抓取:GraspGenX 候选,接近方向 z 分量在 ``Spec.approach_z`` 内(偏好朝炉腔里向下倾 ``Spec.prefer_pitch``)、手指水平且垂直于炉腔朝里的方向(``FINGER_ACROSS_MIN``)、夹持宽度不超过 ``FINGER_MAX``;取第一个能规划到、且能接着规划到松手位姿的。
+1. 抓取:GraspGenX 候选,接近方向 z 分量在 ``Spec.approach_z`` 内(偏好朝炉腔里向下倾 ``Spec.prefer_pitch``)、手指水平且垂直于炉腔朝里的方向(``FINGER_ACROSS_MIN``)、夹持宽度不超过 ``FINGER_MAX``、两指连线离物体中心不超过 ``Spec.center_tol``(设了的话);取第一个能规划到、且能接着规划到松手位姿的。
 2. 放置:先原地抬起 ``LIFT`` 并把腕部转成伸入姿态(接近方向水平朝炉腔里),再伸到转盘中心上方松手。物体是摩擦夹持,腕部
    一转它就往下荡;转腕和伸入叠在一起时物体边进边沉,把微波炉顶走,所以转腕单独做完。手中那段按 ``CARRY_SLOW`` 放慢。
 3. 退出归位:松开后沿接近方向退出炉口(直接回程的起点在炉腔里,cuRobo 规划不出来),再回初始关节。
@@ -28,6 +28,8 @@ class Spec:
     round: bool = False
     approach_z: tuple = (-1.0, -0.7)  # 接近方向单位向量 z 分量的范围,默认自上而下
     prefer_pitch: float = 90.0  # 偏好的接近方向:朝炉腔里向下倾这么多度(90 = 竖直向下)
+    # 两指连线(过 TCP、沿手指方向)离物体包围盒中心的距离上限(米);None 不限。圆的物体夹偏了合拢时会被挤出指间
+    center_tol: float | None = None
 
 
 @dataclass(frozen=True)
@@ -131,9 +133,20 @@ def _grasps(env, spec, inward):
         if abs(common._mat(g)[:3, 1] @ across) > FINGER_ACROSS_MIN
         and np.ptp(pts @ common._mat(g)[:3, 1]) <= common.FINGER_MAX
     ]
+    if spec.center_tol is not None:
+        lo, hi = common._bbox(env, spec.label)
+        center = (common._mat(env.get_obj_pose(spec.label)) @ [*((lo + hi) / 2), 1.0])[:3]
+        bias = env.robot(common.ARM).gripper_bias
+        out = [(g, sc) for g, sc in out if _finger_line_dist(common._mat(g), bias, center) <= spec.center_tol]
     if not out:
         raise PlanFailError(f"{common.ARM}: no grasp candidate for {spec.label} ({len(candidates)} before filtering)")
     return out[:MAX_GRASPS]
+
+
+def _finger_line_dist(m, bias, point):
+    """``point`` 到两指连线的距离:连线过 TCP(ee 原点沿接近方向 x 前移 ``bias``),沿手指方向 y。"""
+    r = point - (m[:3, 3] + bias * m[:3, 0])
+    return float(np.linalg.norm(r - (r @ m[:3, 1]) * m[:3, 1]))
 
 
 def _release_poses(env, geom, mwm, inward, finger, held_ee, face_ee):

@@ -2,7 +2,8 @@
 
 from task.RoboDojo.experts import heat_X_microwave as microwave
 
-SPEC = microwave.Spec("egg", round=True, approach_z=(-1.0, -0.25), prefer_pitch=40.0)
+# center_tol:两指连线离鸡蛋中心 <= 1 cm,夹偏了合拢时鸡蛋会被挤出指间(2026-11-15 小批量 seed 100001 / 100020)
+SPEC = microwave.Spec("egg", round=True, approach_z=(-1.0, -0.25), prefer_pitch=40.0, center_tol=0.01)
 
 
 def play_once(env):
