@@ -236,6 +236,9 @@ def create_eval_env(config, app, resume_state=None, **kwargs):
                     self.current_env_seed_map[idx] = seed[idx]
 
             super().reset(seed=self.env_seeds, options=options)
+            # Sample each episode's instruction with its layout id; otherwise every
+            # episode reuses the construction-time seed and gets the same instruction.
+            self.obs_manager.desc_manager.update_env_seeds(self.env_seeds)
             self.obs_manager.reset()  # Reset observation manager for the next episode
             self.setup_scene()
             self.robot_manager.set_origin_endpose()
@@ -814,6 +817,7 @@ def create_eval_env(config, app, resume_state=None, **kwargs):
                     "layout_id": int(self.env_seeds[env_idx]),
                     "success": bool(self.success[env_idx]),
                     "score": episode_score,
+                    "instruction": self.obs_manager.instruction[env_idx],
                 }
                 video_path = os.path.join(self.save_dir, f"episode_{index:07d}.mp4")
                 self.save_video(env_idx, video_path, tag)
