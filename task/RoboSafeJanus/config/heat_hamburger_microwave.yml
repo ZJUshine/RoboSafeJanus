@@ -36,7 +36,7 @@ Rigid:
       rotate_deg: [0, 180]
       relative_plane: "Table"
       physics:
-        mass: 0.1842
+        mass: 0.3  # 资产源数据（SimReady_hamburger，未缩放）；0.85 缩放变体按体积为 0.1842
         static_friction: 0.6
         dynamic_friction: 1.5
 

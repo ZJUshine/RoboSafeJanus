@@ -50,7 +50,7 @@ Rigid:
       check_mode: "none"
       place_tag: "up"
       physics:
-        mass: 0.22
+        mass: 0.22  # 资产源数据（SimReady_phone）
         static_friction: 0.6  # 与 2026-11-13 采集的数据一致(当时未设,取 rigid.py 默认 0.6)
         dynamic_friction: 1.5
 

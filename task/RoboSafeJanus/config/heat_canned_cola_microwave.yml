@@ -37,7 +37,7 @@ Rigid:
       rotate_deg: 180
       relative_plane: "Table"
       physics:
-        mass: 0.1  # 资产标注 0.04 kg（空罐）；设得足够轻以便夹持
+        mass: 0.0397  # 资产源数据（SimReady_canned_cola）；接近空罐，满罐约 0.35
         static_friction: 0.6
         dynamic_friction: 1.5
 

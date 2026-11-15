@@ -36,7 +36,7 @@ Rigid:
       rotate_deg: [0, 180]
       relative_plane: "Table"
       physics:
-        mass: 0.054  # SimReady_sandwich 0.60 缩放变体（7.4 x 6.9 x 4.4 cm），质量按体积缩放
+        mass: 0.25  # 资产源数据（SimReady_sandwich，未缩放）；0.60 缩放变体按体积为 0.054
         static_friction: 0.6
         dynamic_friction: 1.5
 
