@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 from pathlib import Path
 import shutil
 import subprocess
@@ -66,8 +67,9 @@ def human_bytes(value: float) -> str:
     return f"{value:.2f} TB"
 
 
-def iter_datasets(local_dir: Path) -> list[dict]:
-    """``[{version, group, level, task, path, files: {相对路径: Path}}]``。"""
+def iter_datasets(local_dir: Path, only: set[str] | None = None) -> list[dict]:
+    """``[{version, group, level, task, path, files: {相对路径: Path}}]``;``only`` 给出时只看这些任务
+    (先按名字筛再遍历文件,不碰别的任务正在转换、写到一半的目录)。"""
     datasets = []
     for version in VERSIONS:
         root = local_dir / version
@@ -76,6 +78,8 @@ def iter_datasets(local_dir: Path) -> list[dict]:
         for group_dir in sorted(p for p in root.iterdir() if p.is_dir()):
             for level_dir in sorted(p for p in group_dir.iterdir() if p.is_dir()):
                 for task_dir in sorted(p for p in level_dir.iterdir() if p.is_dir()):
+                    if only is not None and task_dir.name not in only:
+                        continue
                     info = task_dir / "meta" / "info.json"
                     if not info.is_file():
                         continue
@@ -99,8 +103,16 @@ def keep_remote(path: str) -> bool:
     return path.split("/", 1)[0] in VERSIONS
 
 
-def running_exports() -> list[str]:
-    """正在运行的 LeRobot 转换进程(导出会重写/清理数据集目录)。"""
+def _mentions(line: str, task: str) -> bool:
+    """命令行里出现了这个任务名(前后不是名字字符:``.../v30/<g>/<l>/<task>``、``flat.<task>.arx_x5`` 都算)。"""
+    return re.search(rf"(?<![A-Za-z0-9_]){re.escape(task)}(?![A-Za-z0-9_])", line) is not None
+
+
+def running_exports(scoped: set[str] | None = None) -> list[str]:
+    """正在运行的 LeRobot 转换进程(导出会重写/清理数据集目录)。
+
+    ``scoped`` 给出时(``--task`` / ``--group``)只算会碰到这些任务的转换:命令行里有这些任务名的,
+    或者看不出是哪个任务的(全量导出等)。别的任务的单任务转换只写它自己的目录,不拦。"""
     try:
         result = subprocess.run(
             ["pgrep", "-af", r"export_lerobot\.sh|transform_lerobot_v(30|21)_format\.py|lerobot_v30_to_v21\.py"],
@@ -108,7 +120,12 @@ def running_exports() -> list[str]:
         )
     except OSError:
         return []
-    return [line for line in result.stdout.splitlines() if line.strip()]
+    lines = [line for line in result.stdout.splitlines() if line.strip()]
+    if not scoped:
+        return lines
+    known = set(task_groups())
+    return [line for line in lines
+            if any(_mentions(line, t) for t in scoped) or not any(_mentions(line, t) for t in known)]
 
 
 def build_stable_view(local_files: dict[str, Path], view_dir: Path) -> int:
@@ -154,8 +171,9 @@ def main() -> int:
 
     if not args.repo_id:
         parser.error("--repo_id is required (or set MS_LEROBOT_REPO_ID)")
+    scoped = set(scoped_tasks(args.group, args.task)) if (args.group or args.task) else None
     if not args.force:
-        blockers = running_exports()
+        blockers = running_exports(scoped)
         if blockers:
             print("[upload_lerobot] LeRobot 转换正在运行，等它结束后再上传（或加 --force）：",
                   file=sys.stderr)
@@ -165,9 +183,8 @@ def main() -> int:
     local_dir = Path(args.local_dir).resolve()
     if not local_dir.is_dir():
         sys.exit(f"[upload_lerobot] local_dir not found: {local_dir}")
-    datasets = iter_datasets(local_dir)
-    if args.group or args.task:
-        scoped = set(scoped_tasks(args.group, args.task))
+    datasets = iter_datasets(local_dir, scoped)
+    if scoped is not None:
         if not args.dry_run:
             require_pipeline_approval(sorted(scoped), "upload_lerobot")
         datasets = [dataset for dataset in datasets if dataset["task"] in scoped]
