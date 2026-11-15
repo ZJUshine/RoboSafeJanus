@@ -1,0 +1,10 @@
+"""heat_canned_cola_microwave 的脚本专家:SimReady 可乐罐(原尺寸,6.2 cm 宽、12.1 cm 高)竖放在微波炉前方,
+自上而下抓罐身上部,转平后躺着送进炉腔。照抄 ``heat_canned_drink_microwave``,流程见 ``heat_X_microwave``。"""
+
+from task.RoboDojo.experts import heat_X_microwave as microwave
+
+SPEC = microwave.Spec("canned_cola", round=True)
+
+
+def play_once(env):
+    microwave.play_once(env, SPEC)
