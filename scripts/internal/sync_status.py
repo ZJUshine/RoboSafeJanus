@@ -205,6 +205,20 @@ def list_video_files(directories: list[Path]) -> dict:
     cams = [cam for cam in CAM_ORDER if cam in used]
     cams += sorted(used - set(CAM_ORDER), key=cam_rank)
     return {"entries": entries, "cameras": cams, "total": len(entries)}
+
+
+def attach_eval_safety(entries: list[dict], result_file: Path) -> None:
+    """S1 变体评测:按 ``_result.json`` 的 details(键 = 视频的 episode 序号)给视频条目加
+    ``violation`` / ``violated_by``(安全 / 违规);S1.0 的 details 没有 violation,不加。"""
+    try:
+        details = json.loads(result_file.read_text(encoding="utf-8")).get("details") or {}
+    except (OSError, ValueError):
+        return
+    for entry in entries:
+        detail = details.get(str(entry["episode"]))
+        if isinstance(detail, dict) and "violation" in detail:
+            entry["violation"] = bool(detail["violation"])
+            entry["violated_by"] = list(detail.get("violated_by") or [])
 LEVEL_ORDER = {"safe_tasks": 0, "risky_tasks": 1}
 
 # 脚本专家/任务实现所在目录:三类文件齐全才算"可采集"。
@@ -3222,6 +3236,10 @@ DASHBOARD_CSS = BASE_CSS + """
   .video-list { max-height: 62vh; overflow: auto; background: var(--panel-2); border-radius: 7px; padding: 6px; display: flex; flex-direction: column; gap: 4px; }
   .video-ep { display: flex; justify-content: space-between; gap: 8px; background: var(--panel); border: 1px solid var(--border); border-radius: 6px; color: var(--text); padding: 5px 8px; font-size: 12px; cursor: pointer; text-align: left; }
   .video-ep.active { background: var(--hover); }
+  .video-marks { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
+  .video-marks .safety { font-size: 11px; padding: 0 5px; border-radius: 4px; border: 1px solid; }
+  .video-marks .safety.safe { background: var(--good-bg); color: var(--good-fg); border-color: currentColor; }
+  .video-marks .safety.risk { background: var(--bad-bg); color: var(--bad-fg); border-color: currentColor; }
   .video-stage video { width: 100%; max-height: 62vh; background: #000; border-radius: 7px; }
   .video-cams { display: flex; gap: 6px; margin-bottom: 10px; flex-wrap: wrap; }
   .video-cams button { background: var(--panel); border: 1px solid var(--border); border-radius: 999px; color: var(--muted); padding: 3px 11px; font-size: 12px; cursor: pointer; }
@@ -3399,7 +3417,9 @@ def html_page(
             video_btn = (
                 f'<button class="video-btn eval-video-btn" type="button" data-scope="eval"'
                 f' data-run="{html.escape(run_dir)}" data-label="{html.escape(row["name"] + " · " + label)}"'
-                f' title="看这次评测的视频(✅ 成功 / ❌ 失败,{n_video} 条)">🎬 {n_video}</button>'
+                f' title="看这次评测的视频(✅ 成功 / ❌ 失败'
+                f'{" · 🛡️ 安全 / ⚠️ 违规" if result.get("variant") not in (None, "", "S1.0") else ""},{n_video} 条)">'
+                f'🎬 {n_video}</button>'
                 if n_video else ""
             )
             # 结果直接写进评测的 S1 子列(`eval:<S1.x>:<policy>`,由 pipeline_page.eval_cell 显示):只留 success / n /
@@ -3621,7 +3641,15 @@ def html_page(
     videoMeta.textContent = 'EP ' + String(entry.episode).padStart(7, '0') + ' · ' + entry.cam
       + (entry.variant ? ' · ' + entry.variant : '')
       + (entry.result ? ' · ' + entry.result : '')
+      + (entry.violation === undefined ? '' : ' · ' + safetyText(entry))
       + ' · ' + entry.path;
+  }
+
+  // S1 变体评测:每条视频的安全检查结果(/api/videos 从 _result.json 的 details 带回来)
+  function safetyText(entry) {
+    if (entry.violation === undefined) return '';
+    return entry.violation ? '⚠️ 违规' + (entry.violated_by && entry.violated_by.length
+      ? '(' + entry.violated_by.join('、') + ')' : '') : '🛡️ 安全';
   }
 
   function renderVideoEpisodes() {
@@ -3643,7 +3671,18 @@ def html_page(
       left.textContent = 'EP ' + String(entry.episode).padStart(7, '0')
         + (multipleVariants ? ' · ' + entry.variant : '');
       const right = document.createElement('span');
-      right.textContent = entry.result === 'success' ? '✅' : (entry.result === 'fail' ? '❌' : '');
+      right.className = 'video-marks';
+      const mark = document.createElement('span');
+      mark.textContent = entry.result === 'success' ? '✅' : (entry.result === 'fail' ? '❌' : '');
+      mark.title = entry.result === 'success' ? '任务成功' : (entry.result === 'fail' ? '任务失败' : '');
+      right.append(mark);
+      if (entry.violation !== undefined) {
+        const safety = document.createElement('span');
+        safety.className = 'safety ' + (entry.violation ? 'risk' : 'safe');
+        safety.textContent = entry.violation ? '⚠️ 违规' : '🛡️ 安全';
+        safety.title = safetyText(entry);
+        right.append(safety);
+      }
       button.append(left, right);
       button.addEventListener('click', () => playVideo(entry, button));
       videoList.append(button);
@@ -4632,6 +4671,7 @@ class StatusRequestHandler(SimpleHTTPRequestHandler):
                 return self._json({"error": f"评测目录不存在: {rel}"}, status=404)
             title = directory.parent.name
             data = list_video_files([directory])
+            attach_eval_safety(data["entries"], directory / "_result.json")
         else:
             task = (query.get("task") or [""])[0]
             snapshot = type(self).snapshot or {}
