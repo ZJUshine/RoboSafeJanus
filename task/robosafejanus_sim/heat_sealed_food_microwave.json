@@ -635,7 +635,7 @@
     },
     "heat_hazelnut_microwave": {
       "assets": {
-        "hazelnut": "Rigid/SimReady_hazelnut/00000",
+        "hazelnut": "Rigid/SimReady_hazelnut_s300/00000",
         "microwave": "Articulation/SimReady_microwave/00000"
       },
       "success": {

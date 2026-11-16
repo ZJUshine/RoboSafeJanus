@@ -1,0 +1,56 @@
+Articulation:
+  -
+    common:
+      # 正面（门一侧）朝向机器人（-y）。SimReady 微波炉（ext_assets SimReady D00516，原尺寸）：body 0.51 x
+      # 0.37 x 0.30 m，铰链在左边缘，关节 0 度就是门开 90 度（门 link 已经在 -y 侧立着），open_door() 把它置到
+      # 下限 0 度；门打开后立在 x ~= center - 0.27、y ~= center - 0.56 .. center - 0.16。桌上相机支架底板占
+      # y -0.515..-0.425、x +-0.15，所以中心 y 要 >= 0.14；中心还要在左臂导轨（x ~= -0.3，+-0.09）右侧。
+      # 位置定死（与 heat_egg_microwave / heat_sandwich_microwave 一致）：中心 (0.05, 0.16)、朝 -y。
+      xlim: [0.05, 0.05]
+      ylim: [0.16, 0.16]
+      rotate_rand: False
+      # 资产的 bbox 把开着的门（伸到 y -0.56）也算进去，占地圆会大到手放不下榛子；这里显式给 body 的占地尺寸。
+      footprint: [0.508, 0.367]
+      margin: -0.05
+      relative_plane: "Table"
+
+    category:
+      -
+        name: "SimReady_microwave"
+        index: [0]
+
+    select_mode:
+      nums: [1]
+      mode: "unique"
+      label: ["microwave"]
+
+Rigid:
+  -
+    common:
+      # 位于微波炉前方右臂一侧，在打开的门扫过的区域之外。范围同 heat_egg_microwave（那边按采集结果定的）：
+      # 榛子 x3.0 后 5.19 x 5.28 x 4.83 cm，取同样的范围，不做特殊收窄。
+      xlim: [0.10, 0.30]
+      ylim: [-0.35, -0.22]
+      rotate_rand: True
+      rotate_deg: 180
+      relative_plane: "Table"
+      # 近球形（5.19 x 5.28 x 4.83 cm），metadata 的 active.place.up 是单位四元数、底面 z = 0，默认姿态就是
+      # 平放，不需要 qpos；绕 z 的随机偏航对抓取没有影响，留着增加布局多样性。
+      physics:
+        mass: 0.0020  # 资产源数据（robodojo_format 的 SimReady/hazelnut，未缩放）；x3.0 变体按体积为 0.054。
+                      # 注意变体 metadata 的 0.54 是错的：scaled_variant 缩放的是 ext_link 估出来的 0.02（< 0.02 kg 按
+                      # bbox 体积 x 300 估），这里按源数据填，运行时会覆盖成 0.002 kg
+        static_friction: 0.6
+        dynamic_friction: 1.5
+
+    category:
+      -
+        # 3.0 倍缩放变体（原尺寸 1.73 x 1.76 x 1.61 cm 太矮：X5 指尖要往 TCP 下方伸 1.9 cm，GraspGenX 的抓取点又落在
+        # 球底，指尖会插进桌面 2 cm，桌面过滤后没有可用抓取）。缩放后抓取点回到球心，指尖离桌 2--13 mm
+        name: "SimReady_hazelnut_s300"
+        index: [0]
+
+    select_mode:
+      nums: [1]
+      mode: "unique"
+      label: ["hazelnut"]
