@@ -28,20 +28,23 @@ Rigid:
   -
     common:
       # 位于微波炉前方右臂一侧，在打开的门扫过的区域之外。
-      # 范围同 heat_sandwich_microwave（那边按采集结果定的）
+      # SimReady 罐头（ext_assets food_processed_cannedFood_p01）：原始尺寸 8.5 x 8.5 x 4.0 cm，超过 X5 夹爪
+      # 7.5 cm 的抓取上限，所以用 s080 缩放变体 6.8 x 6.8 x 3.2 cm（矮罐，自上而下抓取）。
+      # 支撑圆半径 3.4 cm，y 下限 -0.35 时远端 -0.384，距相机支架底板（y -0.515..-0.425）仍有 4 cm 以上；
+      # x 范围沿用 heat_sandwich_microwave。
       xlim: [0.10, 0.30]
       ylim: [-0.35, -0.22]
       rotate_rand: True
       rotate_deg: 180
       relative_plane: "Table"
       physics:
-        mass: 0.1  # 资产没有质量；设得足够轻以便夹持
+        mass: 0.0315  # 资产源数据（SimReady_canned_food，未缩放）；s080 变体按体积缩放为 0.0161
         static_friction: 0.6
         dynamic_friction: 1.5
 
     category:
       -
-        name: "can_s075"  # Clutter/can 缩放至 0.75（宽 7.4 cm；原始 9.9 cm 超过 7.5 cm 的抓取上限）
+        name: "SimReady_canned_food_s080"
         index: [0]
 
     select_mode:
