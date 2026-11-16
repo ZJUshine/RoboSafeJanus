@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """看板大表里的后台任务:ingest 格的「下载资产」(按组),collect / exchange / upload 格的「采集」「转换」「上传」(按任务)。
 
-任务在独立会话里后台运行,看板重启不会中断。状态在 ``<RSJ_PIPELINE_DIR>/_jobs/<group>.<task>.json``,
-日志在 ``data/.cache/jobs/task_<task>_<kind>_<时间>.log``(``RSJ_PIPELINE_DIR`` 的上一级)。每个任务同一时间只跑一个,
+任务在独立会话里后台运行,看板重启不会中断。状态在 ``<RSJ_PIPELINE_DIR>/_jobs/<group>.<task>.json``(按模型的评测是
+``<group>.<task>.<policy>.json``),日志在 ``data/.cache/jobs/task_<task>_<kind>_<时间>.log``(``RSJ_PIPELINE_DIR`` 的
+上一级)。每个任务同一时间只跑一个;按模型的评测各有一条记录,同一任务的不同模型可以同时评(也可以和采集同时跑),
+同一个模型、或"评所有模型"和单模型之间仍互斥。
 转换同一时间只有一个(共用扁平视图),上传同一时间只有一个(共用 ModelScope 缓存和硬链接视图);
 转换 A 和上传 B 可以同时跑。不同任务的采集可以同时跑在不同的卡上。
 
@@ -47,7 +49,7 @@
     python scripts/internal/group_jobs.py start eval <group> <task> --gpus 2,3,5,7 [--machine autodl]
     python scripts/internal/group_jobs.py start layouts <group> <task> --gpus 2
     python scripts/internal/group_jobs.py status
-    python scripts/internal/group_jobs.py stop <group> <task>
+    python scripts/internal/group_jobs.py stop <group> <task> [--policy Pi_0]
 """
 
 from __future__ import annotations
@@ -119,8 +121,17 @@ def now() -> str:
     return datetime.now().isoformat(timespec="seconds")
 
 
-def job_id(group: str, task: str) -> str:
-    return f"{group}.{task}"
+def job_id(group: str, task: str, policy: str = "") -> str:
+    """任务记录的键:``<group>.<task>``;按模型的评测是 ``<group>.<task>.<policy>``(同一任务的不同模型能同时评)。"""
+    return f"{group}.{task}.{policy}" if policy else f"{group}.{task}"
+
+
+def job_key(job: dict) -> str:
+    """记录自己的键:只有 eval 带 policy(别的 kind 的 policy 总是空)。"""
+    return job_id(job["group"], job["task"], job.get("policy") or "" if job.get("kind") == "eval" else "")
+
+
+_RUN_POLICY = ""  # run 进程里:按模型评测时是模型名,update_job / _step 按它找自己的记录(别的进程总是空)
 
 
 # ---------------------------------------------------------------------------
@@ -139,16 +150,17 @@ def read_job(jid: str) -> dict | None:
         return None
 
 
-def write_job(job: dict) -> None:
+def write_job(job: dict, jid: str | None = None) -> None:
+    """写到 ``jid``(默认按记录内容算的键;改旧记录时传读出来的键,别写到新位置)。"""
     JOB_DIR.mkdir(parents=True, exist_ok=True)
-    path = job_path(job_id(job["group"], job["task"]))
+    path = job_path(jid or job_key(job))
     tmp = path.with_suffix(f".json.{os.getpid()}.tmp")
     tmp.write_text(json.dumps(job, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     os.replace(tmp, path)
 
 
 def update_job(group: str, task: str, **fields) -> None:
-    job = read_job(job_id(group, task)) or {"group": group, "task": task}
+    job = read_job(job_id(group, task, _RUN_POLICY)) or {"group": group, "task": task}
     job.update(fields)
     write_job(job)
 
@@ -204,7 +216,7 @@ def log_tail(path: str | None, limit: int = 6000, lines: int = 40) -> str:
 
 
 def all_jobs(tail: bool = True) -> dict[str, dict]:
-    """``{<group>.<task>: 任务记录}``(旧的按组记录没有 task,跳过)。"""
+    """``{<group>.<task>[.<policy>]: 任务记录}``(旧的按组记录没有 task,跳过)。"""
     out = {}
     if not JOB_DIR.exists():
         return out
@@ -342,10 +354,10 @@ def collect_progress(task: str) -> dict:
     return {"text": f"已采 {have}/{rp.COLLECT_TARGET} 条", "done": have, "total": rp.COLLECT_TARGET}
 
 
-def eval_progress(group: str, task: str) -> dict | None:
-    """每个要评的模型评了几条(取同一 ckpt 下条数最多的那次,和续评的口径一样)。"""
+def eval_progress(group: str, task: str, policy: str = "") -> dict | None:
+    """每个要评的模型评了几条(取同一 ckpt 下条数最多的那次,和续评的口径一样);``policy`` 给出时只看这个模型。"""
     try:
-        models = [m for m in eval_models(group, task, set()) if m["step"]]
+        models = [m for m in eval_models(group, task, set()) if m["step"] and (not policy or m["policy"] == policy)]
     except (OSError, ValueError, KeyError):
         return None
     if not models:
@@ -370,7 +382,7 @@ def job_progress(job: dict) -> dict | None:
             return {"text": f"{r['machine']} · " + " · ".join(f"{p} {n}/{EVAL_NUM}" for p, n in counts.items()),
                     "done": sum(counts.values()), "total": EVAL_NUM * len(counts)}
         if kind == "eval":
-            return eval_progress(job["group"], task)
+            return eval_progress(job["group"], task, job.get("policy") or "")
         if kind == "collect":
             return collect_progress(task)
         if kind == "upload":
@@ -562,11 +574,20 @@ def _collected(task: str) -> str | None:
     return None
 
 
-def _busy(group: str, task: str) -> None:
-    job = read_job(job_id(group, task))
-    if job and job_state(job) == "running":
-        what = job_label(job)
-        raise PlanError(f"{task} 已有任务在运行:{what}(开始于 {job.get('started_at')})")
+def _busy(group: str, task: str, kind: str = "", policy: str = "") -> None:
+    """同一条记录还在跑时不能再开。按模型的评测(``<group>.<task>.<policy>``)只和同一模型、
+    以及这个任务"评所有模型"的评测互斥;"评所有模型"还要等这个任务的单模型评测都结束。
+    (2026-11-16 前按模型的评测也记在 ``<group>.<task>``、带 policy 字段,这种只和同一模型互斥。)"""
+    jobs = [read_job(job_id(group, task, policy))]
+    if kind == "eval" and policy:
+        task_job = read_job(job_id(group, task)) or {}
+        if task_job.get("kind") == "eval" and task_job.get("policy", "") in ("", policy):
+            jobs.append(task_job)
+    elif kind == "eval":
+        jobs += [j for j in running(("eval",)) if j["group"] == group and j["task"] == task and j.get("policy")]
+    for job in jobs:
+        if job and job_state(job) == "running":
+            raise PlanError(f"{task} 已有任务在运行:{job_label(job)}(开始于 {job.get('started_at')})")
 
 
 def pending_remote_collect(group: str, task: str) -> dict | None:
@@ -1055,7 +1076,7 @@ def eval_plan(group: str, task: str, policy: str = "", machine: str = "") -> dic
                 "都评满了,不用再跑。")
         return {"group": group, "task": task, "kind": "eval", "policy": policy, "queue": [], "nothing": True,
                 **_machine_fields(m), "text": "\n".join([*lines, "", tail])}
-    jid = job_id(group, task)
+    jid = job_id(group, task, policy)
     busy = busy_gpus(("collect", "eval", "layouts"), jid, m["key"])
     gpus = machine_gpus(m)
     free = [g["index"] for g in gpus if g["used"] < FREE_GPU_MIB and g["index"] not in busy]
@@ -1287,8 +1308,8 @@ def start(button: str, group: str, task: str, gpus: str = "", delete: bool = Fal
           machine: str = "", per_gpu: int | None = None) -> dict:
     """重新算一遍计划,通过后在新会话里后台运行 ``run``;返回任务记录。``policy`` 只用于 eval(只评这个模型);
     ``machine`` 只用于 collect / eval(``docs/servers.json`` 的键,空 = 默认机器);``per_gpu`` 只用于 collect。"""
-    _busy(group, task)
     policy = policy if button == "eval" else ""
+    _busy(group, task, "eval" if button == "eval" else "", policy)
     if button not in MACHINE_KINDS:
         machine, per_gpu = "", None
     machine = machine_cfg(machine)["key"] if button in MACHINE_KINDS else ""
@@ -1333,14 +1354,18 @@ def start(button: str, group: str, task: str, gpus: str = "", delete: bool = Fal
         proc = subprocess.Popen([sys.executable, "-u", str(Path(__file__).resolve()), "run", *args], cwd=str(ROOT),
                                 stdout=fp, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
                                 start_new_session=True, env={**os.environ, "OMNI_KIT_ACCEPT_EULA": "YES"})
-    update_job(group, task, pid=proc.pid)
-    return read_job(job_id(group, task))
+    job = read_job(job_key(job)) or job  # run 进程可能已经改过(排队 / 步骤)
+    job["pid"] = proc.pid
+    write_job(job)
+    return job
 
 
-def stop(group: str, task: str) -> str:
-    job = read_job(job_id(group, task))
+def stop(group: str, task: str, policy: str = "") -> str:
+    """停掉 ``<group>.<task>``(``policy`` 给出时是这个模型的评测)那条记录的任务。"""
+    jid = job_id(group, task, policy)
+    job = read_job(jid)
     if not job or job_state(job) != "running":
-        raise PlanError(f"{task} 没有在运行的任务")
+        raise PlanError(f"{task} {policy + ' ' if policy else ''}没有在运行的任务")
     note = ""
     r = job.get("remote")
     if r and r.get("pid"):  # 远端的也停掉(setsid 起的:pgid == pid)
@@ -1352,7 +1377,8 @@ def stop(group: str, task: str) -> str:
         except (PlanError, sv.ServerError) as error:
             note = f";⚠ 远端没停掉:{error}"
     os.killpg(job["pid"], signal.SIGTERM)  # 新会话:pgid == pid,连同采集 worker 一起停
-    update_job(group, task, stopped=True, step="已停止", returncode=-15, finished_at=now())
+    job.update(stopped=True, step="已停止", returncode=-15, finished_at=now())
+    write_job(job, jid)
     return f"已停止 {task} 的{job_label(job)}{note};再点一次按钮会续上"
 
 
@@ -1820,6 +1846,8 @@ def run_eval_remote(group: str, task: str, gpus: str, policy: str, m: dict) -> i
 
 def run(kind: str, group: str, task: str, gpus: str = "", delete: bool = False, policy: str = "",
         machine: str = "", per_gpu: int | None = None) -> int:
+    global _RUN_POLICY
+    _RUN_POLICY = policy if kind == "eval" else ""
     update_job(group, task, pid=os.getpid())
     code = 1
     try:
@@ -1841,7 +1869,7 @@ def run(kind: str, group: str, task: str, gpus: str = "", delete: bool = False, 
         print(f"[group_jobs] {error}", flush=True)
         update_job(group, task, step=str(error).splitlines()[0][:200])
     finally:
-        job = read_job(job_id(group, task)) or {}
+        job = read_job(job_id(group, task, _RUN_POLICY)) or {}
         if not job.get("stopped"):
             update_job(group, task, returncode=code, finished_at=now(),
                        step=(job.get("step") if kind in ("ingest", "eval", "layouts") else "完成") if code == 0
@@ -1877,6 +1905,7 @@ def main() -> int:
     s = sub.add_parser("stop")
     s.add_argument("group")
     s.add_argument("task")
+    s.add_argument("--policy", default="", help="停这个模型的评测(按模型的评测记录)")
     a = ap.parse_args()
     try:
         if a.cmd == "plan":
@@ -1891,7 +1920,7 @@ def main() -> int:
                 where = f" @{j['machine']}" if j.get("machine") else ""
                 print(f"{jid}: {j['label']}{where} {j['state']} · {j.get('step')} · {j.get('started_at')} · {j.get('log')}")
         else:
-            print(stop(a.group, a.task))
+            print(stop(a.group, a.task, a.policy))
     except PlanError as error:
         print(error, file=sys.stderr)
         return 2

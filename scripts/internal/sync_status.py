@@ -3841,6 +3841,7 @@ def html_page(
         stopBtn.dataset.kind = 'stop';
         stopBtn.dataset.group = job.group;
         stopBtn.dataset.task = job.task;
+        if (jid.split('.').length > 2) stopBtn.dataset.policy = job.policy || '';  // 按模型的评测记录
         stopBtn.textContent = '⏹ 停止';
         head.append(stopBtn);
       }
@@ -3854,7 +3855,17 @@ def html_page(
   function paintGroupCells() {
     const cellKind = {ingest: 'ingest', collect: 'collect', export: 'exchange', upload: 'upload', eval: 'eval',
       layouts: 'layouts'};
-    const jobOf = (el) => groupJobs[el.dataset.group + '.' + el.dataset.task];
+    // 按模型的评测记录键是 <group>.<task>.<policy>;"评所有模型"(命令行)和 2026-11-16 前的评测记在 <group>.<task>
+    const jobOf = (el) => {
+      const base = el.dataset.group + '.' + el.dataset.task;
+      const policy = el.dataset.policy;
+      if (el.dataset.kind !== 'eval' || !policy) return groupJobs[base];
+      const own = groupJobs[base + '.' + policy];
+      const old = groupJobs[base];
+      const shared = old && old.kind === 'eval' && (!old.policy || old.policy === policy) ? old : null;
+      if (!own) return shared;
+      return shared && shared.state === 'running' ? shared : own;
+    };
     const kindOf = (job) => cellKind[job.kind];
     document.querySelectorAll('.gjob[data-group]').forEach((cell) => {
       let job = jobOf(cell);
@@ -4213,12 +4224,13 @@ def html_page(
     const group = button.dataset.group;
     const task = button.dataset.task;
     if (button.dataset.kind === 'stop') {
-      const job = groupJobs[group + '.' + task] || {};
+      const policy = button.dataset.policy || '';
+      const job = groupJobs[group + '.' + task + (policy ? '.' + policy : '')] || {};
       const ok = await confirmSimple('停止 ' + task, '停止 ' + task + ' 的' + (job.label || '任务') + '?\\n'
         + '采集的分片会保留,之后再点「采集」会续采;上传中断后再点会续传。');
       if (!ok) return;
       try {
-        const params = new URLSearchParams({group: group, task: task});
+        const params = new URLSearchParams({group: group, task: task, policy: policy});
         const data = await api('api/group/stop?' + params.toString(), {method: 'POST'});
         hint.textContent = data.message || '已停止';
       } catch (error) {
@@ -4433,7 +4445,8 @@ class StatusRequestHandler(SimpleHTTPRequestHandler):
     _group_states: dict = {}
 
     def _group_jobs(self) -> dict:
-        """任务按钮的后台任务(group_jobs.py,键 ``<group>.<task>``);刚结束的触发一次重建,页面上的条数 / 状态跟着更新。"""
+        """任务按钮的后台任务(group_jobs.py,键 ``<group>.<task>``,按模型的评测 ``<group>.<task>.<policy>``);
+        刚结束的触发一次重建,页面上的条数 / 状态跟着更新。"""
         import group_jobs
 
         try:
@@ -4478,7 +4491,7 @@ class StatusRequestHandler(SimpleHTTPRequestHandler):
             return self._json({"error": "模型名不合法"}, status=400)
         try:
             if action == "stop":
-                return self._json({"message": group_jobs.stop(group, task)})
+                return self._json({"message": group_jobs.stop(group, task, policy)})
             if action not in group_jobs.BUTTONS:
                 return self._json({"error": f"未知操作 {action}"}, status=404)
             if (query.get("confirm") or [""])[0] != "1":
