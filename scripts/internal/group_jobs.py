@@ -51,6 +51,7 @@
 from __future__ import annotations
 
 import argparse
+import fcntl
 from datetime import datetime
 import json
 import os
@@ -283,6 +284,50 @@ def upload_progress(log: str | None) -> dict | None:
     return {"text": prefix + " · ".join(bits), "done": int(min(sent, size)), "total": int(size)}
 
 
+_EXPORT_CACHE: dict[str, dict] = {}
+_RE_EXPORT_PHASE = re.compile(r"^\[export_lerobot\] (v30|v21) ")
+_RE_EXPORT_BAR = re.compile(r"(?:^Converting |^\[v30_to_v21\] videos).*?:\s+\d+%\|[^|]*\|\s*(\d+)/(\d+)")
+
+
+def export_progress(log: str | None) -> dict | None:
+    """LeRobot 转换日志的进度:v3.0 按 episode(转换器的 tqdm),v2.1 按视频(切片重编码的 tqdm)。
+
+    两段各自一条进度条(和上传一样,换阶段从 0 开始),文字前面写已完成的阶段。日志里夹着大量
+    SVT/ffmpeg 输出,只读新增的部分。"""
+    if not log:
+        return None
+    c = _EXPORT_CACHE.setdefault(log, {"pos": 0, "rest": "", "phase": "", "done": 0, "total": 0, "finished": []})
+    try:
+        with open(log, "rb") as fp:
+            fp.seek(c["pos"])
+            chunk = fp.read()
+            c["pos"] = fp.tell()
+    except OSError:
+        return None
+    text = c["rest"] + chunk.decode("utf-8", "replace")
+    lines = re.split(r"[\r\n]", text)
+    c["rest"] = lines.pop()
+    for line in lines:
+        line = re.sub(r"^(?:\x1b\[A)+", "", line)
+        if m := _RE_EXPORT_PHASE.match(line):
+            if c["phase"] and c["phase"] not in c["finished"]:
+                c["finished"].append(c["phase"])
+            c.update(phase=m[1], done=0, total=0)
+        elif (m := _RE_EXPORT_BAR.search(line)) and c["phase"]:
+            c["done"], c["total"] = int(m[1]), int(m[2])
+        elif line.startswith("[export_lerobot] failed"):
+            c["failed"] = True
+    if not c["phase"] or (c.get("failed") and not c["total"]):  # 没开始就失败:让面板写失败原因
+        return None
+    name = {"v30": "v3.0", "v21": "v2.1"}
+    prefix = "".join(f"{name[x]} ✓ · " for x in c["finished"])
+    unit = "条" if c["phase"] == "v30" else "个视频"
+    if not c["total"]:
+        return {"text": prefix + f"转 {name[c['phase']]} 准备中", "done": 0, "total": 0}
+    return {"text": prefix + f"转 {name[c['phase']]} {c['done']}/{c['total']} {unit}",
+            "done": c["done"], "total": c["total"]}
+
+
 def collect_progress(task: str) -> dict:
     n = rp._hdf5_count(task)
     shard = sum(1 for _ in (SHARDS / task).glob("w*/**/*.hdf5")) if (SHARDS / task).exists() else 0
@@ -323,6 +368,8 @@ def job_progress(job: dict) -> dict | None:
             return collect_progress(task)
         if kind == "upload":
             return upload_progress(job.get("log"))
+        if kind == "export":
+            return export_progress(job.get("log"))
         if kind == "layouts":
             return layouts_progress(job["group"], job)
     except (OSError, ValueError, KeyError, TypeError):
@@ -617,12 +664,58 @@ UPLOADERS = (("HDF5", "src/data_collect/upload_to_modelscope.py", HDF5_REPO),
              ("LeRobot", "src/data_collect/upload_lerobot_to_modelscope.py", LEROBOT_REPO))
 
 
-def _no_other_transfer(group: str, task: str, kind: str) -> None:
-    """同类任务串行:两个转换会互相删扁平视图 RoboSafeJanus-Benchmark-flat 的软链接,两个上传共用
-    ``.cache/modelscope`` 断点 / 哈希缓存和硬链接视图目录。转换 A 和上传 B 只读写各自的任务目录,可以同时跑。"""
-    busy = running((kind,), exclude=job_id(group, task))
-    if busy:
-        raise PlanError(f"{busy[0]['task']} 正在{KIND_LABEL[busy[0]['kind']]},等它结束")
+# 同类任务串行(排队):两个转换会互相删扁平视图 RoboSafeJanus-Benchmark-flat 的软链接,两个上传共用
+# ``.cache/modelscope`` 断点 / 哈希缓存和硬链接视图目录。转换 A 和上传 B 只读写各自的任务目录,可以同时跑。
+# 按钮随时能点:后台进程先排队(任务记录 ``waiting``),按点击顺序(started_at)轮到了再做。
+QUEUED_KINDS = ("export", "upload")
+QUEUE_POLL = 5  # 排队时每几秒看一次轮到没有
+
+
+def _queue_ahead(kind: str, jid: str, mine: tuple[str, str] | None = None) -> tuple[list[dict], list[dict]]:
+    """``kind`` 这一类排在 ``jid`` 前面的任务:``(正在做的, 排队中且先点的)``。``mine`` = (started_at, jid),
+    None 时(还没点)所有排队中的都算在前面。"""
+    jobs = [(j_id, j) for j_id, j in all_jobs(tail=False).items()
+            if j.get("kind") == kind and j["state"] == "running" and j_id != jid]
+    active = [j for _, j in jobs if not j.get("waiting")]
+    waiting = sorted(((j.get("started_at") or "", j_id), j) for j_id, j in jobs if j.get("waiting"))
+    ahead = [j for key, j in waiting if mine is None or key < mine]
+    return active, ahead
+
+
+def _queue_note(group: str, task: str, kind: str) -> str:
+    """计划里写一行排队情况;前面没人时空串。"""
+    active, ahead = _queue_ahead(kind, job_id(group, task))
+    if not active and not ahead:
+        return ""
+    names = [f"{j['task']}(进行中)" for j in active] + [f"{j['task']}(排队)" for j in ahead]
+    return (f"⏳ 前面还有 {len(names)} 个{KIND_LABEL[kind]}:{'、'.join(names)}。"
+            f"确认后排队,按点击顺序一个个做。")
+
+
+def _wait_turn(group: str, task: str, kind: str):
+    """后台 run 进程:排队直到前面同类的都做完,拿到 ``<kind>.lock``(进程退出自动释放)后返回锁文件。"""
+    jid = job_id(group, task)
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
+    lock = open(LOG_DIR / f".{kind}.lock", "w")  # noqa: SIM115 - 持有到进程结束
+    mine = ((read_job(jid) or {}).get("started_at") or now(), jid)
+    shown = None
+    while True:
+        active, ahead = _queue_ahead(kind, jid, mine)
+        if not active and not ahead:
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:  # 前一个刚拿到锁、还没改记录
+                pass
+            else:
+                update_job(group, task, waiting=False)
+                return lock
+        first = (active or ahead or [{}])[0]
+        text = (f"排队中:前面 {len(active) + len(ahead)} 个"
+                + (f"(正在{KIND_LABEL[kind]} {first['task']})" if active else ""))
+        if text != shown:
+            _step(group, task, text)
+            shown = text
+        time.sleep(QUEUE_POLL)
 
 
 def export_plan(group: str, task: str) -> dict:
@@ -632,10 +725,11 @@ def export_plan(group: str, task: str) -> dict:
     reason = _collected(task)
     if reason:
         raise PlanError(f"{task} 还不能转换:{reason}")
-    _no_other_transfer(group, task, "export")
     need = export_needed(task)
+    queue = _queue_note(group, task, "export") if need else ""
     lines = [f"{task}:导出 LeRobot v3.0 + v2.1(export_lerobot.sh --format both)", "",
              f"现在:{need}" if need else "已经转换过,v3.0 / v2.1 条数都和 hdf5 一致,不用再转",
+             *(["", queue] if queue else []),
              "", "转换完不用审核,接着点 upload 格的「上传」。" if need else ""]
     return {"group": group, "task": task, "kind": "export", "reason": need, "nothing": not need,
             "text": "\n".join(lines).rstrip()}
@@ -651,8 +745,8 @@ def upload_plan(group: str, task: str, dry_run: bool = True) -> dict:
     need = export_needed(task)
     if need:
         raise PlanError(f"{task} 还不能上传:LeRobot 没转换好({need}),先点 exchange 格的「转换」")
-    _no_other_transfer(group, task, "upload")
-    lines = [f"{task}:上传 HDF5 + LeRobot 到 ModelScope(只动这个任务的目录)", ""]
+    queue = _queue_note(group, task, "upload")
+    lines = [f"{task}:上传 HDF5 + LeRobot 到 ModelScope(只动这个任务的目录)", "", *([queue, ""] if queue else [])]
     deletes = uploads = 0
     if dry_run:
         for label, script, repo in UPLOADERS:
@@ -1150,6 +1244,8 @@ def start(button: str, group: str, task: str, gpus: str = "", delete: bool = Fal
            "tasks": p.get("tasks") or [task],
            "finished_at": None, "returncode": None, "step": "启动中", "gpus": gpu_list, "delete": bool(delete),
            "policy": policy, "machine": machine, "args": args}
+    if kind in QUEUED_KINDS:
+        job.update(waiting=True, step="排队中")
     old = read_job(job_id(group, task)) or {}
     if kind == "collect" and old.get("remote") and not old["remote"].get("merged"):
         job["remote"] = old["remote"]  # 上次远端没拉回的:同一台机器接着做(collect_plan 已经查过是同一台)
@@ -1570,6 +1666,8 @@ def run(kind: str, group: str, task: str, gpus: str = "", delete: bool = False, 
     update_job(group, task, pid=os.getpid())
     code = 1
     try:
+        if kind in QUEUED_KINDS:
+            _turn = _wait_turn(group, task, kind)  # noqa: F841 - 锁要拿到进程结束
         if kind == "ingest":
             code = run_ingest(group)
         elif kind == "collect":

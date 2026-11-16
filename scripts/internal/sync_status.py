@@ -1199,6 +1199,9 @@ def job_reason(job: dict) -> str:
 def jobs_snapshot() -> dict:
     with JOBS_LOCK:
         jobs = {kind: dict(job) for kind, job in JOBS.items()}
+        for kind, job in jobs.items():
+            job["items"] = list(JOB_ITEMS.get(kind) or [])
+            job["queue"] = [", ".join(entry["items"]) or "?" for entry in JOB_QUEUE.get(kind) or []]
     import group_jobs
 
     for kind, job in jobs.items():
@@ -1228,12 +1231,32 @@ def job_status_line(log_path: Path) -> str:
     return next((line[len("[status] "):].strip() for line in reversed(lines) if line.startswith("[status] ")), "")
 
 
-def launch_job(kind: str, runner, out_dir: Path, on_done=None, progress=None) -> None:
+JOB_QUEUE: dict[str, list[dict]] = {}  # kind -> 排队等着的 launch_job 参数(只在看板进程里,重启会丢)
+JOB_ITEMS: dict[str, list[str]] = {}  # kind -> 正在做的条目(如 "Pi_0/<key>"),按钮判断是不是已经在做 / 排队
+
+
+def launch_job(kind: str, runner, out_dir: Path, on_done=None, progress=None,
+               items: list[str] | None = None, queue: bool = False) -> int:
+    """后台跑一个看板任务;同类在跑时 ``queue`` 为真就排队(前一个结束后按点击顺序接着跑),否则报错。
+    返回排在第几个(0 = 已经开始)。"""
+    entry = {"runner": runner, "out_dir": out_dir, "on_done": on_done, "progress": progress,
+             "items": list(items or [])}
+    with JOBS_LOCK:
+        if JOBS[kind]["state"] == "running":
+            if not queue:
+                raise RuntimeError(f"{JOB_LABELS[kind]} 正在运行")
+            JOB_QUEUE.setdefault(kind, []).append(entry)
+            return len(JOB_QUEUE[kind])
+        JOBS[kind]["state"] = "running"
+    _start_job(kind, entry)
+    return 0
+
+
+def _start_job(kind: str, entry: dict) -> None:
+    """``launch_job`` / 前一个结束时调用:状态已经占成 running。"""
     with JOBS_LOCK:
         job = JOBS[kind]
-        if job["state"] == "running":
-            raise RuntimeError(f"{JOB_LABELS[kind]} 正在运行")
-        log_path = out_dir / ".cache" / "jobs" / f"{kind}_{datetime.now():%Y%m%d_%H%M%S}.log"
+        log_path = entry["out_dir"] / ".cache" / "jobs" / f"{kind}_{datetime.now():%Y%m%d_%H%M%S}.log"
         job.update({
             "state": "running",
             "started_at": datetime.now().isoformat(timespec="seconds"),
@@ -1242,8 +1265,10 @@ def launch_job(kind: str, runner, out_dir: Path, on_done=None, progress=None) ->
             "message": "运行中",
             "log": str(log_path),
         })
-        JOB_PROGRESS[kind] = progress
+        JOB_PROGRESS[kind] = entry["progress"]
+        JOB_ITEMS[kind] = entry["items"]
     log_path.parent.mkdir(parents=True, exist_ok=True)
+    runner, on_done = entry["runner"], entry["on_done"]
 
     def run() -> None:
         code = 1
@@ -1261,11 +1286,17 @@ def launch_job(kind: str, runner, out_dir: Path, on_done=None, progress=None) ->
                     "returncode": code,
                     "message": job_status_line(log_path) or ("完成" if code == 0 else f"失败（exit {code}）"),
                 })
+                JOB_ITEMS[kind] = []
+                nxt = JOB_QUEUE[kind].pop(0) if JOB_QUEUE.get(kind) else None
+                if nxt:
+                    job["state"] = "running"  # 先占住,免得这时有人点按钮插队
             if on_done:
                 try:
                     on_done()
                 except Exception:  # noqa: BLE001 - 刷新失败不影响任务结果
                     pass
+            if nxt:
+                _start_job(kind, nxt)
 
     threading.Thread(target=run, daemon=True).start()
 
@@ -3773,7 +3804,7 @@ def html_page(
       name.textContent = (job.task === '__group__' ? job.group : (job.task || jid)) + ' · ' + (job.label || job.kind);
       const state = document.createElement('span');
       state.className = 'state ' + (job.state === 'running' ? 'running' : (job.state === 'done' ? 'done' : 'failed'));
-      state.textContent = groupStates[job.state] || job.state;
+      state.textContent = job.state === 'running' && job.waiting ? '排队中' : (groupStates[job.state] || job.state);
       const time = document.createElement('span');
       time.textContent = (job.started_at || '') + (job.finished_at ? ' → ' + job.finished_at : '');
       head.append(name, state, time);
@@ -3812,7 +3843,7 @@ def html_page(
       if (job && cell.dataset.policy && job.policy && job.policy !== cell.dataset.policy) job = null;
       const prog = job && job.progress && job.progress.text;
       cell.textContent = !job ? '' : job.state === 'running'
-        ? job.label + '中 · ' + (prog || job.step || '')
+        ? (job.waiting ? job.label + ' · ' + (job.step || '排队中') : job.label + '中 · ' + (prog || job.step || ''))
         : job.label + (groupStates[job.state] || job.state) + (prog ? ' · ' + prog : '')
           + ' · ' + String(job.finished_at || '').replace('T', ' ').slice(5, 16);
       cell.title = '';
@@ -3855,6 +3886,12 @@ def html_page(
 
       card.append(head);
       card.append(progressEl(job));
+      if (job.queue && job.queue.length) {
+        const q = document.createElement('div');
+        q.className = 'jwhy';
+        q.textContent = '⏳ 排队 ' + job.queue.length + ' 个:' + job.queue.join('、');
+        card.append(q);
+      }
       jobsBox.append(card);
     }
     renderGroupJobs(groups);
@@ -3863,9 +3900,12 @@ def html_page(
       if (!btn || !jobs[jobKinds[id]]) continue;
       btn.disabled = !serverMode || jobs[jobKinds[id]].state === 'running';
     }
-    const modelBusy = jobs.download_model && jobs.download_model.state === 'running';
+    // 模型下载排队:别的模型在下载时也能点(排到后面);只有这个模型正在下 / 已经在队列里才灰掉
+    const dm = jobs.download_model || {};
+    const modelBusy = new Set([...(dm.state === 'running' ? dm.items || [] : []),
+      ...(dm.queue || []).flatMap((q) => q.split(', '))]);
     document.querySelectorAll('.download-model-btn').forEach((btn) => {
-      btn.disabled = !serverMode || modelBusy;
+      btn.disabled = !serverMode || (btn.dataset.label ? modelBusy.has(btn.dataset.label) : dm.state === 'running');
     });
     const wandbBusy = ['download_wandb', 'upload_wandb', 'sync_wandb'].some(
       (kind) => jobs[kind] && jobs[kind].state === 'running'
@@ -4761,23 +4801,27 @@ class StatusRequestHandler(SimpleHTTPRequestHandler):
         busy = [f"{m['policy']}/{m['key']}" for m in selected if model_downloading(m, running_model_downloads())]
         if busy:  # 看板重启后没记录的下载进程也在这里拦住,免得两个进程写同一批文件
             return self._json({"error": "已经在下载:" + "、".join(busy) + "(等它结束再点)"}, status=409)
+        with JOBS_LOCK:
+            queued = {item for entry in JOB_QUEUE.get("download_model") or [] for item in entry["items"]}
+        queued = [f"{m['policy']}/{m['key']}" for m in selected if f"{m['policy']}/{m['key']}" in queued]
+        if queued:
+            return self._json({"error": "已经在下载队列里:" + "、".join(queued)}, status=409)
         tasks = [
             f"{model['policy']}/{model['key']} · {human_bytes(model['size'])} · 本地: "
             + (f"step {', '.join(model['local_steps'])}" if model["local_steps"] else "无")
             for model in selected
         ]
         if "confirm=1" in self.path:
-            try:
-                launch_job(
-                    "download_model", download_models_runner(selected, ROOT_DIR),
-                    config["out_dir"], config["rebuild"],
-                    progress=lambda: download_progress(selected, Path(config["model_local_dir"])),
-                )
-            except RuntimeError as error:
-                return self._json({"error": str(error)}, status=409)
+            position = launch_job(
+                "download_model", download_models_runner(selected, ROOT_DIR),
+                config["out_dir"], config["rebuild"],
+                progress=lambda: download_progress(selected, Path(config["model_local_dir"])),
+                items=[f"{m['policy']}/{m['key']}" for m in selected], queue=True,
+            )
             return self._json({
                 "started": True,
-                "message": f"已启动 {len(selected)} 个模型下载",
+                "message": (f"已排队:前面还有 {position} 个下载,轮到了自动开始" if position
+                            else f"已启动 {len(selected)} 个模型下载"),
             })
         return self._json({
             "count": len(selected),

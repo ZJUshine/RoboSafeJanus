@@ -108,7 +108,7 @@ def _load_hash_cache(cache_path):
 
 def _save_hash_cache(cache_path, files):
     os.makedirs(os.path.dirname(cache_path), exist_ok=True)
-    tmp = f"{cache_path}.tmp"
+    tmp = f"{cache_path}.{os.getpid()}.tmp"  # 排队时上传和别的任务的 dry-run 可能同时写
     with open(tmp, "w", encoding="utf-8") as handle:
         json.dump({"version": HASH_CACHE_VERSION, "files": files}, handle, separators=(",", ":"))
     os.replace(tmp, cache_path)
