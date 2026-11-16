@@ -4,6 +4,20 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
+# S1 执行测试变体:src/eval_client/main.py 读 ROBODOJO_EVAL_VARIANT(见 src/eval_client/variants.py)
+set_eval_variant() {
+  local value="$1" who="$2"
+  if [[ -z "${value}" || "${value}" == "S1.0" ]]; then
+    unset ROBODOJO_EVAL_VARIANT
+    return 0
+  fi
+  if [[ ! "${value}" =~ ^S1\.[1-5]$ ]]; then
+    echo "[${who}] --variant must be S1.0 … S1.5, got: ${value}" >&2
+    exit 2
+  fi
+  export ROBODOJO_EVAL_VARIANT="${value}"
+}
+
 usage() {
   cat <<'EOF'
 Usage: bash scripts/robodojo.sh <command> [options]
@@ -95,6 +109,7 @@ run_eval() {
   local eval_env="RoboDojo"
   local policy_dir=""
   local eval_num="${EVAL_NUM:-}"
+  local variant="${ROBODOJO_EVAL_VARIANT:-}"
   local dry_run="false"
 
   while [[ $# -gt 0 ]]; do
@@ -112,6 +127,7 @@ run_eval() {
       --eval-env) need_value "$@"; eval_env="$2"; shift 2 ;;
       --policy-dir) need_value "$@"; policy_dir="$(abs_path "$2")"; shift 2 ;;
       --eval-num) need_value "$@"; eval_num="$2"; shift 2 ;;
+      --variant) need_value "$@"; variant="$2"; shift 2 ;;
       --dry-run) dry_run="true"; shift ;;
       -h|--help)
         cat <<'EOF'
@@ -132,6 +148,8 @@ Common options:
   --policy-gpu ID       Policy server GPU (default: 0)
   --env-gpu ID          Isaac Sim GPU (default: 0)
   --eval-env ENV        Simulator conda env (default: RoboDojo)
+  --variant S1.x        S1 execution-test variant (S1.1 … S1.5): <task>__<variant>_<i>.json layouts, per-step
+                        safety checks, results under ...,variant=<variant>; default S1.0 (the task itself)
   --dry-run             Print command without running it
 
 Split / multi-machine: use `robodojo.sh server` + `robodojo.sh client` (see docs/SPLIT_EVAL.md).
@@ -187,12 +205,14 @@ EOF
   if [[ -n "${eval_num}" && "${eval_num}" != "native" ]]; then
     export EVAL_NUM="${eval_num}"
   fi
+  set_eval_variant "${variant}" "robodojo eval"
 
   echo "[robodojo eval] policy_dir=${policy_dir}"
-  echo "[robodojo eval] task=${task} env_cfg=${env_cfg} eval_num=${EVAL_NUM:-default}"
+  echo "[robodojo eval] task=${task} env_cfg=${env_cfg} eval_num=${EVAL_NUM:-default} variant=${ROBODOJO_EVAL_VARIANT:-S1.0}"
 
   if [[ "${dry_run}" == "true" ]]; then
-    printf '[robodojo eval] dry-run: bash %q' "${ROOT_DIR}/scripts/internal/run_policy_eval.sh"
+    printf '[robodojo eval] dry-run: %sbash %q' "${ROBODOJO_EVAL_VARIANT:+ROBODOJO_EVAL_VARIANT=${ROBODOJO_EVAL_VARIANT} }" \
+      "${ROOT_DIR}/scripts/internal/run_policy_eval.sh"
     printf ' %q' "${policy_dir}"
     printf ' %q' "${eval_args[@]}"
     printf '\n'
@@ -340,6 +360,7 @@ run_client() {
   local ckpt="external"
   local action_type="ee"
   local eval_num="${EVAL_NUM:-}"
+  local variant="${ROBODOJO_EVAL_VARIANT:-}"
   local connect_timeout="5"
   local only_tasks=""
   local tasks_file=""
@@ -363,6 +384,7 @@ run_client() {
       --ckpt) need_value "$@"; ckpt="$2"; shift 2 ;;
       --action-type) need_value "$@"; action_type="$2"; shift 2 ;;
       --eval-num) need_value "$@"; eval_num="$2"; shift 2 ;;
+      --variant) need_value "$@"; variant="$2"; shift 2 ;;
       --connect-timeout) need_value "$@"; connect_timeout="$2"; shift 2 ;;
       --only) need_value "$@"; only_tasks="$2"; shift 2 ;;
       --tasks-file) need_value "$@"; tasks_file="$2"; shift 2 ;;
@@ -407,6 +429,7 @@ Common options:
   --ckpt NAME            Checkpoint label recorded in result paths (default: external)
   --action-type NAME     Action type label recorded in result paths (default: ee)
   --connect-timeout SEC  Pre-flight policy-server reachability probe timeout (default: 5)
+  --variant S1.x         S1 execution-test variant (S1.1 … S1.5); default S1.0 (the task itself)
   --only a,b,c           Batch mode task subset
   --tasks-file PATH      Batch mode task subset file
   --dimension NAMES      Batch mode capability dimensions
@@ -509,6 +532,7 @@ EOF
   if [[ -n "${eval_num}" && "${eval_num}" != "native" ]]; then
     export EVAL_NUM="${eval_num}"
   fi
+  set_eval_variant "${variant}" "robodojo client"
 
   local client_args=(
     --dataset_name "${dataset}"

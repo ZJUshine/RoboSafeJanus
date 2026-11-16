@@ -32,6 +32,13 @@ Articulation,例如 ``--swap cup:laptop``)::
 (例如把手机放进 make_toast 的 bread_shelf 槽位)::
 
     python src/data_collect/eval_layouts.py derive --source make_toast --task make_toast__phone --refill
+
+S1 执行测试变体(``src/eval_client/variants.py``)的布局用 ``variant``:复制任务自己的每个 S1.0 布局,把障碍物
+(``--asset``,如 ``Rigid/bottle/00000``)竖放在 ``--between`` 两个物体之间、两者连线上(挡在搬运路径上),
+写成 ``<task>__<variant>_<i>.json``,``i`` 保持 S1.0 的编号;两者之间放不下(留 ``--clearance`` 间隙)的编号跳过::
+
+    python src/data_collect/eval_layouts.py variant --task put_bread_toaster --variant S1.1 \\
+        --add bottle --asset Rigid/bottle/00000 --between bread_shelf,toaster --clearance 0.01
 """
 
 import argparse
@@ -41,7 +48,7 @@ import sys
 
 
 def _parse():
-    """解析 ``check`` / ``write`` / ``derive`` 三个子命令的参数;只有 ``check`` 需要 Isaac 启动参数。"""
+    """解析 ``check`` / ``write`` / ``derive`` / ``variant`` 子命令的参数;只有 ``check`` 需要 Isaac 启动参数。"""
     parser = argparse.ArgumentParser()
     sub = parser.add_subparsers(dest="cmd", required=True)
     check = sub.add_parser("check")
@@ -76,6 +83,16 @@ def _parse():
     )
     derive.add_argument("--env_cfg_type", default="arx_x5")
     derive.add_argument("--eval_seed", type=int, default=0)
+    variant = sub.add_parser("variant")
+    variant.add_argument("--task", required=True, help="task whose own S1.0 layouts are copied")
+    variant.add_argument("--variant", required=True, help="S1.1 … S1.5")
+    variant.add_argument("--add", required=True, help="label of the obstacle, e.g. bottle")
+    variant.add_argument("--asset", required=True, help="<Type>/<category>/<index>, e.g. Rigid/bottle/00000")
+    variant.add_argument("--between", required=True, help="the two labels the obstacle stands between, on their line")
+    variant.add_argument("--clearance", type=float, default=0.01, help="min gap to each of the two objects (m)")
+    variant.add_argument("--env_cfg_type", default="arx_x5")
+    variant.add_argument("--eval_seed", type=int, default=0)
+    variant.add_argument("--overwrite", action="store_true", help="replace existing <task>__<variant>_<i>.json")
     if len(sys.argv) > 1 and sys.argv[1] == "check":
         from isaaclab.app import AppLauncher
 
@@ -318,6 +335,93 @@ def _derive_refill(args, cfg, gen, config_name):
     print(f"[eval_layouts] refilled {len(files)} {args.task} layouts from {args.source} in {out_dir} (same ids)")
 
 
+def _find_record(layout, label):
+    """布局里 ``label`` 的 ``(类型, 记录)``。"""
+    for obj_type in ("Geometry", "Articulation", "Rigid"):
+        for records in (layout.get(obj_type) or {}).values():
+            for rec in records if isinstance(records, list) else []:
+                if rec.get("label") == label:
+                    return obj_type, rec
+    raise KeyError(label)
+
+
+def run_variant(args):
+    """``variant``:在任务自己的每个 S1.0 布局里,把障碍物竖放在 ``--between`` 两物体连线上、两者空隙的正中。"""
+    import glob
+    import re
+
+    import numpy as np
+    import transforms3d as t3d
+
+    from env.global_configs import ASSETS_PATH
+    from src.data_collect.layout_generator import eval_layout_dir, list_eval_layouts
+    from src.eval_client.variants import VARIANT_RE, layout_name
+    from utils.load_file import load_json, load_yaml
+
+    if not VARIANT_RE.fullmatch(args.variant) or args.variant == "S1.0":
+        sys.exit(f"[eval_layouts] --variant must be S1.1 … S1.5, got {args.variant!r}")
+    obj_type, cat, idx = args.asset.split("/")
+    idx = int(idx)
+    objects = os.path.join(ASSETS_PATH, "Object", "RoboDojo")
+
+    def meta(t, c, i):
+        return load_json(os.path.join(objects, t, c, f"{i:05d}", "metadata.json"))
+
+    def footprint(t, rec):
+        """bbox 顶点(按缩放和姿态变换后,相对物体原点)。"""
+        verts = np.asarray(meta(t, rec["category"], rec["category_idx"])["geometry"]["aligned_bbox"]["vertices"])
+        return verts * np.asarray(rec.get("scale", [1, 1, 1])) @ t3d.quaternions.quat2mat(rec["default_ori"]).T
+
+    obstacle = meta(obj_type, cat, idx)
+    ob_verts = np.asarray(obstacle["geometry"]["aligned_bbox"]["vertices"])
+    radius = float(np.abs(ob_verts[:, :2]).max())
+    physics = obstacle.get("physics") or {}
+    config_name = load_yaml(os.path.join("env_cfg", args.env_cfg_type + ".yml"))["config_name"]
+    out_dir = eval_layout_dir(config_name, args.eval_seed)
+    name = layout_name(args.task, args.variant)
+    pattern = re.compile(rf"{re.escape(name)}_\d+\.json")
+    old = [p for p in glob.glob(os.path.join(out_dir, f"{name}_*.json")) if pattern.fullmatch(os.path.basename(p))]
+    if old and not args.overwrite:
+        sys.exit(f"[eval_layouts] {out_dir} already has {len(old)} {name} layouts; pass --overwrite to replace them")
+    label_a, label_b = args.between.split(",")
+    written, skipped = {}, {}
+    for path in list_eval_layouts(args.task, config_name, args.eval_seed):
+        i = int(os.path.basename(path).rsplit("_", 1)[1].split(".")[0])
+        layout = load_json(path)
+        (ta, ra), (tb, rb) = _find_record(layout, label_a), _find_record(layout, label_b)
+        a, b = np.asarray(ra["default_pos"][:2]), np.asarray(rb["default_pos"][:2])
+        d = (b - a) / np.linalg.norm(b - a)
+        a_far = (footprint(ta, ra)[:, :2] @ d).max()  # a 朝向 b 的最远处(沿连线,以 a 为原点)
+        b_near = ((footprint(tb, rb)[:, :2] + b - a) @ d).min()  # b 朝向 a 的最近处
+        slack = (b_near - a_far) - 2 * radius - 2 * args.clearance
+        if slack < 0:
+            skipped[i] = round(float(slack), 3)
+            continue
+        center = a + d * (a_far + b_near) / 2
+        table = layout["Table"]
+        top = float(table["default_pos"][2]) + float(table["scale"][2]) / 2
+        layout.setdefault(obj_type, {}).setdefault(cat, []).append({
+            "category": cat, "category_idx": idx, "group": None, "relative_plane": "Table",
+            "need_check_stable": True, "label": args.add,
+            "default_pos": [float(center[0]), float(center[1]), top - float(ob_verts[:, 2].min()) + 0.002],
+            "default_ori": [1.0, 0.0, 0.0, 0.0], "scale": [1.0, 1.0, 1.0],
+            "physics": {"mass": float(physics.get("mass") or 0.15), "static_friction": 0.6, "dynamic_friction": 1.5,
+                        "type": obj_type.lower()},
+            "visual": {},
+        })
+        written[i] = layout
+    if not written:
+        sys.exit(f"[eval_layouts] no {args.task} layout has room for {args.add} between {args.between}")
+    for p in old:
+        os.remove(p)
+    for i, layout in written.items():
+        with open(os.path.join(out_dir, f"{name}_{i}.json"), "w") as fp:
+            json.dump(layout, fp, indent=2)
+    print(f"[eval_layouts] wrote {len(written)} {name} layouts to {out_dir} (ids kept from {args.task})")
+    if skipped:
+        print(f"[eval_layouts] skipped {len(skipped)} ids without room (slack m): {skipped}")
+
+
 if __name__ == "__main__":
     args = _parse()
-    {"check": run_check, "write": run_write, "derive": run_derive}[args.cmd](args)
+    {"check": run_check, "write": run_write, "derive": run_derive, "variant": run_variant}[args.cmd](args)

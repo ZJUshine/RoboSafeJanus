@@ -121,17 +121,32 @@ def now() -> str:
     return datetime.now().isoformat(timespec="seconds")
 
 
-def job_id(group: str, task: str, policy: str = "") -> str:
-    """任务记录的键:``<group>.<task>``;按模型的评测是 ``<group>.<task>.<policy>``(同一任务的不同模型能同时评)。"""
-    return f"{group}.{task}.{policy}" if policy else f"{group}.{task}"
+def job_id(group: str, task: str, policy: str = "", variant: str = "") -> str:
+    """任务记录的键:``<group>.<task>``;按模型的评测是 ``<group>.<task>.<policy>``(同一任务的不同模型能同时评),
+    S1 变体的评测再加 ``@<variant>``(``<group>.<task>.<policy>@S1.1``;S1.0 不加,和以前一样)。"""
+    sub = policy + (f"@{variant}" if variant else "")
+    return f"{group}.{task}.{sub}" if sub else f"{group}.{task}"
 
 
 def job_key(job: dict) -> str:
-    """记录自己的键:只有 eval 带 policy(别的 kind 的 policy 总是空)。"""
-    return job_id(job["group"], job["task"], job.get("policy") or "" if job.get("kind") == "eval" else "")
+    """记录自己的键:只有 eval 带 policy / variant(别的 kind 的总是空)。"""
+    if job.get("kind") != "eval":
+        return job_id(job["group"], job["task"])
+    return job_id(job["group"], job["task"], job.get("policy") or "", job.get("variant") or "")
+
+
+def norm_variant(variant: str) -> str:
+    """评测变体:``""`` / ``S1.0`` = 原任务(返回空串),否则 ``S1.1`` … ``S1.5``。"""
+    variant = (variant or "").strip()
+    if variant in ("", "S1.0"):
+        return ""
+    if not re.fullmatch(r"S1\.[1-5]", variant):
+        raise PlanError(f"变体写错了:{variant!r}(S1.0 … S1.5)")
+    return variant
 
 
 _RUN_POLICY = ""  # run 进程里:按模型评测时是模型名,update_job / _step 按它找自己的记录(别的进程总是空)
+_RUN_VARIANT = ""  # run 进程里:S1 变体评测时是变体名
 
 
 # ---------------------------------------------------------------------------
@@ -160,7 +175,7 @@ def write_job(job: dict, jid: str | None = None) -> None:
 
 
 def update_job(group: str, task: str, **fields) -> None:
-    job = read_job(job_id(group, task, _RUN_POLICY)) or {"group": group, "task": task}
+    job = read_job(job_id(group, task, _RUN_POLICY, _RUN_VARIANT)) or {"group": group, "task": task}
     job.update(fields)
     write_job(job)
 
@@ -189,7 +204,8 @@ def job_label(job: dict) -> str:
     label = KIND_LABEL.get(job.get("kind"), job.get("kind"))
     if job.get("machine") and job["machine"] != sv.default_key():
         label = f"{label}@{job['machine']}"
-    return f"{job['policy']} {label}" if job.get("policy") else label
+    who = " ".join(x for x in (job.get("policy"), job.get("variant")) if x)
+    return f"{who} {label}" if who else label
 
 
 def job_state(job: dict) -> str:
@@ -354,7 +370,7 @@ def collect_progress(task: str) -> dict:
     return {"text": f"已采 {have}/{rp.COLLECT_TARGET} 条", "done": have, "total": rp.COLLECT_TARGET}
 
 
-def eval_progress(group: str, task: str, policy: str = "") -> dict | None:
+def eval_progress(group: str, task: str, policy: str = "", variant: str = "") -> dict | None:
     """每个要评的模型评了几条(取同一 ckpt 下条数最多的那次,和续评的口径一样);``policy`` 给出时只看这个模型。"""
     try:
         models = [m for m in eval_models(group, task, set()) if m["step"] and (not policy or m["policy"] == policy)]
@@ -362,10 +378,12 @@ def eval_progress(group: str, task: str, policy: str = "") -> dict | None:
         return None
     if not models:
         return None
-    counts = [(m["policy"], min(EVAL_NUM, max((r[1] for r in eval_runs(task, m["policy"], m["ckpt"])), default=0)))
+    target = eval_target(task, variant)
+    counts = [(m["policy"], min(target, max((r[1] for r in eval_runs(task, m["policy"], m["ckpt"], variant)),
+                                            default=0)))
               for m in models]
-    return {"text": " · ".join(f"{p} {n}/{EVAL_NUM}" for p, n in counts),
-            "done": sum(n for _, n in counts), "total": EVAL_NUM * len(counts)}
+    return {"text": " · ".join(f"{p} {n}/{target}" for p, n in counts),
+            "done": sum(n for _, n in counts), "total": target * len(counts)}
 
 
 def job_progress(job: dict) -> dict | None:
@@ -379,10 +397,11 @@ def job_progress(job: dict) -> dict | None:
                     "done": have, "total": rp.COLLECT_TARGET}
         if kind == "eval" and r and r.get("counts") and job_state(job) == "running":
             counts = r["counts"]
-            return {"text": f"{r['machine']} · " + " · ".join(f"{p} {n}/{EVAL_NUM}" for p, n in counts.items()),
-                    "done": sum(counts.values()), "total": EVAL_NUM * len(counts)}
+            target = eval_target(task, job.get("variant") or "")
+            return {"text": f"{r['machine']} · " + " · ".join(f"{p} {n}/{target}" for p, n in counts.items()),
+                    "done": sum(counts.values()), "total": target * len(counts)}
         if kind == "eval":
-            return eval_progress(job["group"], task, job.get("policy") or "")
+            return eval_progress(job["group"], task, job.get("policy") or "", job.get("variant") or "")
         if kind == "collect":
             return collect_progress(task)
         if kind == "upload":
@@ -574,17 +593,21 @@ def _collected(task: str) -> str | None:
     return None
 
 
-def _busy(group: str, task: str, kind: str = "", policy: str = "") -> None:
+def _busy(group: str, task: str, kind: str = "", policy: str = "", variant: str = "") -> None:
     """同一条记录还在跑时不能再开。按模型的评测(``<group>.<task>.<policy>``)只和同一模型、
     以及这个任务"评所有模型"的评测互斥;"评所有模型"还要等这个任务的单模型评测都结束。
     (2026-11-16 前按模型的评测也记在 ``<group>.<task>``、带 policy 字段,这种只和同一模型互斥。)"""
-    jobs = [read_job(job_id(group, task, policy))]
-    if kind == "eval" and policy:
+    jobs = [read_job(job_id(group, task, policy, variant))]
+    if kind == "eval" and variant:  # 变体评测只和同一模型、同一变体的互斥(结果目录分开)
+        jobs += [j for j in running(("eval",)) if j["group"] == group and j["task"] == task
+                 and j.get("variant") == variant and (not policy or j.get("policy", "") in ("", policy))]
+    elif kind == "eval" and policy:
         task_job = read_job(job_id(group, task)) or {}
         if task_job.get("kind") == "eval" and task_job.get("policy", "") in ("", policy):
             jobs.append(task_job)
     elif kind == "eval":
-        jobs += [j for j in running(("eval",)) if j["group"] == group and j["task"] == task and j.get("policy")]
+        jobs += [j for j in running(("eval",)) if j["group"] == group and j["task"] == task and j.get("policy")
+                 and not j.get("variant")]
     for job in jobs:
         if job and job_state(job) == "running":
             raise PlanError(f"{task} 已有任务在运行:{job_label(job)}(开始于 {job.get('started_at')})")
@@ -975,13 +998,27 @@ def eval_models(group: str, task: str, downloading: set | None = None) -> list[d
     return out
 
 
-def eval_layouts(task: str) -> int:
-    return len(list(EVAL_LAYOUT.glob(f"{task}_*.json")))
+def eval_layouts(task: str, variant: str = "") -> int:
+    """评测布局个数:``<task>_<i>.json``;变体是 ``<task>__<variant>_<i>.json``(src/eval_client/variants.py)。"""
+    name = f"{task}__{variant}" if variant else task
+    pattern = re.compile(rf"{re.escape(name)}_\d+\.json")
+    return sum(1 for p in EVAL_LAYOUT.glob(f"{name}_*.json") if pattern.fullmatch(p.name))
 
 
-def eval_runs(task: str, policy: str, ckpt: str) -> list[tuple[str, int]]:
+def eval_target(task: str, variant: str = "") -> int:
+    """要评满几条:原任务 ``EVAL_NUM``;变体是它的布局个数(放不下障碍物的 S1.0 布局跳过了,不到 50)。"""
+    return eval_layouts(task, variant) if variant else EVAL_NUM
+
+
+def eval_result_base(task: str, policy: str, ckpt: str, variant: str = "") -> Path:
+    """``eval_result/RoboDojo/<task>/<policy>/<config>/<seed>_ckpt_name=<ckpt>,action_type=joint[,variant=S1.x]``。"""
+    suffix = f",variant={variant}" if variant else ""
+    return EVAL_RESULT / task / policy / EVAL_CFG / f"{EVAL_SEED}_ckpt_name={ckpt},action_type=joint{suffix}"
+
+
+def eval_runs(task: str, policy: str, ckpt: str, variant: str = "") -> list[tuple[str, int]]:
     """已有的评测 ``[(run_id, eval_time)]``,按时间排。"""
-    base = EVAL_RESULT / task / policy / EVAL_CFG / f"{EVAL_SEED}_ckpt_name={ckpt},action_type=joint"
+    base = eval_result_base(task, policy, ckpt, variant)
     out = []
     for path in sorted(base.glob("*/_result.json")) if base.is_dir() else []:
         try:
@@ -991,7 +1028,8 @@ def eval_runs(task: str, policy: str, ckpt: str) -> list[tuple[str, int]]:
     return out
 
 
-def eval_blocked(state: dict, group: str, task: str, downloading: set | None = None, policy: str = "") -> str:
+def eval_blocked(state: dict, group: str, task: str, downloading: set | None = None, policy: str = "",
+                 variant: str = "") -> str:
     """评测按钮不能点的原因(看板 eval 格用);空串表示可以点。``policy`` 给出时只看这个模型。"""
     status, why = rp.entry_status(state, f"expert/{task}")
     if status != "approved":
@@ -1001,6 +1039,11 @@ def eval_blocked(state: dict, group: str, task: str, downloading: set | None = N
         return "还没有模型:远端有了以后在模型列点「⬇ 下载」"
     if not any(m["ready"] for m in models):
         return "模型还不能用:" + ";".join(f"{m['policy']} {m['why']}" for m in models)
+    if variant:
+        if not eval_layouts(task, variant):
+            return (f"还没有 {variant} 评测布局(python src/data_collect/eval_layouts.py variant --task {task} "
+                    f"--variant {variant} ...)")
+        return ""
     n = eval_layouts(task)
     if n < EVAL_NUM:
         return f"评测布局只有 {n}/{EVAL_NUM} 个(在评测布局格点「⊕ 生成布局」)"
@@ -1032,21 +1075,26 @@ def remote_eval_missing(m: dict, item: dict) -> list[str]:
     return sv.missing_paths(m, need) + policy_env_vars(item["policy"], m)[1]
 
 
-def eval_plan(group: str, task: str, policy: str = "", machine: str = "") -> dict:
+def eval_plan(group: str, task: str, policy: str = "", machine: str = "", variant: str = "") -> dict:
     """eval 格的「评测」:ModelScope 上有的模型(已下载的)各评 50 条,没评满的续评;``policy`` 给出时只评这个模型。
 
-    ``machine`` 是远端机器时,模型 / 策略环境要远端已经有(按本地的 ckpt / step 查),缺的这次不评。"""
+    ``machine`` 是远端机器时,模型 / 策略环境要远端已经有(按本地的 ckpt / step 查),缺的这次不评。
+    ``variant``(S1.1 …)时评这个 S1 变体:它自己的布局各评一遍(条数 = 布局个数),结果单独存。"""
+    variant = norm_variant(variant)
     if policy and policy not in eval_policies():
         raise PlanError(f"ModelScope 上没有 {policy} 的模型(有:{'、'.join(eval_policies()) or '无'})")
     m = machine_cfg(machine)
     remote = not sv.is_local(m)
     state = _state(group, task, "eval")
-    reason = eval_blocked(state, group, task, policy=policy)
+    reason = eval_blocked(state, group, task, policy=policy, variant=variant)
     if reason:
-        raise PlanError(f"{task} {policy + ' ' if policy else ''}还不能评测:{reason}")
+        raise PlanError(f"{task} {policy + ' ' if policy else ''}{variant + ' ' if variant else ''}还不能评测:{reason}")
     who = f"{policy} " if policy else "每个模型"
     where = f"在 {m['key']}(远端 {sv.target(m)}:{m['repo_path']})上" if remote else f"在 {m['key']}(本机)上"
-    queue, lines = [], [f"{task}:{where}{who}评 {EVAL_NUM} 条(seed {EVAL_SEED},{EVAL_CFG},joint)", ""]
+    target = eval_target(task, variant)
+    what = (f"{variant} 变体评 {target} 条({target} 个 {variant} 布局,layout_id 和 S1.0 对应;"
+            "每步查安全检查,记成功率 + 违规率)" if variant else f"评 {EVAL_NUM} 条")
+    queue, lines = [], [f"{task}:{where}{who}{what}(seed {EVAL_SEED},{EVAL_CFG},joint)", ""]
     for item in eval_models(group, task):
         if policy and item["policy"] != policy:
             continue
@@ -1054,9 +1102,9 @@ def eval_plan(group: str, task: str, policy: str = "", machine: str = "") -> dic
         if not item["ready"]:
             lines.append(f"  ⏭ {name}:{item['why']},这次不评")
             continue
-        runs = eval_runs(task, item["policy"], item["ckpt"])
+        runs = eval_runs(task, item["policy"], item["ckpt"], variant)
         best = max(runs, key=lambda r: r[1]) if runs else None
-        if best and best[1] >= EVAL_NUM:
+        if best and best[1] >= target:
             lines.append(f"  ✅ {name}:已评满 {best[1]} 条({best[0]}),跳过")
             continue
         resume = best[0] if best and best[1] > 0 else None
@@ -1068,15 +1116,15 @@ def eval_plan(group: str, task: str, policy: str = "", machine: str = "") -> dic
             if missing:
                 lines.append(f"  ⏭ {name}:{m['key']} 上缺 " + "、".join(missing) + ",这次不评")
                 continue
-        lines.append(f"  ▶ {name}:" + (f"续评 {best[0]}(已有 {best[1]}/{EVAL_NUM})" if resume else "新评"))
+        lines.append(f"  ▶ {name}:" + (f"续评 {best[0]}(已有 {best[1]}/{target})" if resume else "新评"))
         queue.append({**item, "run_id": resume})
     if not queue:
         tail = (f"{m['key']} 上没有能评的模型:先在远端装好 uv 环境、下好模型(和本地同一个 ckpt / step),再点一次。"
                 if remote and any(ln.startswith("  ⏭") for ln in lines) else
                 "都评满了,不用再跑。")
-        return {"group": group, "task": task, "kind": "eval", "policy": policy, "queue": [], "nothing": True,
-                **_machine_fields(m), "text": "\n".join([*lines, "", tail])}
-    jid = job_id(group, task, policy)
+        return {"group": group, "task": task, "kind": "eval", "policy": policy, "variant": variant, "queue": [],
+                "nothing": True, **_machine_fields(m), "text": "\n".join([*lines, "", tail])}
+    jid = job_id(group, task, policy, variant)
     busy = busy_gpus(("collect", "eval", "layouts"), jid, m["key"])
     gpus = machine_gpus(m)
     free = [g["index"] for g in gpus if g["used"] < FREE_GPU_MIB and g["index"] not in busy]
@@ -1086,7 +1134,7 @@ def eval_plan(group: str, task: str, policy: str = "", machine: str = "") -> dic
     if remote:
         lines += [f"远端:先同步代码 + 这个任务的评测布局 + 要续评的结果,评完把 eval_result/RoboDojo/{task}/ 和日志拉回本地。"]
     lines += ["评测不审核,评完不用提交。"]
-    return {"group": group, "task": task, "kind": "eval", "policy": policy, "queue": queue,
+    return {"group": group, "task": task, "kind": "eval", "policy": policy, "variant": variant, "queue": queue,
             "free_gpus": free[: 2 * len(queue)], **_machine_fields(m),
             "need_gpus": True, "nothing": False, "text": "\n".join(lines)}
 
@@ -1285,11 +1333,12 @@ def run_layouts(group: str, task: str, gpus: str) -> int:
     return 0
 
 
-def plan(button: str, group: str, task: str, dry_run: bool = True, policy: str = "", machine: str = "") -> dict:
+def plan(button: str, group: str, task: str, dry_run: bool = True, policy: str = "", machine: str = "",
+         variant: str = "") -> dict:
     if button == "ingest":
         return ingest_plan(group, task)
     if button == "eval":
-        return eval_plan(group, task, policy, machine)
+        return eval_plan(group, task, policy, machine, variant)
     if button == "layouts":
         return layouts_plan(group, task)
     if button == "collect":
@@ -1305,15 +1354,16 @@ def plan(button: str, group: str, task: str, dry_run: bool = True, policy: str =
 
 
 def start(button: str, group: str, task: str, gpus: str = "", delete: bool = False, policy: str = "",
-          machine: str = "", per_gpu: int | None = None) -> dict:
+          machine: str = "", per_gpu: int | None = None, variant: str = "") -> dict:
     """重新算一遍计划,通过后在新会话里后台运行 ``run``;返回任务记录。``policy`` 只用于 eval(只评这个模型);
     ``machine`` 只用于 collect / eval(``docs/servers.json`` 的键,空 = 默认机器);``per_gpu`` 只用于 collect。"""
     policy = policy if button == "eval" else ""
-    _busy(group, task, "eval" if button == "eval" else "", policy)
+    variant = norm_variant(variant) if button == "eval" else ""
+    _busy(group, task, "eval" if button == "eval" else "", policy, variant)
     if button not in MACHINE_KINDS:
         machine, per_gpu = "", None
     machine = machine_cfg(machine)["key"] if button in MACHINE_KINDS else ""
-    p = plan(button, group, task, dry_run=False, policy=policy, machine=machine)
+    p = plan(button, group, task, dry_run=False, policy=policy, machine=machine, variant=variant)
     if p["nothing"]:
         raise PlanError("没有要做的事")
     kind = p["kind"]
@@ -1331,6 +1381,8 @@ def start(button: str, group: str, task: str, gpus: str = "", delete: bool = Fal
         args.append("--delete")
     if policy:
         args += ["--policy", policy]
+    if variant:
+        args += ["--variant", variant]
     if machine:
         args += ["--machine", machine]
     if per_gpu:
@@ -1342,7 +1394,7 @@ def start(button: str, group: str, task: str, gpus: str = "", delete: bool = Fal
     job = {"group": group, "task": task, "kind": kind, "pid": None, "log": str(log), "started_at": now(),
            "tasks": p.get("tasks") or [task],
            "finished_at": None, "returncode": None, "step": "启动中", "gpus": gpu_list, "delete": bool(delete),
-           "policy": policy, "machine": machine, "args": args}
+           "policy": policy, "variant": variant, "machine": machine, "args": args}
     if kind in QUEUED_KINDS:
         job.update(waiting=True, step="排队中")
     old = read_job(job_id(group, task)) or {}
@@ -1360,12 +1412,13 @@ def start(button: str, group: str, task: str, gpus: str = "", delete: bool = Fal
     return job
 
 
-def stop(group: str, task: str, policy: str = "") -> str:
-    """停掉 ``<group>.<task>``(``policy`` 给出时是这个模型的评测)那条记录的任务。"""
-    jid = job_id(group, task, policy)
+def stop(group: str, task: str, policy: str = "", variant: str = "") -> str:
+    """停掉 ``<group>.<task>``(``policy`` / ``variant`` 给出时是这个模型 / 变体的评测)那条记录的任务。"""
+    variant = norm_variant(variant)
+    jid = job_id(group, task, policy, variant)
     job = read_job(jid)
     if not job or job_state(job) != "running":
-        raise PlanError(f"{task} {policy + ' ' if policy else ''}没有在运行的任务")
+        raise PlanError(f"{task} {policy + ' ' if policy else ''}{variant + ' ' if variant else ''}没有在运行的任务")
     note = ""
     r = job.get("remote")
     if r and r.get("pid"):  # 远端的也停掉(setsid 起的:pgid == pid)
@@ -1462,11 +1515,23 @@ def run_upload(group: str, task: str, delete: bool) -> int:
                 "--modelscope", HDF5_REPO])
 
 
-def run_eval(group: str, task: str, gpus: str, policy: str = "", machine: str = "") -> int:
+def _eval_cmd(item: dict, task: str, pair: tuple[int, int], target: int, variant: str) -> list[str]:
+    """一个模型的 ``robodojo.sh eval`` 命令(本机 / 远端一样)。"""
+    cmd = ["bash", "scripts/robodojo.sh", "eval", "--policy-dir", f"XPolicyLab/policy/{item['policy']}",
+           "--task", task, "--ckpt", item["ckpt"], "--policy-env", policy_env(item["policy"]),
+           "--action-type", "joint",
+           "--env-cfg", EVAL_CFG, "--eval-num", str(target), "--seed", str(EVAL_SEED),
+           "--policy-gpu", str(pair[0]), "--env-gpu", str(pair[1])]
+    return cmd + (["--variant", variant] if variant else [])
+
+
+def run_eval(group: str, task: str, gpus: str, policy: str = "", machine: str = "", variant: str = "") -> int:
     m = machine_cfg(machine)
     if not sv.is_local(m):
-        return run_eval_remote(group, task, gpus, policy, m)
-    queue = eval_plan(group, task, policy, m["key"])["queue"]  # 再确认一次闸门,重新算续评
+        return run_eval_remote(group, task, gpus, policy, m, variant)
+    queue = eval_plan(group, task, policy, m["key"], variant)["queue"]  # 再确认一次闸门,重新算续评
+    target = eval_target(task, variant)
+    tag = f"_{variant}" if variant else ""
     ids = [int(x) for x in gpus.split(",") if x.strip()]
     pairs = [(ids[i], ids[i + 1] if i + 1 < len(ids) else ids[i]) for i in range(0, len(ids), 2)] or [(0, 0)]
     EVAL_LOGS.mkdir(exist_ok=True)
@@ -1478,12 +1543,8 @@ def run_eval(group: str, task: str, gpus: str, policy: str = "", machine: str = 
             if not todo:
                 break
             m = todo.pop(0)
-            log = EVAL_LOGS / f"{task}_{m['policy']}_p{pair[0]}_{datetime.now():%Y%m%d_%H%M%S}.log"
-            cmd = ["bash", "scripts/robodojo.sh", "eval", "--policy-dir", f"XPolicyLab/policy/{m['policy']}",
-                   "--task", task, "--ckpt", m["ckpt"], "--policy-env", policy_env(m["policy"]),
-                   "--action-type", "joint",
-                   "--env-cfg", EVAL_CFG, "--eval-num", str(EVAL_NUM), "--seed", str(EVAL_SEED),
-                   "--policy-gpu", str(pair[0]), "--env-gpu", str(pair[1])]
+            log = EVAL_LOGS / f"{task}{tag}_{m['policy']}_p{pair[0]}_{datetime.now():%Y%m%d_%H%M%S}.log"
+            cmd = _eval_cmd(m, task, pair, target, variant)
             env = {**os.environ, "OMNI_KIT_ACCEPT_EULA": "YES", **policy_env_vars(m["policy"])[0]}
             if m["run_id"]:
                 env["ROBODOJO_RUN_ID"] = m["run_id"]
@@ -1500,12 +1561,12 @@ def run_eval(group: str, task: str, gpus: str, policy: str = "", machine: str = 
                 continue
             fp.close()
             procs.remove(item)
-            runs = eval_runs(task, m["policy"], m["ckpt"])
+            runs = eval_runs(task, m["policy"], m["ckpt"], variant)
             n = max((r[1] for r in runs), default=0)
             results.append((m, proc.returncode, n))
-            print(f"[group_jobs] {now()} {m['policy']} 结束 exit {proc.returncode},评了 {n}/{EVAL_NUM} 条", flush=True)
+            print(f"[group_jobs] {now()} {m['policy']} 结束 exit {proc.returncode},评了 {n}/{target} 条", flush=True)
         time.sleep(5)
-    short = [f"{m['policy']} {n}/{EVAL_NUM}" for m, _, n in results if n < EVAL_NUM]
+    short = [f"{m['policy']} {n}/{target}" for m, _, n in results if n < target]
     done = "、".join(f"{m['policy']} {n} 条" for m, _, n in results)
     if short:
         _step(group, task, f"没评满:{'、'.join(short)}(再点一次续评)")
@@ -1765,8 +1826,10 @@ def run_collect_remote(group: str, task: str, gpus: str, m: dict, per_gpu: int |
     return 0
 
 
-def run_eval_remote(group: str, task: str, gpus: str, policy: str, m: dict) -> int:
-    queue = eval_plan(group, task, policy, m["key"])["queue"]  # 再确认一次闸门(含远端模型检查),重新算续评
+def run_eval_remote(group: str, task: str, gpus: str, policy: str, m: dict, variant: str = "") -> int:
+    queue = eval_plan(group, task, policy, m["key"], variant)["queue"]  # 再确认一次闸门(含远端模型检查),重新算续评
+    target = eval_target(task, variant)
+    tag = f"_{variant}" if variant else ""
     if not queue:
         return 0
     rdir = f"{REMOTE_DIR}/{task}_eval_{datetime.now():%Y%m%d_%H%M%S}"
@@ -1778,12 +1841,13 @@ def run_eval_remote(group: str, task: str, gpus: str, policy: str, m: dict) -> i
     dest = f"{sv.target(m)}:{m['repo_path']}"
     layout_rel = rp.rel(EVAL_LAYOUT)
     sv.run(m, f"mkdir -p {shlex.quote(layout_rel)} {shlex.quote(rp.rel(EVAL_LOGS))}", timeout=30)
+    # <task>_*.json 也包括 S1 变体的 <task>__<variant>_*.json
     if _rsync(m, "--include", f"{task}_*.json", "--exclude", "*", f"{EVAL_LAYOUT}/", f"{dest}/{layout_rel}/") != 0:
         raise PlanError(f"同步评测布局到 {m['key']} 失败")
     result_rel = rp.rel(EVAL_RESULT / task)
     for item in queue:  # 要续评的结果先推过去(ROBODOJO_RUN_ID 接着同一个目录评)
         if item["run_id"]:
-            base = EVAL_RESULT / task / item["policy"] / EVAL_CFG / f"{EVAL_SEED}_ckpt_name={item['ckpt']},action_type=joint"
+            base = eval_result_base(task, item["policy"], item["ckpt"], variant)
             rel = rp.rel(base / item["run_id"])
             sv.run(m, f"mkdir -p {shlex.quote(rel)}", timeout=30)
             if _rsync(m, f"{base / item['run_id']}/", f"{dest}/{rel}/") != 0:
@@ -1794,12 +1858,8 @@ def run_eval_remote(group: str, task: str, gpus: str, policy: str, m: dict) -> i
     stamp = f"{datetime.now():%Y%m%d_%H%M%S}"
     for i, item in enumerate(queue):
         pair = pairs[i % len(pairs)]
-        cmd = ["bash", "scripts/robodojo.sh", "eval", "--policy-dir", f"XPolicyLab/policy/{item['policy']}",
-               "--task", task, "--ckpt", item["ckpt"], "--policy-env", policy_env(item["policy"]),
-               "--action-type", "joint",
-               "--env-cfg", EVAL_CFG, "--eval-num", str(EVAL_NUM), "--seed", str(EVAL_SEED),
-               "--policy-gpu", str(pair[0]), "--env-gpu", str(pair[1])]
-        log = f"{rp.rel(EVAL_LOGS)}/{task}_{item['policy']}_p{pair[0]}_{stamp}.log"
+        cmd = _eval_cmd(item, task, pair, target, variant)
+        log = f"{rp.rel(EVAL_LOGS)}/{task}{tag}_{item['policy']}_p{pair[0]}_{stamp}.log"
         run_id = f"ROBODOJO_RUN_ID={shlex.quote(item['run_id'])} " if item["run_id"] else ""
         run_id += "".join(f"{k}={shlex.quote(v)} " for k, v in policy_env_vars(item["policy"], m)[0].items())
         lanes[i % len(pairs)].append(f"{run_id}{' '.join(shlex.quote(c) for c in cmd)} > {shlex.quote(log)} 2>&1"
@@ -1813,7 +1873,7 @@ def run_eval_remote(group: str, task: str, gpus: str, policy: str, m: dict) -> i
     # 进度:远端各模型最新一次 _result.json 的 eval_time
     probes = []
     for item in queue:
-        base = f"{result_rel}/{item['policy']}/{EVAL_CFG}/{EVAL_SEED}_ckpt_name={item['ckpt']},action_type=joint"
+        base = rp.rel(eval_result_base(task, item["policy"], item["ckpt"], variant))
         probes.append(f"echo -n \"{item['policy']}=$(cat {shlex.quote(base)}/*/_result.json 2>/dev/null"
                       " | grep -o '\"eval_time\": *[0-9]*' | grep -o '[0-9]*$' | sort -n | tail -1) \"")
     count_cmd = "; ".join(probes)
@@ -1829,13 +1889,13 @@ def run_eval_remote(group: str, task: str, gpus: str, policy: str, m: dict) -> i
     _step(group, task, f"从 {m['key']} 拉回评测结果和日志")
     (EVAL_RESULT / task).mkdir(parents=True, exist_ok=True)
     pulled = _rsync(m, f"{dest}/{result_rel}/", f"{EVAL_RESULT / task}/")
-    _rsync(m, "--include", f"{task}_*_{stamp}.log", "--exclude", "*", f"{dest}/{rp.rel(EVAL_LOGS)}/", f"{EVAL_LOGS}/")
+    _rsync(m, "--include", f"{task}{tag}_*_{stamp}.log", "--exclude", "*", f"{dest}/{rp.rel(EVAL_LOGS)}/", f"{EVAL_LOGS}/")
     if pulled != 0:
         _step(group, task, f"拉回评测结果失败(远端结果还在 {result_rel});再点一次会重新拉")
         return 1
-    counts = {item["policy"]: max((n for _, n in eval_runs(task, item["policy"], item["ckpt"])), default=0)
+    counts = {item["policy"]: max((n for _, n in eval_runs(task, item["policy"], item["ckpt"], variant)), default=0)
               for item in queue}
-    short = [f"{p} {n}/{EVAL_NUM}" for p, n in counts.items() if n < EVAL_NUM]
+    short = [f"{p} {n}/{target}" for p, n in counts.items() if n < target]
     if short or code != 0:
         _step(group, task, f"没评满:{'、'.join(short) or '(远端 exit ' + str(code) + ')'};再点一次续评")
         return 1
@@ -1845,9 +1905,10 @@ def run_eval_remote(group: str, task: str, gpus: str, policy: str, m: dict) -> i
 
 
 def run(kind: str, group: str, task: str, gpus: str = "", delete: bool = False, policy: str = "",
-        machine: str = "", per_gpu: int | None = None) -> int:
-    global _RUN_POLICY
+        machine: str = "", per_gpu: int | None = None, variant: str = "") -> int:
+    global _RUN_POLICY, _RUN_VARIANT
     _RUN_POLICY = policy if kind == "eval" else ""
+    _RUN_VARIANT = norm_variant(variant) if kind == "eval" else ""
     update_job(group, task, pid=os.getpid())
     code = 1
     try:
@@ -1860,7 +1921,7 @@ def run(kind: str, group: str, task: str, gpus: str = "", delete: bool = False, 
         elif kind == "export":
             code = run_export(group, task)
         elif kind == "eval":
-            code = run_eval(group, task, gpus, policy, machine)
+            code = run_eval(group, task, gpus, policy, machine, _RUN_VARIANT)
         elif kind == "layouts":
             code = run_layouts(group, task, gpus)
         else:
@@ -1869,7 +1930,7 @@ def run(kind: str, group: str, task: str, gpus: str = "", delete: bool = False, 
         print(f"[group_jobs] {error}", flush=True)
         update_job(group, task, step=str(error).splitlines()[0][:200])
     finally:
-        job = read_job(job_id(group, task, _RUN_POLICY)) or {}
+        job = read_job(job_id(group, task, _RUN_POLICY, _RUN_VARIANT)) or {}
         if not job.get("stopped"):
             update_job(group, task, returncode=code, finished_at=now(),
                        step=(job.get("step") if kind in ("ingest", "eval", "layouts") else "完成") if code == 0
@@ -1887,6 +1948,7 @@ def main() -> int:
         s.add_argument("group")
         s.add_argument("task")
         s.add_argument("--policy", default="", help="eval 时只评这个模型(Pi_0 / Pi_05);默认都评")
+        s.add_argument("--variant", default="", help="eval 时评这个 S1 变体(S1.1 …);默认 S1.0(原任务)")
         s.add_argument("--machine", default="", help="collect / eval 在哪台机器上跑(docs/servers.json 的键;默认 default_machine)")
         if name == "start":
             s.add_argument("--gpus", default="")
@@ -1899,6 +1961,7 @@ def main() -> int:
     s.add_argument("--gpus", default="")
     s.add_argument("--delete", action="store_true")
     s.add_argument("--policy", default="")
+    s.add_argument("--variant", default="")
     s.add_argument("--machine", default="")
     s.add_argument("--per_gpu", type=int, default=None)
     sub.add_parser("status")
@@ -1906,21 +1969,22 @@ def main() -> int:
     s.add_argument("group")
     s.add_argument("task")
     s.add_argument("--policy", default="", help="停这个模型的评测(按模型的评测记录)")
+    s.add_argument("--variant", default="", help="停这个 S1 变体的评测")
     a = ap.parse_args()
     try:
         if a.cmd == "plan":
-            print(plan(a.button, a.group, a.task, policy=a.policy, machine=a.machine)["text"])
+            print(plan(a.button, a.group, a.task, policy=a.policy, machine=a.machine, variant=a.variant)["text"])
         elif a.cmd == "start":
-            job = start(a.button, a.group, a.task, a.gpus, a.delete, a.policy, a.machine, a.per_gpu)
+            job = start(a.button, a.group, a.task, a.gpus, a.delete, a.policy, a.machine, a.per_gpu, a.variant)
             print(f"已启动 {job_label(job)} {a.group}/{a.task}:pid {job['pid']},日志 {job['log']}")
         elif a.cmd == "run":
-            return run(a.kind, a.group, a.task, a.gpus, a.delete, a.policy, a.machine, a.per_gpu)
+            return run(a.kind, a.group, a.task, a.gpus, a.delete, a.policy, a.machine, a.per_gpu, a.variant)
         elif a.cmd == "status":
             for jid, j in all_jobs(tail=False).items():
                 where = f" @{j['machine']}" if j.get("machine") else ""
                 print(f"{jid}: {j['label']}{where} {j['state']} · {j.get('step')} · {j.get('started_at')} · {j.get('log')}")
         else:
-            print(stop(a.group, a.task, a.policy))
+            print(stop(a.group, a.task, a.policy, a.variant))
     except PlanError as error:
         print(error, file=sys.stderr)
         return 2

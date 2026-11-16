@@ -889,7 +889,9 @@ def ckpt_model_key(ckpt: str) -> str:
 
 
 def collect_eval_results(eval_dir: Path, json_tasks: dict[str, tuple[str, str]]) -> list[dict]:
-    """扫描 ``eval_result/RoboDojo/<task>/<policy>/<config>/<seed>_ckpt_name=...,action_type=.../<run>/_result.json``。"""
+    """扫描 ``eval_result/RoboDojo/<task>/<policy>/<config>/<seed>_ckpt_name=...,action_type=...[,variant=S1.x]/<run>/_result.json``。
+
+    S1 变体(src/eval_client/variants.py)的结果带 ``variant`` 和违规率;调用方把它们和 S1.0 分开用。"""
     root = (eval_dir / "RoboDojo").resolve()
     results: list[dict] = []
     if not root.is_dir():
@@ -899,7 +901,7 @@ def collect_eval_results(eval_dir: Path, json_tasks: dict[str, tuple[str, str]])
         if len(parts) < 6:
             continue
         task, policy, config, seed_dir = parts[0], parts[1], parts[2], parts[3]
-        match = re.match(r"^(\d+)_ckpt_name=(.+),action_type=([^,]+)$", seed_dir)
+        match = re.match(r"^(\d+)_ckpt_name=(.+),action_type=([^,]+)(?:,variant=(S1\.\d))?$", seed_dir)
         if not match:
             continue
         try:
@@ -922,6 +924,9 @@ def collect_eval_results(eval_dir: Path, json_tasks: dict[str, tuple[str, str]])
             "success_rate": float(success),
             "eval_time": eval_time if isinstance(eval_time, int) else None,
             "score": data.get("score"),
+            "variant": match.group(4) or "",
+            "violation_rate": data.get("violation_rate"),
+            "safe_success_rate": data.get("safe_success_rate"),
             "mtime": mtime,
             "path": str(path.relative_to(ROOT_DIR)),
             "level": json_tasks.get(task, (None, None))[1],
@@ -933,13 +938,13 @@ def collect_eval_results(eval_dir: Path, json_tasks: dict[str, tuple[str, str]])
     # 同一任务上不同 policy 可能用同名的 ckpt（如 Pi_0/Pi_05 都叫
     # ``RoboSafeJanus-heat_X_microwave_safe_tasks-arx_x5-joint-0``），所以必须把 policy 计入 key，
     # 否则两个 policy 的结果会互相覆盖，页面上只剩其中一个。
-    best: dict[tuple[str, str, str], dict] = {}
+    best: dict[tuple[str, str, str, str], dict] = {}
     for item in results:
-        key = (item["task"], item["policy"], item["ckpt"])
+        key = (item["task"], item["policy"], item["ckpt"], item["variant"])
         if key not in best or rank(item) > rank(best[key]):
             best[key] = item
     for item in results:
-        item["selected"] = best[(item["task"], item["policy"], item["ckpt"])] is item
+        item["selected"] = best[(item["task"], item["policy"], item["ckpt"], item["variant"])] is item
     return results
 
 
@@ -1645,7 +1650,14 @@ def build_snapshot(
     models, wandb_runs, model_error = collect_models(
         model_repo_id, json_tasks, model_local_dir or DEFAULT_MODEL, wandb_dir or DEFAULT_WANDB
     )
-    eval_results = collect_eval_results(eval_dir or DEFAULT_EVAL, json_tasks)
+    all_results = collect_eval_results(eval_dir or DEFAULT_EVAL, json_tasks)
+    # S1 变体的结果只进大表评测结果列(variant_evals);其余汇总 / 矩阵 / 进度都只算 S1.0
+    eval_results = [item for item in all_results if not item["variant"]]
+    variant_evals = [item for item in all_results if item["variant"] and item["selected"]]
+    variant_evals.sort(key=lambda item: (item["variant"], item["policy"]))
+    variants_by_task: dict[str, list[dict]] = {}
+    for item in variant_evals:
+        variants_by_task.setdefault(item["task"], []).append(item)
     eval_layouts, layouts_by_seed = collect_eval_layouts(
         layout_dir or DEFAULT_LAYOUT, layout_seed, json_tasks
     )
@@ -1727,6 +1739,7 @@ def build_snapshot(
                 "models": models_by_task.get(name, []),
                 "group_models": models_by_group.get((group, level), []),
                 "evals": evals_by_task.get(name, []),
+                "variant_evals": variants_by_task.get(name, []),
                 "eval_layouts": eval_layouts.get(name),
                 "status": statuses,
                 "overall": overall,
@@ -1904,6 +1917,7 @@ def build_snapshot(
         "tasks": rows,
         "models": models,
         "evals": eval_results,
+        "variant_evals": variant_evals,
         "eval_layouts": eval_layouts,
     }
 
@@ -3367,13 +3381,13 @@ def html_page(
                 episodes = f"{remote_export['episodes']} 条" if remote_export["episodes"] is not None else "未知"
                 remote_html += f'<br><small>{episodes} / {human_bytes(remote_export["size"])}</small>'
             lerobot_cells.append(local_html + "<br>" + remote_html)
-        # 模型 / 评测结果格按模型(policy)分开:pipeline_page 的宽表每个模型一组「模型 · 评测 · 结果」列
+        # 模型 / 评测格按模型(policy)分开:pipeline_page 的宽表每个模型一组「模型 · 评测」列
         model_parts: dict[str, list[str]] = {}
         for model, is_group in [(m, False) for m in row["models"]] + [(m, True) for m in row["group_models"]]:
             model_parts.setdefault(model["policy"], []).append(
                 model_item_html(model, row["name"], is_group, wandb_rows, downloading))
-        eval_parts: dict[str, list[str]] = {}
-        for result in row["evals"]:
+        eval_parts: dict[tuple[str, str], list[str]] = {}  # (S1 变体, policy) -> 结果块
+        for result in [*row["evals"], *row.get("variant_evals", [])]:
             label = eval_label(result, row, json_tasks)
             kind = eval_kind(result, row, json_tasks)
             rate = result["success_rate"] * 100
@@ -3388,10 +3402,19 @@ def html_page(
                 f' title="看这次评测的视频(✅ 成功 / ❌ 失败,{n_video} 条)">🎬 {n_video}</button>'
                 if n_video else ""
             )
-            eval_parts.setdefault(result.get("policy") or "?", []).append(
-                f'<div class="eval-item" title="{html.escape(kind)}">'
-                f'<code class="eval-name">{html.escape(label)}</code><br>'
-                f"<strong>{rate:.1f}%</strong> <small>({n_text})</small>{video_btn}</div>"
+            # 结果直接写进评测的 S1 子列(`eval:<S1.x>:<policy>`,由 pipeline_page.eval_cell 显示):只留 success / n /
+            # 视频,模型名已经在同一行的模型列里;S1 变体再加违规率(src/eval_client/variants.py)
+            variant = result.get("variant") or "S1.0"
+            if variant != "S1.0":
+                bad = (result.get("violation_rate") or 0) * 100
+                safe = (result.get("safe_success_rate") or 0) * 100
+                tip = f"{kind} · {variant}:成功 {rate:.1f}% · 违规 {bad:.1f}% · 成功且未违规 {safe:.1f}%"
+                body = (f"<strong>{rate:.1f}%</strong> <small>成功</small><br>"
+                        f'<strong class="{"ng" if bad else ""}">{bad:.1f}%</strong> <small>违规 ({n_text})</small>')
+            else:
+                tip, body = kind, f"<strong>{rate:.1f}%</strong> <small>({n_text})</small>"
+            eval_parts.setdefault((variant, result.get("policy") or "?"), []).append(
+                f'<div class="eval-item" title="{html.escape(tip)}">{body}{video_btn}</div>'
             )
         layout_stats = summary["eval_layouts"]
         layout = row.get("eval_layouts") or {}
@@ -3428,9 +3451,10 @@ def html_page(
             "hdf5": hdf5_cell, "v30": lerobot_cells[0], "v21": lerobot_cells[1], "video": video_cell,
             "eval_layout": layout_cell, "sync": sync,
         }
-        for policy in sorted(set(model_parts) | set(eval_parts)):
+        for policy in sorted(set(model_parts) | {p for _, p in eval_parts}):
             task_cells[row["name"]][f"model:{policy}"] = "".join(model_parts.get(policy, [])) or "—"
-            task_cells[row["name"]][f"result:{policy}"] = "".join(eval_parts.get(policy, [])) or "—"
+        for (variant, policy), parts in eval_parts.items():  # 没评过的格子不写,让 eval_cell 显示已评几条
+            task_cells[row["name"]][f"eval:{variant}:{policy}"] = "".join(parts)
 
     remote_note = f" · <span class='bad'>{html.escape(snapshot['remote_error'])}</span>" if snapshot["remote_error"] else ""
     lerobot_remote_note = (
@@ -3838,6 +3862,7 @@ def html_page(
         stopBtn.dataset.group = job.group;
         stopBtn.dataset.task = job.task;
         if (jid.split('.').length > 2) stopBtn.dataset.policy = job.policy || '';  // 按模型的评测记录
+        if (job.variant) stopBtn.dataset.variant = job.variant;  // S1 变体的评测记录
         stopBtn.textContent = '⏹ 停止';
         head.append(stopBtn);
       }
@@ -3851,10 +3876,12 @@ def html_page(
   function paintGroupCells() {
     const cellKind = {ingest: 'ingest', collect: 'collect', export: 'exchange', upload: 'upload', eval: 'eval',
       layouts: 'layouts'};
-    // 按模型的评测记录键是 <group>.<task>.<policy>;"评所有模型"(命令行)和 2026-11-16 前的评测记在 <group>.<task>
+    // 按模型的评测记录键是 <group>.<task>.<policy>;"评所有模型"(命令行)和 2026-11-16 前的评测记在 <group>.<task>;
+    // S1 变体的评测再加 @<variant>(<group>.<task>.<policy>@S1.1),只认自己的记录
     const jobOf = (el) => {
       const base = el.dataset.group + '.' + el.dataset.task;
       const policy = el.dataset.policy;
+      if (el.dataset.kind === 'eval' && el.dataset.variant) return groupJobs[base + '.' + (policy || '') + '@' + el.dataset.variant];
       if (el.dataset.kind !== 'eval' || !policy) return groupJobs[base];
       const own = groupJobs[base + '.' + policy];
       const old = groupJobs[base];
@@ -3867,6 +3894,7 @@ def html_page(
       let job = jobOf(cell);
       if (job && cell.dataset.kind && kindOf(job) !== cell.dataset.kind) job = null;
       if (job && cell.dataset.policy && job.policy && job.policy !== cell.dataset.policy) job = null;
+      if (job && (job.variant || '') !== (cell.dataset.variant || '') && cell.dataset.kind === 'eval') job = null;
       const prog = job && job.progress && job.progress.text;
       cell.textContent = !job ? '' : job.state === 'running'
         ? (job.waiting ? job.label + ' · ' + (job.step || '排队中') : job.label + '中 · ' + (prog || job.step || ''))
@@ -4057,7 +4085,8 @@ def html_page(
   async function groupAction(button, kind, group, task) {
     button.disabled = true;
     const policy = button.dataset.policy || '';
-    const title = (policy ? policy + ' ' : '') + (actionTitle[kind] || kind) + ' · '
+    const variant = button.dataset.variant || '';
+    const title = (policy ? policy + ' ' : '') + (variant ? variant + ' ' : '') + (actionTitle[kind] || kind) + ' · '
       + (task === '__group__' ? group : task);
     const pending = kind === 'upload' ? '正在生成计划…\\n要对 ModelScope 做 dry-run,可能需要 1–3 分钟。'
       : (kind === 'ingest' ? '正在生成计划…\\n要跑一次 simready_assets.py --dry_run,可能要几十秒。' : '正在生成计划…');
@@ -4085,7 +4114,8 @@ def html_page(
     cancel.onclick = close;
     dialog.oncancel = (event) => { event.preventDefault(); close(); };
     const base0 = 'api/group/' + kind + '?group=' + encodeURIComponent(group) + '&task=' + encodeURIComponent(task)
-      + (policy ? '&policy=' + encodeURIComponent(policy) : '');
+      + (policy ? '&policy=' + encodeURIComponent(policy) : '')
+      + (variant ? '&variant=' + encodeURIComponent(variant) : '');
     let base = base0;
     // 采集 / 评测:先问在哪台机器上跑(docs/servers.json),选了再生成那台机器的计划;换机器就重新生成
     let machineCtl = null;
@@ -4221,12 +4251,14 @@ def html_page(
     const task = button.dataset.task;
     if (button.dataset.kind === 'stop') {
       const policy = button.dataset.policy || '';
-      const job = groupJobs[group + '.' + task + (policy ? '.' + policy : '')] || {};
+      const variant = button.dataset.variant || '';
+      const sub = policy + (variant ? '@' + variant : '');
+      const job = groupJobs[group + '.' + task + (sub ? '.' + sub : '')] || {};
       const ok = await confirmSimple('停止 ' + task, '停止 ' + task + ' 的' + (job.label || '任务') + '?\\n'
         + '采集的分片会保留,之后再点「采集」会续采;上传中断后再点会续传。');
       if (!ok) return;
       try {
-        const params = new URLSearchParams({group: group, task: task, policy: policy});
+        const params = new URLSearchParams({group: group, task: task, policy: policy, variant: variant});
         const data = await api('api/group/stop?' + params.toString(), {method: 'POST'});
         hint.textContent = data.message || '已停止';
       } catch (error) {
@@ -4467,6 +4499,7 @@ class StatusRequestHandler(SimpleHTTPRequestHandler):
         group = (query.get("group") or [""])[0]
         task = (query.get("task") or [""])[0]
         policy = (query.get("policy") or [""])[0]  # eval 格按模型分开:只评这个模型
+        variant = (query.get("variant") or [""])[0]  # eval 格按 S1 变体分开:评这个变体(空 = S1.0)
         machine = (query.get("machine") or [""])[0]  # 采集 / 评测:docs/servers.json 里选的机器
         per_gpu_s = (query.get("per_gpu") or [""])[0]
         if action == "machines":  # 采集 / 评测对话框里先选机器
@@ -4485,13 +4518,16 @@ class StatusRequestHandler(SimpleHTTPRequestHandler):
             return self._json({"error": "组名 / 任务名不合法"}, status=400)
         if policy and not re.fullmatch(r"[A-Za-z0-9_]+", policy):
             return self._json({"error": "模型名不合法"}, status=400)
+        if variant and not re.fullmatch(r"S1\.[0-5]", variant):
+            return self._json({"error": "S1 变体不合法"}, status=400)
         try:
             if action == "stop":
-                return self._json({"message": group_jobs.stop(group, task, policy)})
+                return self._json({"message": group_jobs.stop(group, task, policy, variant)})
             if action not in group_jobs.BUTTONS:
                 return self._json({"error": f"未知操作 {action}"}, status=404)
             if (query.get("confirm") or [""])[0] != "1":
-                return self._json(group_jobs.plan(action, group, task, policy=policy, machine=machine))
+                return self._json(group_jobs.plan(action, group, task, policy=policy, machine=machine,
+                                                  variant=variant))
             if action == "upload":
                 with JOBS_LOCK:
                     busy = [kind for kind in ("export_v30", "export_v21", "upload_hdf5", "upload_lerobot")
@@ -4500,7 +4536,7 @@ class StatusRequestHandler(SimpleHTTPRequestHandler):
                     return self._json({"error": f"{JOB_LABELS[busy[0]]}正在运行,等它结束后再按组导出 / 上传"},
                                       status=409)
             job = group_jobs.start(action, group, task, (query.get("gpus") or [""])[0],
-                                   (query.get("delete") or [""])[0] == "1", policy, machine, per_gpu)
+                                   (query.get("delete") or [""])[0] == "1", policy, machine, per_gpu, variant)
         except group_jobs.PlanError as error:
             return self._json({"error": str(error)}, status=409)
         except subprocess.TimeoutExpired:

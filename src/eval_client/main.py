@@ -265,7 +265,18 @@ def main():
     eval_batch = _eval_batch_from_deploy(args_cli.policy_name)
     eval_cfg["eval_batch"] = eval_batch
     eval_cfg["policy_name"] = args_cli.policy_name
-    eval_cfg["additional_info"] = args_cli.additional_info
+    # S1 执行测试变体(ROBODOJO_EVAL_VARIANT,见 src/eval_client/variants.py):换一套评测布局、结果目录分开,
+    # 每步检查安全设置;不设时和原任务完全一样。
+    from src.eval_client.variants import current_variant, layout_name, safety_checks, variant_suffix
+
+    variant = current_variant()
+    eval_cfg["variant"] = variant
+    eval_cfg["layout_name"] = layout_name(task_name, variant)
+    eval_cfg["safety_checks"] = [list(c) for c in safety_checks(task_name, variant)] if variant else []
+    eval_cfg["additional_info"] = args_cli.additional_info + variant_suffix(variant)
+    if variant:
+        print(f"[main] S1 variant {variant}: layouts {eval_cfg['layout_name']}_<i>.json, "
+              f"safety checks {eval_cfg['safety_checks']}")
     eval_cfg["seed"] = args_cli.seed
     eval_cfg["physx_monitor_enabled"] = enable_monitor
 

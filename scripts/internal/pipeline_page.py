@@ -21,8 +21,9 @@
   点「✔ 人工审核通过」(``reapprove`` = ``resubmit --approve``,重新跑检查,通过即批准),不必交给 Claude 重做。
 - 「采集」「转换」「上传」按钮由 sync_status 页面脚本处理:点了弹出计划对话框,确认后后台运行 ``group_jobs.py``。
 - 模型格只有下载(已下载 / 「⬇ 下载」)和 W&B 同步(已上传 / 「⟳ 同步 W&B」),由 sync_status ``model_item_html`` 写。
-- eval 列按 S1 变体分子列(``S1_VARIANTS``,2026-11-16 起;``variant_cell``,不审核):每格写这一行模型在这个变体上
-  已评几条 + 「▶ 评测」。目前只有 S1.0(``EVAL_VARIANTS``)接进了评测(``eval_button`` → group_jobs ``eval``,
+- eval 列按 S1 变体分子列(``S1_VARIANTS``,2026-11-16 起;``variant_cell``,不审核):评过的格写 success / n /
+  视频按钮(``36.0% (n=50)🎬 50``,sync_status 写在 ``eval:<S1.x>:<policy>``),没评过的写这一行模型在这个变体上
+  已评几条;都带「▶ 评测」。目前只有 S1.0(``EVAL_VARIANTS``)接进了评测(``eval_button`` → group_jobs ``eval``,
   模型下载完后出现,评完不提交);其余变体按钮灰着,设计里为 null 的写「不适用」。
 - 表尾是还没开始的种子,带「从种子开始」。
 
@@ -67,7 +68,7 @@ PHASES = (
     ("data", "数据收集与上传", "#data", (),
      "批量采集 → LeRobot 转换 → 上传 ModelScope(格子里点按钮,不审核)"),
     ("eval", "模型评测", "#eval", (),
-     "评测布局 → 下载模型 → 评测 → 结果汇总(格子里点按钮,不审核)"),
+     "评测布局 → 下载模型 → 评测(格子里点按钮,不审核)"),
 )
 PHASE_OF = {stage: phase for phase in PHASES for stage in phase[3]}
 # 动作 -> 在后台运行(检查可能要几分钟)还是同步运行
@@ -482,8 +483,7 @@ def status_cell(state: dict, key: str, span: int = 1, extra: str = "") -> str:
 
 # 总览宽表里穿插的数据列:sync_status 每次重建时把每个任务的格子写进 CELLS_FILE
 CELLS_FILE = "pipeline/_fragments/cells.json"
-DATA_HEADS = {"eval_layout": ("评测布局", "seed 0"), "model:*": ("模型", "每个模型一行(ModelScope 模型仓库里有哪些 policy 就列哪些):下载 · W&B 同步"),
-              "result:*": ("评测结果", "每个模型一行:success")}
+DATA_HEADS = {"eval_layout": ("评测布局", "seed 0"), "model:*": ("模型", "每个模型一行(ModelScope 模型仓库里有哪些 policy 就列哪些):下载 · W&B 同步")}
 # 数据收集与上传:不审核,格子里写实际数据 + 按钮(job_cell)
 JOB_HEADS = {"collect": ("collect", "批量采集 · 视频"), "exchange": ("exchange", "转换 LeRobot v3.0 + v2.1"),
              "upload": ("upload", "上传 ModelScope")}
@@ -495,15 +495,15 @@ COL_LABEL = {"seed": "种子", "assets": "资产", "ingest": "入库", "design":
 S1_VARIANTS = {"S1.0": "原任务", "S1.1": "Static collision", "S1.2": "Dynamic collision",
                "S1.3": "Motion boundary", "S1.4": "Human interaction", "S1.5": "Manipulation stability"}
 # 已经接进 robodojo.sh eval 的 S1 变体;其余变体的「▶ 评测」先灰着(sim JSON 里的 S1.x 场景 / safety 检查还没实现)
-EVAL_VARIANTS = ("S1.0",)
+EVAL_VARIANTS = ("S1.0", "S1.1")  # S1.1:robodojo.sh eval --variant(src/eval_client/variants.py,2026-11-16)
 # 模型评测:评测布局在最前;``*:*`` 列按模型分行——每个任务每个模型(cells 的 ``_policies``:ModelScope 上的 policy)一行,
-# 同一模型的模型 / 评测 / 结果在同一行,其他列上下合并。格子数据在 cells 的 ``model:<policy>``(下载 + W&B 同步)/
-# ``result:<policy>``;评测格(``eval_cell``,不审核)每个 S1 变体一个子列(``eval:<S1.x>:*``),
-# 写这一行模型在这个变体上已评几条,「▶ 评测」只评这一行的模型。
+# 同一模型的模型 / 评测在同一行,其他列上下合并。格子数据在 cells 的 ``model:<policy>``(下载 + W&B 同步);
+# 评测格(``eval_cell``,不审核)每个 S1 变体一个子列,写这一行模型在这个变体上已评几条,评过的直接写
+# success / n + 视频按钮(cells 的 ``eval:<S1.x>:<policy>``),「▶ 评测」只评这一行的模型。
 WIDE_COLUMNS = (
     *[("build", s) for s in PHASES[0][3]],
     *[("data", c) for c in JOB_HEADS],
-    ("eval", "eval_layout"), ("eval", "model:*"), *[("eval", f"eval:{v}:*") for v in S1_VARIANTS], ("eval", "result:*"),
+    ("eval", "eval_layout"), ("eval", "model:*"), *[("eval", f"eval:{v}:*") for v in S1_VARIANTS],
 )
 
 
@@ -598,11 +598,12 @@ def layouts_button(state: dict, task: str) -> str:
             f'<div class="gjob" data-group="{esc(g)}" data-task="{esc(task)}" data-kind="layouts"></div>')
 
 
-def eval_button(state: dict, task: str, policy: str = "") -> str:
+def eval_button(state: dict, task: str, policy: str = "", variant: str = "") -> str:
     """eval 格的「▶ 评测」:这个任务的模型(ModelScope 上有的)下载完、评测布局够 50 个才出现;expert 没批准时灰掉。
 
     点了弹出计划(group_jobs ``eval``:要评的模型、已评 / 续评、GPU),确认后后台跑 ``robodojo.sh eval``。
-    ``policy`` 给出时(宽表按模型分开的 eval 格)只管这个模型。评完不提交(eval 不审核)。"""
+    ``policy`` 给出时(宽表按模型分开的 eval 格)只管这个模型。``variant``(S1.1 …)时评这个 S1 变体:
+    有它的布局就出现,条数 = 布局个数。评完不提交(eval 不审核)。"""
     import group_jobs as gj
 
     g = state["group"]
@@ -612,14 +613,17 @@ def eval_button(state: dict, task: str, policy: str = "") -> str:
     except (OSError, ValueError, KeyError):
         return ""
     ready = [m for m in models if m["ready"]]
-    if not ready or gj.eval_layouts(task) < gj.EVAL_NUM:
+    target = gj.eval_target(task, variant)
+    if not ready or (gj.eval_layouts(task) < gj.EVAL_NUM if not variant else not target):
         return ""
-    blocked = gj.eval_blocked(state, g, task, downloading, policy)
+    blocked = gj.eval_blocked(state, g, task, downloading, policy, variant)
     names = "、".join(f"{m['policy']}{'(zero-shot)' if m['zero_shot'] else ''}" for m in ready)
     each = "" if policy else "各"
-    tip = blocked or f"用已下载的 {names} {each}评 {gj.EVAL_NUM} 条(点了先列计划、选 GPU,确认后后台运行)"
+    what = f"{variant}(加障碍物,记成功率 + 违规率)" if variant else ""
+    tip = blocked or f"用已下载的 {names} {each}评 {what}{target} 条(点了先列计划、选 GPU,确认后后台运行)"
     dis = " disabled data-blocked=1" if blocked else ""
     pol = f' data-policy="{esc(policy)}"' if policy else ""
+    pol += f' data-variant="{esc(variant)}"' if variant else ""
     return (f'<button class="gact" data-kind="eval" data-group="{esc(g)}" data-task="{esc(task)}"{pol} '
             f'title="{esc(tip)}"{dis}>▶ 评测</button>'
             f'<div class="gjob" data-group="{esc(g)}" data-task="{esc(task)}" data-kind="eval"{pol}></div>')
@@ -632,13 +636,13 @@ def task_variants(state: dict, task: str) -> set[str]:
     return {"S1.0"} | {k for k, v in (spec.get("S1") or {}).items() if k.startswith("S1.") and v is not None}
 
 
-def variant_cell(state: dict, task: str, policy: str, variant: str, buttons: bool) -> str:
+def variant_cell(state: dict, task: str, policy: str, variant: str, buttons: bool, result: str = "") -> str:
     """宽表某个 S1 变体的 eval 格:S1.0 走 ``eval_cell``;设计里没有这个变体时写「不适用」;
     还没接进评测的变体写「未接入」+ 灰着的「▶ 评测」。"""
     if variant not in task_variants(state, task):
         return '<td class="pc st idle" title="设计里这个任务没有这个 S1 变体"><small>不适用</small></td>'
     if variant in EVAL_VARIANTS:
-        return eval_cell(state, task, policy, buttons)
+        return eval_cell(state, task, policy, buttons, result, "" if variant == "S1.0" else variant)
     tip = (f"{variant} {S1_VARIANTS.get(variant, '')}:评测还没接入"
            "(robodojo.sh eval 只跑 S1.0;sim JSON 里这个变体的场景 / safety 检查要先实现)")
     btn = (f'<button class="gact" data-kind="eval" data-group="{esc(state["group"])}" data-task="{esc(task)}" '
@@ -647,26 +651,38 @@ def variant_cell(state: dict, task: str, policy: str, variant: str, buttons: boo
     return f'<td class="pc st jc idle" title="{esc(tip)}"><span class="jmain">—</span><br><small>未接入</small>{btn}</td>'
 
 
-def eval_cell(state: dict, task: str, policy: str, buttons: bool) -> str:
-    """宽表 S1.0 的 eval 格(按模型分行,不审核):这一行模型已评几条(同一个 ckpt 取 ``eval_time`` 最大的一次)+「▶ 评测」。
-    底色:评满绿、评了一部分蓝、没评 / 没模型灰。"""
+def eval_cell(state: dict, task: str, policy: str, buttons: bool, result: str = "", variant: str = "") -> str:
+    """宽表 S1.0 的 eval 格(按模型分行,不审核):评过的直接写 ``result``(sync_status 写在 cells 的
+    ``eval:S1.0:<policy>``:success / n / 视频按钮);没评过写这一行模型已评几条(同一个 ckpt 取 ``eval_time``
+    最大的一次)。两种都带「▶ 评测」。底色:评满绿、评了一部分蓝、没评 / 没模型灰。
+    ``variant``(S1.1 …)时是这个变体的格子:目标条数 = 它的布局个数,没有布局时写「没有布局」。"""
     import group_jobs as gj
 
     downloading = _cached("downloading", gj._downloading) or set()
     try:
         model = next((m for m in gj.eval_models(state["group"], task, downloading) if m["policy"] == policy), None)
-        done = max((n for _, n in gj.eval_runs(task, policy, model["ckpt"])), default=0) if model else 0
+        done = max((n for _, n in gj.eval_runs(task, policy, model["ckpt"], variant)), default=0) if model else 0
     except (OSError, ValueError, KeyError):
         model, done = None, 0
+    target = gj.eval_target(task, variant)
     if model is None:
         main, klass, small = "—", "idle", "还没有模型"
+    elif not target:
+        main, klass, small = "—", "idle", f"没有 {variant} 布局"
     else:
-        klass = "good" if done >= gj.EVAL_NUM else ("todo" if done else "idle")
-        main = f"{done}/{gj.EVAL_NUM} 条"
+        klass = "good" if done >= target else ("todo" if done else "idle")
+        main = f"{done}/{target} 条"
         small = "zero-shot" if model["zero_shot"] else ""
-    extra = eval_button(state, task, policy) if buttons else ""
-    sub = f"<br><small>{esc(small)}</small>" if small else ""
-    return f'<td class="pc st jc {klass}"><span class="jmain">{esc(main)}</span>{sub}{extra}</td>'
+    if result and model is not None and done < target:  # 没评满:结果块下面补一句进度
+        result += f'<small class="muted">已评 {done}/{target}</small>'
+    extra = eval_button(state, task, policy, variant) if buttons else ""
+    if result:  # sync_status 已经写成 .eval-item 块(每个 ckpt 一块),直接用
+        body = result
+    else:
+        body = f'<span class="jmain">{esc(main)}</span>'
+        if small:
+            body += f"<br><small>{esc(small)}</small>"
+    return f'<td class="pc st jc {klass}">{body}{extra}</td>'
 
 
 def link_button(state: dict, label: str = "🔗 填资产链接") -> str:
@@ -781,14 +797,15 @@ def _wbr(name: str) -> str:
 
 
 def policy_cell(state: dict, by_group: dict, t: dict, col: str, policy: str, cells: dict, buttons: bool) -> str:
-    """按模型分行的一格:``model`` / ``result`` 是 sync_status 写的数据,``eval:<S1.x>`` 是 ``variant_cell``(不审核:
-    这个变体已评几条)+ 只评 ``policy`` 的「▶ 评测」。same_as 引用的任务照搬归属组的格子。"""
+    """按模型分行的一格:``model`` 是 sync_status 写的数据,``eval:<S1.x>`` 是 ``variant_cell``(不审核:
+    评过写 success / n + 视频,没评过写已评几条)+ 只评 ``policy`` 的「▶ 评测」。same_as 引用的任务照搬归属组的格子。"""
     tag = f'<span class="polname">{esc(policy)}</span>'
     if col.startswith("eval:"):
         src = state if t["name"] in rp.own_tasks(state) else by_group.get(t["owner"] or "")
         if not t["name"] or src is None:
             return '<td class="st idle pc">·</td>'
-        return variant_cell(src, t["name"], policy, col.split(":", 1)[1], buttons)
+        result = (cells.get(t["name"]) or {}).get(f"{col}:{policy}") or ""
+        return variant_cell(src, t["name"], policy, col.split(":", 1)[1], buttons, result)
     value = cells.get(t["name"], {}).get(f"{col}:{policy}") if t["name"] else None
     lead = tag + "<br>" if col == "model" else ""
     return f'<td class="dc pc">{lead}{value or "<small>—</small>"}</td>'
@@ -1107,8 +1124,9 @@ COMPONENT_CSS = """
   table.pipe td[rowspan] { border-bottom: 0; }
   table.pipe.wide td.dc { text-align: left; white-space: nowrap; font-size: 12px; }
   table.pipe.wide td.dc small { font-size: 11px; }
-  table.pipe.wide td.dc .eval-item { margin: 1px 0 6px; }
-  table.pipe.wide td.dc .eval-video-btn { display: block; margin: 3px auto 0; }
+  table.pipe td.st.jc .eval-item { margin: 2px 0 4px; }
+  table.pipe td.st.jc .eval-item .video-btn { margin-left: 4px; }
+  table.pipe td.st.jc .eval-item .ng { color: var(--bad-fg); }  /* S1 变体:有违规时违规率标红 */
   table.pipe.wide td.dc button.gact { display: block; margin: 5px auto 0; }
   table.pipe th.dh { background: var(--panel-2); }
   table.pipe th.sub { font-size: 11px; font-weight: 500; }

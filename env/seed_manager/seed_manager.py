@@ -31,18 +31,21 @@ class SeedManager:
     ):
         self.eval_seed = self.config.get("seed", 0)
         layout_dir = Path(ASSETS_PATH, "Eval_Layout", BENCHMARK, self.config_name, str(self.eval_seed))
-        pattern = re.compile(rf"{re.escape(self.task_name)}_\d+\.json")
+        # S1 变体评测用 <task>__<variant>_<i>.json(src/eval_client/variants.py),默认是任务名
+        layout_name = str(self.config.get("layout_name") or self.task_name)
+        pattern = re.compile(rf"{re.escape(layout_name)}_\d+\.json")
         matching_files = sorted(
             [p for p in layout_dir.iterdir() if pattern.fullmatch(p.name)],
             key=lambda p: int(p.stem.rsplit("_", 1)[-1]),
         )
 
-        matching_files = [str(p) for p in matching_files]
+        # layout_id 取文件名里的编号 <i>:编号连续时(普通任务)和按顺序数一样;
+        # 变体布局跳过了放不下障碍物的编号,这样 layout_id 仍和派生它的 S1.0 布局一一对应。
         self.seed_info = {}
-        for idx, file_path in enumerate(matching_files):
-            self.seed_info[idx] = {"scene_layout": file_path}
+        for file_path in matching_files:
+            self.seed_info[int(file_path.stem.rsplit("_", 1)[-1])] = {"scene_layout": str(file_path)}
 
-        all_layout_ids = list(range(len(matching_files)))
+        all_layout_ids = sorted(self.seed_info)
         excluded = set(int(s) for s in (completed_layout_ids or [])) | set(int(s) for s in (abandoned_layout_ids or []))
         if excluded:
             self.seed_list: List[int] = [s for s in all_layout_ids if s not in excluded]

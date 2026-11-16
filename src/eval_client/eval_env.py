@@ -133,6 +133,16 @@ def create_eval_env(config, app, resume_state=None, **kwargs):
                 "score": 0.0,
                 "details": {},
             }
+            # S1 变体(src/eval_client/variants.py):每步检查 safety_checks,任一触发记这一条违规(不中断 episode)
+            self.variant = str(self.eval_cfg.get("variant") or "")
+            self.safety_checks = [
+                (str(fn), {k: (v if isinstance(v, (bool, int, float, str)) else str(v)) for k, v in dict(args).items()})
+                for fn, args in (self.eval_cfg.get("safety_checks") or [])
+            ]
+            self.violation = [False] * self.num_envs
+            self.violated_by: list[list[str]] = [[] for _ in range(self.num_envs)]
+            if self.variant:
+                self.eval_result["variant"] = self.variant
 
             self.scene_manager.layout_manager.replay = True
             self.seed_manager = SeedManager(config.eval_cfg)
@@ -223,6 +233,8 @@ def create_eval_env(config, app, resume_state=None, **kwargs):
             self._abort_video_writers()
             self.episode_nums = len(real_indices)
             self.unstable_envs = set()
+            self.violation = [False] * self.num_envs
+            self.violated_by = [[] for _ in range(self.num_envs)]
 
             self.current_env_seed_map = {}
             for idx in range(self.num_envs):
@@ -458,6 +470,7 @@ def create_eval_env(config, app, resume_state=None, **kwargs):
                         self._check_endpose_finite(env_idx_list)
 
             self.reward_manager.step(env_idx_list=env_idx_list)
+            self._check_safety(env_idx_list)
             if getattr(self, "interact", False):
                 if hasattr(self, "query_support_arm_traj"):
                     for env_idx in env_idx_list:
@@ -466,6 +479,34 @@ def create_eval_env(config, app, resume_state=None, **kwargs):
                     for env_idx in env_idx_list:
                         self.check_support_arm_stable(env_idx=env_idx)
             self.is_episode_end()
+
+        def _check_safety(self, env_idx_list):
+            """S1 变体的安全检查:每个 action chunk 执行完查一次,触发过的记下来(同一项只记第一次)。"""
+            if not self.safety_checks:
+                return
+            for env_idx in env_idx_list:
+                for fn, args in self.safety_checks:
+                    name = f"{fn}({args.get('label') or args.get('label_A') or ''})"
+                    if name in self.violated_by[env_idx]:
+                        continue
+                    if self.reward_manager.call_func_parser((fn, dict(args)), env_idx) >= 1:
+                        self.violation[env_idx] = True
+                        self.violated_by[env_idx].append(name)
+                        print(f"[EvalEnv][{self.variant}] env{env_idx} violation {name} "
+                              f"at step {self.take_action_cnt[env_idx]}", flush=True)
+
+        def _variant_totals(self, eval_time):
+            """变体的违规率 / 安全成功率(按 details 算,续评也对)。"""
+            items = [d for d in self.eval_result["details"].values() if isinstance(d, dict)]
+            violations = sum(1 for d in items if d.get("violation"))
+            safe = sum(1 for d in items if d.get("success") and not d.get("violation"))
+            self.eval_result.update({
+                "variant": self.variant,
+                "violation_nums": violations,
+                "violation_rate": violations / eval_time if eval_time else 0.0,
+                "safe_success_nums": safe,
+                "safe_success_rate": safe / eval_time if eval_time else 0.0,
+            })
 
         def mark_env_unstable(self, env_idx):
             """Flag an env as unstable so run_eval drops it from the eval set.
@@ -819,6 +860,10 @@ def create_eval_env(config, app, resume_state=None, **kwargs):
                     "score": episode_score,
                     "instruction": self.obs_manager.instruction[env_idx],
                 }
+                if self.variant:
+                    self.eval_result["details"][index].update(
+                        violation=bool(self.violation[env_idx]), violated_by=list(self.violated_by[env_idx])
+                    )
                 video_path = os.path.join(self.save_dir, f"episode_{index:07d}.mp4")
                 self.save_video(env_idx, video_path, tag)
 
@@ -833,6 +878,8 @@ def create_eval_env(config, app, resume_state=None, **kwargs):
                 self.eval_result["success_rate"] = self.success_nums / eval_time
                 self.eval_result["score"] = self.total_score / eval_time * 100
             self.eval_result["eval_time"] = eval_time
+            if self.variant:
+                self._variant_totals(eval_time)
             save_json(self.eval_result, os.path.join(self.save_dir, "_result.json"))
             # Refresh the resume manifest at the end of every batch so that a
             # downstream SIGABRT (which beats the in-process PhysXFatalError
