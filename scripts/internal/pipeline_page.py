@@ -20,8 +20,10 @@
 - 失效 / 提交后已改的格子另有「✎ 人工审核」(``manual_button``):弹出审核条目,在编辑区里改、看相对 HEAD 的改动,
   点「✔ 人工审核通过」(``reapprove`` = ``resubmit --approve``,重新跑检查,通过即批准),不必交给 Claude 重做。
 - 「采集」「转换」「上传」按钮由 sync_status 页面脚本处理:点了弹出计划对话框,确认后后台运行 ``group_jobs.py``。
-- eval 格(``eval_cell``,不审核,2026-11-15 起)写这一行模型已评几条;「▶ 评测」(``eval_button``)在模型下载完后出现,
-  同样走 group_jobs(``eval``),评完不提交。
+- 模型格只有下载(已下载 / 「⬇ 下载」)和 W&B 同步(已上传 / 「⟳ 同步 W&B」),由 sync_status ``model_item_html`` 写。
+- eval 列按 S1 变体分子列(``S1_VARIANTS``,2026-11-16 起;``variant_cell``,不审核):每格写这一行模型在这个变体上
+  已评几条 + 「▶ 评测」。目前只有 S1.0(``EVAL_VARIANTS``)接进了评测(``eval_button`` → group_jobs ``eval``,
+  模型下载完后出现,评完不提交);其余变体按钮灰着,设计里为 null 的写「不适用」。
 - 表尾是还没开始的种子,带「从种子开始」。
 
 片段 ``data/pipeline/_fragments/table.html`` 页面生成时内嵌,打开时再读一次最新的,所以页面上操作完立刻看到新状态。
@@ -480,7 +482,7 @@ def status_cell(state: dict, key: str, span: int = 1, extra: str = "") -> str:
 
 # 总览宽表里穿插的数据列:sync_status 每次重建时把每个任务的格子写进 CELLS_FILE
 CELLS_FILE = "pipeline/_fragments/cells.json"
-DATA_HEADS = {"eval_layout": ("评测布局", "seed 0"), "model:*": ("模型", "每个模型一行(ModelScope 模型仓库里有哪些 policy 就列哪些):checkpoint"),
+DATA_HEADS = {"eval_layout": ("评测布局", "seed 0"), "model:*": ("模型", "每个模型一行(ModelScope 模型仓库里有哪些 policy 就列哪些):下载 · W&B 同步"),
               "result:*": ("评测结果", "每个模型一行:success")}
 # 数据收集与上传:不审核,格子里写实际数据 + 按钮(job_cell)
 JOB_HEADS = {"collect": ("collect", "批量采集 · 视频"), "exchange": ("exchange", "转换 LeRobot v3.0 + v2.1"),
@@ -489,13 +491,19 @@ JOB_HEADS = {"collect": ("collect", "批量采集 · 视频"), "exchange": ("exc
 COL_LABEL = {"seed": "种子", "assets": "资产", "ingest": "入库", "design": "设计", "layout": "布局", "expert": "专家",
              "collect": "采集", "exchange": "转换", "upload": "上传", "eval": "评测"}
 # (大类, 列):列是阶段名、JOB_HEADS 或 DATA_HEADS 的键(不能重名)。
-# 模型评测:评测布局在最前;``*:*`` 三列按模型分行——每个任务每个模型(cells 的 ``_policies``:ModelScope 上的 policy)一行,
-# 同一模型的模型 / 评测 / 结果在同一行,其他列上下合并。格子数据在 cells 的 ``model:<policy>`` /
-# ``result:<policy>``;评测格(``eval_cell``,不审核)写这一行模型已评几条,「▶ 评测」只评这一行的模型。
+# 评测列按 S1 执行测试分子列(task/Task_Design.md「S1 任务设计」):S1.0 是原任务,其余是加了安全设置的变体
+S1_VARIANTS = {"S1.0": "原任务", "S1.1": "Static collision", "S1.2": "Dynamic collision",
+               "S1.3": "Motion boundary", "S1.4": "Human interaction", "S1.5": "Manipulation stability"}
+# 已经接进 robodojo.sh eval 的 S1 变体;其余变体的「▶ 评测」先灰着(sim JSON 里的 S1.x 场景 / safety 检查还没实现)
+EVAL_VARIANTS = ("S1.0",)
+# 模型评测:评测布局在最前;``*:*`` 列按模型分行——每个任务每个模型(cells 的 ``_policies``:ModelScope 上的 policy)一行,
+# 同一模型的模型 / 评测 / 结果在同一行,其他列上下合并。格子数据在 cells 的 ``model:<policy>``(下载 + W&B 同步)/
+# ``result:<policy>``;评测格(``eval_cell``,不审核)每个 S1 变体一个子列(``eval:<S1.x>:*``),
+# 写这一行模型在这个变体上已评几条,「▶ 评测」只评这一行的模型。
 WIDE_COLUMNS = (
     *[("build", s) for s in PHASES[0][3]],
     *[("data", c) for c in JOB_HEADS],
-    ("eval", "eval_layout"), ("eval", "model:*"), ("eval", "eval:*"), ("eval", "result:*"),
+    ("eval", "eval_layout"), ("eval", "model:*"), *[("eval", f"eval:{v}:*") for v in S1_VARIANTS], ("eval", "result:*"),
 )
 
 
@@ -617,8 +625,30 @@ def eval_button(state: dict, task: str, policy: str = "") -> str:
             f'<div class="gjob" data-group="{esc(g)}" data-task="{esc(task)}" data-kind="eval"{pol}></div>')
 
 
+def task_variants(state: dict, task: str) -> set[str]:
+    """这个任务设计里有的 S1 变体(``S1.x`` 为 null 的不适用);S1.0 总有。"""
+    g = state["group"]
+    spec = (_cached(("design", g), lambda: _group_json(rp.DESIGN_DIR, g)) or {}).get(task) or {}
+    return {"S1.0"} | {k for k, v in (spec.get("S1") or {}).items() if k.startswith("S1.") and v is not None}
+
+
+def variant_cell(state: dict, task: str, policy: str, variant: str, buttons: bool) -> str:
+    """宽表某个 S1 变体的 eval 格:S1.0 走 ``eval_cell``;设计里没有这个变体时写「不适用」;
+    还没接进评测的变体写「未接入」+ 灰着的「▶ 评测」。"""
+    if variant not in task_variants(state, task):
+        return '<td class="pc st idle" title="设计里这个任务没有这个 S1 变体"><small>不适用</small></td>'
+    if variant in EVAL_VARIANTS:
+        return eval_cell(state, task, policy, buttons)
+    tip = (f"{variant} {S1_VARIANTS.get(variant, '')}:评测还没接入"
+           "(robodojo.sh eval 只跑 S1.0;sim JSON 里这个变体的场景 / safety 检查要先实现)")
+    btn = (f'<button class="gact" data-kind="eval" data-group="{esc(state["group"])}" data-task="{esc(task)}" '
+           f'data-policy="{esc(policy)}" data-variant="{esc(variant)}" title="{esc(tip)}" disabled data-blocked=1>'
+           '▶ 评测</button>') if buttons else ""
+    return f'<td class="pc st jc idle" title="{esc(tip)}"><span class="jmain">—</span><br><small>未接入</small>{btn}</td>'
+
+
 def eval_cell(state: dict, task: str, policy: str, buttons: bool) -> str:
-    """宽表 eval 格(按模型分行,不审核):这一行模型已评几条(同一个 ckpt 取 ``eval_time`` 最大的一次)+「▶ 评测」。
+    """宽表 S1.0 的 eval 格(按模型分行,不审核):这一行模型已评几条(同一个 ckpt 取 ``eval_time`` 最大的一次)+「▶ 评测」。
     底色:评满绿、评了一部分蓝、没评 / 没模型灰。"""
     import group_jobs as gj
 
@@ -751,14 +781,14 @@ def _wbr(name: str) -> str:
 
 
 def policy_cell(state: dict, by_group: dict, t: dict, col: str, policy: str, cells: dict, buttons: bool) -> str:
-    """按模型分行的一格:``model`` / ``result`` 是 sync_status 写的数据,``eval`` 是 ``eval_cell``(不审核:
-    已评几条)+ 只评 ``policy`` 的「▶ 评测」。same_as 引用的任务照搬归属组的格子。"""
+    """按模型分行的一格:``model`` / ``result`` 是 sync_status 写的数据,``eval:<S1.x>`` 是 ``variant_cell``(不审核:
+    这个变体已评几条)+ 只评 ``policy`` 的「▶ 评测」。same_as 引用的任务照搬归属组的格子。"""
     tag = f'<span class="polname">{esc(policy)}</span>'
-    if col == "eval":
+    if col.startswith("eval:"):
         src = state if t["name"] in rp.own_tasks(state) else by_group.get(t["owner"] or "")
         if not t["name"] or src is None:
             return '<td class="st idle pc">·</td>'
-        return eval_cell(src, t["name"], policy, buttons)
+        return variant_cell(src, t["name"], policy, col.split(":", 1)[1], buttons)
     value = cells.get(t["name"], {}).get(f"{col}:{policy}") if t["name"] else None
     lead = tag + "<br>" if col == "model" else ""
     return f'<td class="dc pc">{lead}{value or "<small>—</small>"}</td>'
@@ -785,22 +815,42 @@ def group_task_table(states: list[dict], stages, *, phases: bool = False, filter
         if col in DATA_HEADS:
             name, sub = DATA_HEADS[col]
             return f'<th class="dh" title="{esc(sub)}">{esc(name)}</th>'
-        if col == "eval:*":
-            return (f'<th title="eval · 评测进度(不审核;每个模型一行,按钮只评这一行的模型)">'
-                    f'{esc(COL_LABEL["eval"])}</th>')
+        if col.startswith("eval:"):
+            v = col.split(":")[1]
+            note = "" if v in EVAL_VARIANTS else ";评测还没接入"
+            return (f'<th class="sub" title="{esc(v)} {esc(S1_VARIANTS.get(v, ""))} · 评测进度'
+                    f'(不审核;每个模型一行,按钮只评这一行的模型{note})">{esc(v)}</th>')
         desc = "资产链接(你来填,不审)" if col == "assets" else rp.STAGE_DESC[col]
         return f'<th title="{esc(col)} · {esc(desc)}">{esc(COL_LABEL.get(col, col))}</th>'
 
-    col_heads = "".join(head(c) for _, c in columns)
+    # 评测的 S1 子列:列头多一行(评测跨子列,其他列头上下合并)
+    n_sub = sum(1 for _, c in columns if c.startswith("eval:"))
+    if n_sub:
+        col_heads, sub_heads, opened = "", "", False
+        for _, c in columns:
+            if c.startswith("eval:"):
+                if not opened:
+                    col_heads += (f'<th colspan="{n_sub}" title="eval · 每个 S1 执行测试一个子列(不审核)">'
+                                  f'{esc(COL_LABEL["eval"])}</th>')
+                    opened = True
+                sub_heads += head(c)
+            else:
+                col_heads += head(c).replace("<th", '<th rowspan="2"', 1)
+        head_rows = f"<tr>{col_heads}</tr><tr>{sub_heads}</tr>"
+    else:
+        head_rows = "<tr>" + "".join(head(c) for _, c in columns) + "</tr>"
+    depth = 2 if n_sub else 1
     if phases:
-        head1 = "".join(f'<th rowspan="2" class="lhead">{h}</th>' for h in fixed)
+        head1 = "".join(f'<th rowspan="{depth + 1}" class="lhead">{h}</th>' for h in fixed)
         for p in PHASES:
             n = sum(1 for ph, _ in columns if ph == p[0])
             if n:
                 head1 += f'<th colspan="{n}" class="phead ph-{p[0]}">{esc(p[1])}</th>'
-        thead = f"<tr>{head1}</tr><tr>{col_heads}</tr>"
+        thead = f"<tr>{head1}</tr>{head_rows}"
     else:
-        thead = "<tr>" + "".join(f'<th class="lhead">{h}</th>' for h in fixed) + col_heads + "</tr>"
+        lead = "".join(f'<th rowspan="{depth}" class="lhead">{h}</th>' if depth > 1 else f'<th class="lhead">{h}</th>'
+                       for h in fixed)
+        thead = head_rows.replace("<tr>", f"<tr>{lead}", 1)
     bodies = []
     by_group = {s["group"]: s for s in states}
     policies = cell_policies(cells) if any(c.endswith(":*") for _, c in columns) else ()
@@ -1061,6 +1111,7 @@ COMPONENT_CSS = """
   table.pipe.wide td.dc .eval-video-btn { display: block; margin: 3px auto 0; }
   table.pipe.wide td.dc button.gact { display: block; margin: 5px auto 0; }
   table.pipe th.dh { background: var(--panel-2); }
+  table.pipe th.sub { font-size: 11px; font-weight: 500; }
   table.pipe th.phead.ph-data { box-shadow: inset 0 3px 0 var(--accent); }
   table.pipe th.phead.ph-eval { box-shadow: inset 0 3px 0 var(--good); }
   /* 模型评测按模型分行:同一任务的两个模型之间虚线,任务之间实线;合并的任务格保留下边线 */

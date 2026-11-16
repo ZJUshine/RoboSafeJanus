@@ -1355,42 +1355,38 @@ def export_runner(tasks: list[str], cwd: Path, version: str):
 
 def model_item_html(model: dict, task: str, group: bool, wandb: list[dict] | None = None,
                     running: set[tuple[str, str]] | None = None) -> str:
-    """大表模型列里的一个模型:policy、远端最新 step、本地有没有;本地没有最新 step 时带「⬇ 下载」按钮
-    (``download-model-btn``,点了确认后 ``/api/download_model?policy=&task=`` 后台下载并链接到 checkpoints)。
+    """大表模型列里的一个模型,只有两行:下载(已下载 / 下载中 / 「⬇ 下载」按钮)和 W&B(已上传 / 「⟳ 同步 W&B」)。
 
-    下面一行是这个模型的 W&B(``wandb`` 是 snapshot 里的 W&B 记录):有没上传的 run 时带「⟳ 同步 W&B」
-    (``sync-wandb-btn``,点了先列计划,确认后 ``/api/wandb/sync?policy=&task=`` 下载缺失的再上传到 W&B 官方)。"""
+    「⬇ 下载」(``download-model-btn``)点了确认后 ``/api/download_model?policy=&task=`` 后台下载并链接到 checkpoints;
+    「⟳ 同步 W&B」见 ``wandb_item_html``。模型目录、step、组模型 / 自训放在悬停提示里
+    (policy 名由 pipeline_page 写在格子顶上)。"""
     policy, key = model["policy"], model["key"]
     latest = model.get("latest_step") or "—"
     local = model.get("local_steps") or []
-    scope = "组模型 " if group else ""
+    tip = f"{'组模型' if group else '自训模型'} {policy}/{key} · 远端最新 step {latest}"
+    wb = wandb_item_html(model, wandb or [])
+    wb = "<br>" + wb if wb else ""
     if not model.get("latest_step"):  # 远端只有 run 级文件、没有能认出的 step 目录:不能说"已下载"
-        badge = f'<span class="badge warn" title="{html.escape(key)}">❔ {scope}{html.escape(policy)}</span>'
-        return (f'<div class="mdl">{badge}<br><small>远端没认出 checkpoint step 目录</small>'
-                f'{wandb_item_html(model, wandb or [])}</div>')
+        return (f'<div class="mdl" title="{html.escape(tip)}">'
+                f'<small class="warn">❔ 远端没认出 checkpoint</small>{wb}</div>')
     if not model.get("needs_download"):
-        badge = f'<span class="badge good" title="{html.escape(key)}">✅ {scope}{html.escape(policy)}</span>'
-        detail = f"step {html.escape(latest)} · 已下载"
-        button = ""
-    else:
-        badge = f'<span class="badge warn" title="{html.escape(key)}">☁️ {scope}{html.escape(policy)}</span>'
-        partial = model.get("partial_steps") or []
-        have = [*(html.escape(s) for s in local), *(f"{html.escape(s)} 没下完" for s in partial)]
-        detail = f"step {html.escape(latest)} · " + (f"本地 {', '.join(have)}" if have else "本地没有")
-        size = human_bytes(model.get("size") or 0)
-        label = f"{policy}/{key}"
-        if model_downloading(model, running or set()):
-            got = model_local_bytes(model, DEFAULT_MODEL)
-            pct = f" {min(99, 100 * got // model['size'])}%" if model.get("size") else ""
-            detail += f" · 下载中{pct}"
-            return f'<div class="mdl">{badge}<br><small>{detail}</small>{wandb_item_html(model, wandb or [])}</div>'
-        button = (
-            f'<button class="download-model-btn mdl-btn" type="button" data-policy="{html.escape(policy)}"'
-            f' data-task="{html.escape(key)}" data-size="{html.escape(size)}" data-label="{html.escape(label)}"'
-            f' title="下载 {html.escape(label)} 的 step {html.escape(latest)}(约 {html.escape(size)}),'
-            f'完成后链接到 checkpoints">⬇ 下载 {html.escape(size)}</button>'
-        )
-    return f'<div class="mdl">{badge}<br><small>{detail}</small>{button}{wandb_item_html(model, wandb or [])}</div>'
+        return f'<div class="mdl" title="{html.escape(tip)}"><small class="good">✅ 已下载</small>{wb}</div>'
+    partial = model.get("partial_steps") or []
+    have = [*local, *(f"{s} 没下完" for s in partial)]
+    tip += " · " + (f"本地 {', '.join(have)}" if have else "本地没有")
+    if model_downloading(model, running or set()):
+        got = model_local_bytes(model, DEFAULT_MODEL)
+        pct = f" {min(99, 100 * got // model['size'])}%" if model.get("size") else ""
+        return f'<div class="mdl" title="{html.escape(tip)}"><small>⬇ 下载中{pct}</small>{wb}</div>'
+    size = human_bytes(model.get("size") or 0)
+    label = f"{policy}/{key}"
+    button = (
+        f'<button class="download-model-btn mdl-btn" type="button" data-policy="{html.escape(policy)}"'
+        f' data-task="{html.escape(key)}" data-size="{html.escape(size)}" data-label="{html.escape(label)}"'
+        f' title="下载 {html.escape(label)} 的 step {html.escape(latest)}(约 {html.escape(size)}),'
+        f'完成后链接到 checkpoints">⬇ 下载 {html.escape(size)}</button>'
+    )
+    return f'<div class="mdl" title="{html.escape(tip)}">{button}{wb.removeprefix("<br>")}</div>'
 
 
 def wandb_run_text(r: dict) -> str:
