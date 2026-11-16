@@ -29,6 +29,7 @@ from collections import defaultdict
 import fnmatch
 import os
 import re
+import shutil
 import sys
 
 try:
@@ -166,6 +167,36 @@ print(f"[download_models] downloaded to {local_dir}")
 
 if args.no_link:
     sys.exit(0)
+
+SHIM_MARK = ".rsj_ckpt_shim"
+
+
+def needs_shim(src):
+    """LingBot_VLA 的评测脚本找 ``<root>/checkpoints/global_step_*/hf_ckpt``,而 ModelScope 上是
+    ``<run>/global_step_*/``(训练机上传时去掉了 checkpoints/ 这一层)。"""
+    return (os.path.isfile(os.path.join(src, "lingbotvla_cli.yaml"))
+            and not os.path.exists(os.path.join(src, "checkpoints"))
+            and any(STEP_RE.match(n) for n in os.listdir(src)))
+
+
+def link_shim(src, dst):
+    """``checkpoints/<run>`` 建成真目录:run 级文件逐个链接,step 目录链接到 ``checkpoints/`` 下。
+    只重建带标记的目录,别人放的真目录不动。"""
+    if os.path.islink(dst):
+        os.unlink(dst)
+    elif os.path.isdir(dst):
+        if not os.path.exists(os.path.join(dst, SHIM_MARK)):
+            print(f"[download_models] skip link: {dst} already exists and is not ours")
+            return
+        shutil.rmtree(dst)
+    os.makedirs(os.path.join(dst, "checkpoints"))
+    open(os.path.join(dst, SHIM_MARK), "w").close()
+    for name in sorted(os.listdir(src)):
+        here = os.path.join(dst, "checkpoints", name) if STEP_RE.match(name) else os.path.join(dst, name)
+        os.symlink(os.path.join(src, name), here)
+    print(f"[download_models] linked {os.path.relpath(dst, REPO_ROOT)}/ -> {os.path.relpath(src, REPO_ROOT)}"
+          "(step 目录放在 checkpoints/ 下)")
+
 for policy, task, run in selected:
     policy_dir = os.path.join(REPO_ROOT, "XPolicyLab", "policy", policy)
     if not os.path.isdir(policy_dir):
@@ -173,6 +204,9 @@ for policy, task, run in selected:
         continue
     src = os.path.join(local_dir, policy, task, run)
     dst = os.path.join(policy_dir, "checkpoints", run)
+    if needs_shim(src):
+        link_shim(src, dst)
+        continue
     if os.path.islink(dst):
         if os.path.realpath(dst) == os.path.realpath(src):
             continue

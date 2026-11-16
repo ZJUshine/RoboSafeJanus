@@ -85,7 +85,12 @@ KIND_LABEL = {"ingest": "下载资产", "collect": "采集", "export": "转换 L
 DATA_BUTTONS = ("collect", "exchange", "upload")  # 不审核,expert 批准后直接做
 BUTTONS = ("ingest", *DATA_BUTTONS, "eval", "layouts")
 # 评测(docs/model_evaluation.md 的固定协议)
-EVAL_POLICIES = ("Pi_0", "Pi_05")
+EVAL_POLICIES = ("Pi_0", "Pi_05")  # 只决定排序(这两个在前);要评哪些模型看 eval_policies():ModelScope 上有的都评
+SNAPSHOT = ROOT / "data" / "SYNC_STATUS.json"  # sync_status 写的快照,models = ModelScope 模型仓库里的模型
+# 评测时策略服务要的额外环境变量:本地从环境 / data/.cache/policy_env.json 取,远端从 docs/servers.json 的
+# 机器项 "policy_env" 取
+POLICY_ENV_VARS = {"LingBot_VLA": {"QWEN25_PATH": "Qwen2.5-VL-3B-Instruct 权重目录"}}
+POLICY_ENV_FILE = ROOT / "data" / ".cache" / "policy_env.json"
 EVAL_NUM = 50
 EVAL_SEED = 0
 EVAL_CFG = "arx_x5"
@@ -837,13 +842,74 @@ def _downloading() -> set[tuple[str, str]]:
     return found
 
 
+def _is_step(name: str) -> bool:
+    """checkpoint step 目录:纯数字或 step_<n> / global_step_<n>(和 download_models_from_modelscope.py 一致)。"""
+    return bool(re.match(r"^(?:global_)?step[_-]?\d+$|^\d+$", name, re.IGNORECASE))
+
+
+def _step_num(name: str) -> int:
+    return int(re.findall(r"\d+", name)[-1])
+
+
 def _complete_step(run_dir: Path) -> str | None:
     """run 目录里下载完整的最新 step(没有 ``*.incomplete`` 临时文件);没有时 None。"""
-    steps = sorted((d for d in run_dir.iterdir() if d.is_dir() and d.name.isdigit()), key=lambda d: int(d.name))
+    steps = sorted((d for d in run_dir.iterdir() if d.is_dir() and _is_step(d.name)), key=lambda d: _step_num(d.name))
     for step in reversed(steps):
         if not any(step.rglob("*.incomplete")) and any(step.rglob("*")):
             return step.name
     return None
+
+
+def eval_policies() -> tuple[str, ...]:
+    """要评的模型 = ModelScope 模型仓库里有的 policy(读 sync_status 的快照;Pi_0 / Pi_05 在前)。
+    快照读不到时退回本地 data/RoboSafeJanus-Model/ 下已有的。只算 XPolicyLab/policy/ 里有适配的。"""
+    found: set[str] = set()
+    try:
+        found = {m["policy"] for m in json.loads(SNAPSHOT.read_text(encoding="utf-8")).get("models") or []}
+    except (OSError, ValueError, KeyError, TypeError):
+        pass
+    if not found and MODEL_DIR.is_dir():
+        found = {d.name for d in MODEL_DIR.iterdir() if d.is_dir()}
+    found = {p for p in found if (ROOT / "XPolicyLab" / "policy" / p).is_dir()}
+    return (*[p for p in EVAL_POLICIES if p in found], *sorted(found - set(EVAL_POLICIES)))
+
+
+def _deploy_cfg(policy: str) -> dict:
+    import yaml
+
+    try:
+        path = ROOT / "XPolicyLab" / "policy" / policy / "deploy.yml"
+        return yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    except (OSError, ValueError):
+        return {}
+
+
+def policy_env(policy: str) -> str:
+    """``robodojo.sh eval --policy-env``:deploy.yml 有 ``policy_uv_env_path`` 的是 ``uv``(Pi_0 / Pi_05),
+    否则是 conda 环境(deploy.yml 的 ``policy_conda_env``,没写时用小写的 policy 名,如 lingbot_vla)。"""
+    cfg = _deploy_cfg(policy)
+    if cfg.get("policy_uv_env_path"):
+        return "uv"
+    return str(cfg.get("policy_conda_env") or policy.lower())
+
+
+def policy_env_vars(policy: str, m: dict | None = None) -> tuple[dict, list[str]]:
+    """``(要加的环境变量, 缺的说明)``;``m`` 是远端机器时从它的 ``policy_env`` 取。"""
+    need = POLICY_ENV_VARS.get(policy) or {}
+    if not need:
+        return {}, []
+    if m is not None and not sv.is_local(m):
+        have = dict(m.get("policy_env") or {})
+        where = f"docs/servers.json 的 {m['key']}.policy_env"
+    else:
+        try:
+            have = json.loads(POLICY_ENV_FILE.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            have = {}
+        have = {**have, **{k: os.environ[k] for k in need if os.environ.get(k)}}
+        where = rp.rel(POLICY_ENV_FILE)
+    got = {k: str(have[k]) for k in need if have.get(k)}
+    return got, [f"缺 {k}({desc},写进 {where})" for k, desc in need.items() if k not in got]
 
 
 def eval_models(group: str, task: str, downloading: set | None = None) -> list[dict]:
@@ -857,7 +923,7 @@ def eval_models(group: str, task: str, downloading: set | None = None) -> list[d
         keys.append((f"{group}_safe_tasks", True))
     downloading = _downloading() if downloading is None else downloading
     out = []
-    for policy in EVAL_POLICIES:
+    for policy in eval_policies():
         for key, zero_shot in keys:
             base = MODEL_DIR / policy / key
             runs = sorted(d for d in base.iterdir() if d.is_dir()) if base.is_dir() else []
@@ -867,12 +933,18 @@ def eval_models(group: str, task: str, downloading: set | None = None) -> list[d
             item = {"policy": policy, "key": key, "ckpt": run.name, "step": _complete_step(run),
                     "zero_shot": zero_shot, "ready": False, "why": ""}
             link = ROOT / "XPolicyLab" / "policy" / policy / "checkpoints" / run.name
+            env_missing = policy_env_vars(policy)[1]
             if any(p in (policy, "*") and t in (key, "*") for p, t in downloading):
                 item["why"] = "还在下载"
+            elif env_missing:
+                item["why"] = ";".join(env_missing)
             elif not item["step"]:
                 item["why"] = "没下载完(在模型列点「⬇ 下载」)"
             elif not link.exists():
                 item["why"] = f"缺 checkpoints/{run.name} 链接(重新点一次下载会补上)"
+            elif (link / "lingbotvla_cli.yaml").exists() and not (link / "checkpoints").exists():
+                # LingBot_VLA 评测找 <run>/checkpoints/global_step_*,下载脚本会建成这种布局
+                item["why"] = f"checkpoints/{run.name} 是旧的整目录链接(重新点一次下载会改好)"
             else:
                 item["ready"] = True
             out.append(item)
@@ -926,19 +998,23 @@ def policy_venv(policy: str) -> str:
 
 
 def remote_eval_missing(m: dict, item: dict) -> list[str]:
-    """远端评这个模型还缺什么:uv 环境、checkpoint 链接、模型文件(都按本地的 ckpt / step 找)。"""
+    """远端评这个模型还缺什么:uv / conda 环境、checkpoint 链接、模型文件(都按本地的 ckpt / step 找)、
+    策略要的环境变量(servers.json 的 policy_env)。"""
     pdir = f"XPolicyLab/policy/{item['policy']}"
-    need = [f"{policy_venv(item['policy'])}/.venv/bin/activate", f"{pdir}/checkpoints/{item['ckpt']}",
+    env = policy_env(item["policy"])
+    venv = (f"{policy_venv(item['policy'])}/.venv/bin/activate" if env == "uv"
+            else f"{m['conda_root']}/envs/{env}/bin/python")
+    need = [venv, f"{pdir}/checkpoints/{item['ckpt']}",
             f"{rp.rel(MODEL_DIR)}/{item['policy']}/{item['key']}/{item['ckpt']}/{item['step']}"]
-    return sv.missing_paths(m, need)
+    return sv.missing_paths(m, need) + policy_env_vars(item["policy"], m)[1]
 
 
 def eval_plan(group: str, task: str, policy: str = "", machine: str = "") -> dict:
-    """eval 格的「评测」:已下载的 Pi_0 / Pi_05 各评 50 条,没评满的续评;``policy`` 给出时只评这个模型。
+    """eval 格的「评测」:ModelScope 上有的模型(已下载的)各评 50 条,没评满的续评;``policy`` 给出时只评这个模型。
 
-    ``machine`` 是远端机器时,模型 / uv 环境要远端已经有(按本地的 ckpt / step 查),缺的这次不评。"""
-    if policy and policy not in EVAL_POLICIES:
-        raise PlanError(f"未知模型 {policy}(可选 {'、'.join(EVAL_POLICIES)})")
+    ``machine`` 是远端机器时,模型 / 策略环境要远端已经有(按本地的 ckpt / step 查),缺的这次不评。"""
+    if policy and policy not in eval_policies():
+        raise PlanError(f"ModelScope 上没有 {policy} 的模型(有:{'、'.join(eval_policies()) or '无'})")
     m = machine_cfg(machine)
     remote = not sv.is_local(m)
     state = _state(group, task, "eval")
@@ -947,7 +1023,7 @@ def eval_plan(group: str, task: str, policy: str = "", machine: str = "") -> dic
         raise PlanError(f"{task} {policy + ' ' if policy else ''}还不能评测:{reason}")
     who = f"{policy} " if policy else "每个模型"
     where = f"在 {m['key']}(远端 {sv.target(m)}:{m['repo_path']})上" if remote else f"在 {m['key']}(本机)上"
-    queue, lines = [], [f"{task}:{where}{who}评 {EVAL_NUM} 条(seed {EVAL_SEED},{EVAL_CFG},joint,policy-env uv)", ""]
+    queue, lines = [], [f"{task}:{where}{who}评 {EVAL_NUM} 条(seed {EVAL_SEED},{EVAL_CFG},joint)", ""]
     for item in eval_models(group, task):
         if policy and item["policy"] != policy:
             continue
@@ -1376,10 +1452,11 @@ def run_eval(group: str, task: str, gpus: str, policy: str = "", machine: str = 
             m = todo.pop(0)
             log = EVAL_LOGS / f"{task}_{m['policy']}_p{pair[0]}_{datetime.now():%Y%m%d_%H%M%S}.log"
             cmd = ["bash", "scripts/robodojo.sh", "eval", "--policy-dir", f"XPolicyLab/policy/{m['policy']}",
-                   "--task", task, "--ckpt", m["ckpt"], "--policy-env", "uv", "--action-type", "joint",
+                   "--task", task, "--ckpt", m["ckpt"], "--policy-env", policy_env(m["policy"]),
+                   "--action-type", "joint",
                    "--env-cfg", EVAL_CFG, "--eval-num", str(EVAL_NUM), "--seed", str(EVAL_SEED),
                    "--policy-gpu", str(pair[0]), "--env-gpu", str(pair[1])]
-            env = {**os.environ, "OMNI_KIT_ACCEPT_EULA": "YES"}
+            env = {**os.environ, "OMNI_KIT_ACCEPT_EULA": "YES", **policy_env_vars(m["policy"])[0]}
             if m["run_id"]:
                 env["ROBODOJO_RUN_ID"] = m["run_id"]
             print(f"$ {'ROBODOJO_RUN_ID=' + m['run_id'] + ' ' if m['run_id'] else ''}{' '.join(cmd)}\n  日志 {log}",
@@ -1614,11 +1691,13 @@ def run_eval_remote(group: str, task: str, gpus: str, policy: str, m: dict) -> i
     for i, item in enumerate(queue):
         pair = pairs[i % len(pairs)]
         cmd = ["bash", "scripts/robodojo.sh", "eval", "--policy-dir", f"XPolicyLab/policy/{item['policy']}",
-               "--task", task, "--ckpt", item["ckpt"], "--policy-env", "uv", "--action-type", "joint",
+               "--task", task, "--ckpt", item["ckpt"], "--policy-env", policy_env(item["policy"]),
+               "--action-type", "joint",
                "--env-cfg", EVAL_CFG, "--eval-num", str(EVAL_NUM), "--seed", str(EVAL_SEED),
                "--policy-gpu", str(pair[0]), "--env-gpu", str(pair[1])]
         log = f"{rp.rel(EVAL_LOGS)}/{task}_{item['policy']}_p{pair[0]}_{stamp}.log"
         run_id = f"ROBODOJO_RUN_ID={shlex.quote(item['run_id'])} " if item["run_id"] else ""
+        run_id += "".join(f"{k}={shlex.quote(v)} " for k, v in policy_env_vars(item["policy"], m)[0].items())
         lanes[i % len(pairs)].append(f"{run_id}{' '.join(shlex.quote(c) for c in cmd)} > {shlex.quote(log)} 2>&1"
                                      f" || fail=1")
     body = "fail=0; " + " ".join(f"( {'; '.join(lane)}; exit $fail ) & sleep 8;" for lane in lanes if lane)

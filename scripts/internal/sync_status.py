@@ -637,6 +637,21 @@ def step_dir_complete(step_dir: Path, remote: list[int] | None) -> tuple[bool, i
     return files > 0, size
 
 
+# checkpoint step 目录:纯数字(Pi_0 / Pi_05 的 2999)或 step_<n> / global_step_<n>(LingBot_VLA);
+# 和 scripts/download_models_from_modelscope.py 的 STEP_RE 一致。
+STEP_RE = re.compile(r"^(?:global_)?step[_-]?\d+$|^\d+$", re.IGNORECASE)
+
+
+def is_step(name: str) -> bool:
+    return bool(STEP_RE.match(name))
+
+
+def step_num(name: str) -> int:
+    """step 目录名里的数字(排序 / 比新旧用);``global_step_3053`` -> 3053。"""
+    digits = re.findall(r"\d+", name or "")
+    return int(digits[-1]) if digits else 0
+
+
 def collect_models(
     repo_id: str | None,
     json_tasks: dict[str, tuple[str, str]],
@@ -693,10 +708,10 @@ def collect_models(
         )
         entry["files"] += 1
         entry["size"] += getattr(item, "size", 0) or 0
-        step = next((part for part in parts[2:-1] if part.isdigit()), None)
+        step = next((part for part in parts[2:-1] if is_step(part)), None)
         if step:
             entry["steps"].add(step)
-        run = parts[2] if len(parts) >= 4 and not parts[2].isdigit() else None
+        run = parts[2] if len(parts) >= 4 and not is_step(parts[2]) else None
         if run:
             entry["runs"].add(run)
             if step:  # 每个 run 的每个 step 远端有多少文件 / 字节,用来判断本地是否下载完整
@@ -728,12 +743,12 @@ def collect_models(
                 if not run_dir.is_dir():
                     continue
                 for step_dir in sorted(run_dir.iterdir()):
-                    if step_dir.is_dir() and step_dir.name.isdigit():
+                    if step_dir.is_dir() and is_step(step_dir.name):
                         complete, size = step_dir_complete(step_dir, entry["step_remote"].get((run, step_dir.name)))
                         (local_steps if complete else partial_steps).add(step_dir.name)
                         local_size += size
         partial_steps -= local_steps
-        steps = sorted(entry["steps"], key=int)
+        steps = sorted(entry["steps"], key=step_num)
         latest_step = steps[-1] if steps else None
         models.append({
             "policy": entry["policy"],
@@ -750,8 +765,8 @@ def collect_models(
             "alias_task": alias_task,
             "group": group,
             "level": level,
-            "local_steps": sorted(local_steps, key=int),
-            "partial_steps": sorted(partial_steps, key=int),
+            "local_steps": sorted(local_steps, key=step_num),
+            "partial_steps": sorted(partial_steps, key=step_num),
             "local_size": local_size,
             "downloaded": bool(local_steps),
             "needs_download": bool(latest_step) and latest_step not in local_steps,
@@ -1349,6 +1364,10 @@ def model_item_html(model: dict, task: str, group: bool, wandb: list[dict] | Non
     latest = model.get("latest_step") or "—"
     local = model.get("local_steps") or []
     scope = "组模型 " if group else ""
+    if not model.get("latest_step"):  # 远端只有 run 级文件、没有能认出的 step 目录:不能说"已下载"
+        badge = f'<span class="badge warn" title="{html.escape(key)}">❔ {scope}{html.escape(policy)}</span>'
+        return (f'<div class="mdl">{badge}<br><small>远端没认出 checkpoint step 目录</small>'
+                f'{wandb_item_html(model, wandb or [])}</div>')
     if not model.get("needs_download"):
         badge = f'<span class="badge good" title="{html.escape(key)}">✅ {scope}{html.escape(policy)}</span>'
         detail = f"step {html.escape(latest)} · 已下载"
@@ -2819,8 +2838,8 @@ def model_matrix_html(snapshot: dict) -> str:
                 if not model["local_steps"]:
                     local = '<span class="badge bad">本地 无</span>'
                 elif model["needs_download"]:
-                    local_latest = max(int(step) for step in model["local_steps"])
-                    remote_latest = int(model["latest_step"] or 0)
+                    local_latest = max(step_num(step) for step in model["local_steps"])
+                    remote_latest = step_num(model["latest_step"] or "")
                     if local_latest > remote_latest:
                         local = f'<span class="badge good">本地 step {html.escape(local_steps)} · 新于远端</span>'
                     else:
@@ -4290,6 +4309,7 @@ def html_page(
         '  <button id="refresh-btn" type="button">🔄 手动刷新</button>\n'
         '  <span id="refresh-hint" class="hint">用 --serve 打开时按钮会在服务端执行任务</span>'
     )
+    task_cells["_policies"] = cell_policies(snapshot, out_dir)  # 宽表按模型分行:每次刷新按 ModelScope 更新种类
     write_pipeline_page(out_dir, task_cells)  # 先写片段(含大表的数据格),页面里内嵌最新的
     boxes, pipe_assets = pipeline_parts(out_dir)
     table_html = "".join(boxes.values())
@@ -5096,6 +5116,26 @@ def group_upload_busy() -> str:
     if not busy:
         return ""
     return f"{busy[0]['task']} 正在{group_jobs.KIND_LABEL[busy[0]['kind']]},等它结束"
+
+
+def cell_policies(snapshot: dict, out_dir: Path) -> list[str]:
+    """总览宽表模型 / 评测 / 结果按哪些模型分行 = ModelScope 模型仓库里有的 policy(都要评;Pi_0 / Pi_05 在前)。
+    模型仓库这次没读到时沿用上一次的列表,免得网络抖一下行就少了。"""
+    import group_jobs
+
+    found = {m["policy"] for m in snapshot["models"]}
+    if snapshot.get("model_error") or not found:
+        try:
+            import pipeline_page
+
+            found |= set(json.loads((out_dir / pipeline_page.CELLS_FILE).read_text(encoding="utf-8"))
+                         .get("_policies") or [])
+        except (ImportError, OSError, ValueError, AttributeError):
+            pass
+    found.discard(None)
+    found.discard("")
+    order = group_jobs.EVAL_POLICIES
+    return [*[p for p in order if p in found], *sorted(found - set(order))]
 
 
 def write_pipeline_page(out_dir: Path, cells: dict | None = None) -> None:

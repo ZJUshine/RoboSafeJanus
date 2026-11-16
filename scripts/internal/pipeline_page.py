@@ -50,7 +50,6 @@ import sys
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
-from group_jobs import EVAL_POLICIES  # noqa: E402
 import rsj_pipeline as rp  # noqa: E402
 
 PAGE = "PIPELINE.html"
@@ -481,7 +480,7 @@ def status_cell(state: dict, key: str, span: int = 1, extra: str = "") -> str:
 
 # 总览宽表里穿插的数据列:sync_status 每次重建时把每个任务的格子写进 CELLS_FILE
 CELLS_FILE = "pipeline/_fragments/cells.json"
-DATA_HEADS = {"eval_layout": ("评测布局", "seed 0"), "model:*": ("模型", "每个模型(Pi_0 / Pi_05)一行:checkpoint"),
+DATA_HEADS = {"eval_layout": ("评测布局", "seed 0"), "model:*": ("模型", "每个模型一行(ModelScope 模型仓库里有哪些 policy 就列哪些):checkpoint"),
               "result:*": ("评测结果", "每个模型一行:success")}
 # 数据收集与上传:不审核,格子里写实际数据 + 按钮(job_cell)
 JOB_HEADS = {"collect": ("collect", "批量采集 · 视频"), "exchange": ("exchange", "转换 LeRobot v3.0 + v2.1"),
@@ -490,7 +489,7 @@ JOB_HEADS = {"collect": ("collect", "批量采集 · 视频"), "exchange": ("exc
 COL_LABEL = {"seed": "种子", "assets": "资产", "ingest": "入库", "design": "设计", "layout": "布局", "expert": "专家",
              "collect": "采集", "exchange": "转换", "upload": "上传", "eval": "评测"}
 # (大类, 列):列是阶段名、JOB_HEADS 或 DATA_HEADS 的键(不能重名)。
-# 模型评测:评测布局在最前;``*:*`` 三列按模型分行——每个任务每个模型(EVAL_POLICIES)一行,
+# 模型评测:评测布局在最前;``*:*`` 三列按模型分行——每个任务每个模型(cells 的 ``_policies``:ModelScope 上的 policy)一行,
 # 同一模型的模型 / 评测 / 结果在同一行,其他列上下合并。格子数据在 cells 的 ``model:<policy>`` /
 # ``result:<policy>``;评测格(``eval_cell``,不审核)写这一行模型已评几条,「▶ 评测」只评这一行的模型。
 WIDE_COLUMNS = (
@@ -513,6 +512,14 @@ def load_cells(out_dir: Path) -> dict:
         return json.loads((out_dir / CELLS_FILE).read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return {}
+
+
+def cell_policies(cells: dict | None) -> tuple[str, ...]:
+    """宽表按模型分行的模型种类:sync_status 按 ModelScope 模型仓库写进 cells 的 ``_policies``;
+    没有时(旧的 cells.json)退回 group_jobs.eval_policies()。"""
+    import group_jobs as gj
+
+    return tuple((cells or {}).get("_policies") or gj.eval_policies())
 
 
 def _blocked(problems: list[str]) -> str:
@@ -584,7 +591,7 @@ def layouts_button(state: dict, task: str) -> str:
 
 
 def eval_button(state: dict, task: str, policy: str = "") -> str:
-    """eval 格的「▶ 评测」:这个任务的模型(Pi_0 / Pi_05)下载完、评测布局够 50 个才出现;expert 没批准时灰掉。
+    """eval 格的「▶ 评测」:这个任务的模型(ModelScope 上有的)下载完、评测布局够 50 个才出现;expert 没批准时灰掉。
 
     点了弹出计划(group_jobs ``eval``:要评的模型、已评 / 续评、GPU),确认后后台跑 ``robodojo.sh eval``。
     ``policy`` 给出时(宽表按模型分开的 eval 格)只管这个模型。评完不提交(eval 不审核)。"""
@@ -796,7 +803,7 @@ def group_task_table(states: list[dict], stages, *, phases: bool = False, filter
         thead = "<tr>" + "".join(f'<th class="lhead">{h}</th>' for h in fixed) + col_heads + "</tr>"
     bodies = []
     by_group = {s["group"]: s for s in states}
-    policies = EVAL_POLICIES if any(c.endswith(":*") for _, c in columns) else ()
+    policies = cell_policies(cells) if any(c.endswith(":*") for _, c in columns) else ()
     k = max(1, len(policies))  # 每个任务占几行
     for index, state in enumerate(states, 1):
         g = state["group"]
