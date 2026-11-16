@@ -1028,6 +1028,21 @@ def eval_runs(task: str, policy: str, ckpt: str, variant: str = "") -> list[tupl
     return out
 
 
+def eval_manifest(task: str, policy: str, ckpt: str, run_id: str, variant: str = "") -> Path:
+    """``run_id`` 的续评清单 ``_resume_<run_id>.json``(和结果目录同级;src/eval_client/main.py 只认它)。"""
+    return eval_result_base(task, policy, ckpt, variant) / f"_resume_{run_id}.json"
+
+
+def eval_resume_run(task: str, policy: str, ckpt: str, target: int, variant: str = "") -> tuple[str, int] | None:
+    """能续评的那次 ``(run_id, eval_time)``:没评满且续评清单还在。
+
+    评到自己 ``--eval-num`` 的运行(比如 5 条的 pilot)结束时清单被删了;拿它的 run_id 再跑,
+    main.py 找不到清单会在同一个目录从第 0 条从头评、把已有结果盖掉,所以这种只能新评。"""
+    runs = [r for r in eval_runs(task, policy, ckpt, variant)
+            if 0 < r[1] < target and eval_manifest(task, policy, ckpt, r[0], variant).is_file()]
+    return max(runs, key=lambda r: r[1]) if runs else None
+
+
 def eval_blocked(state: dict, group: str, task: str, downloading: set | None = None, policy: str = "",
                  variant: str = "") -> str:
     """评测按钮不能点的原因(看板 eval 格用);空串表示可以点。``policy`` 给出时只看这个模型。"""
@@ -1107,7 +1122,8 @@ def eval_plan(group: str, task: str, policy: str = "", machine: str = "", varian
         if best and best[1] >= target:
             lines.append(f"  ✅ {name}:已评满 {best[1]} 条({best[0]}),跳过")
             continue
-        resume = best[0] if best and best[1] > 0 else None
+        partial = eval_resume_run(task, item["policy"], item["ckpt"], target, variant)
+        resume = partial[0] if partial else None
         if remote:
             try:
                 missing = remote_eval_missing(m, item)
@@ -1116,7 +1132,13 @@ def eval_plan(group: str, task: str, policy: str = "", machine: str = "", varian
             if missing:
                 lines.append(f"  ⏭ {name}:{m['key']} 上缺 " + "、".join(missing) + ",这次不评")
                 continue
-        lines.append(f"  ▶ {name}:" + (f"续评 {best[0]}(已有 {best[1]}/{target})" if resume else "新评"))
+        if resume:
+            how = f"续评 {resume}(已有 {partial[1]}/{target})"
+        elif best and best[1] > 0:
+            how = f"新评({best[0]} 的 {best[1]} 条已经按自己的条数评完、没有续评清单,接不上)"
+        else:
+            how = "新评"
+        lines.append(f"  ▶ {name}:{how}")
         queue.append({**item, "run_id": resume})
     if not queue:
         tail = (f"{m['key']} 上没有能评的模型:先在远端装好 uv 环境、下好模型(和本地同一个 ckpt / step),再点一次。"
@@ -1827,10 +1849,19 @@ def run_collect_remote(group: str, task: str, gpus: str, m: dict, per_gpu: int |
 
 
 def run_eval_remote(group: str, task: str, gpus: str, policy: str, m: dict, variant: str = "") -> int:
+    dest = f"{sv.target(m)}:{m['repo_path']}"
+    result_rel = rp.rel(EVAL_RESULT / task)
+    # 先把远端已有的结果拉回来(上次评完但拉回失败的、远端评得更多的);--update:本地更新的不盖
+    _step(group, task, f"先拉回 {m['key']} 上已有的评测结果")
+    (EVAL_RESULT / task).mkdir(parents=True, exist_ok=True)
+    if sv.run(m, f"test -d {shlex.quote(result_rel)}", timeout=30).returncode == 0 \
+            and _rsync(m, "--update", f"{dest}/{result_rel}/", f"{EVAL_RESULT / task}/") != 0:
+        raise PlanError(f"从 {m['key']} 拉回已有评测结果失败,没开评(避免把远端更全的结果当成没评)")
     queue = eval_plan(group, task, policy, m["key"], variant)["queue"]  # 再确认一次闸门(含远端模型检查),重新算续评
     target = eval_target(task, variant)
     tag = f"_{variant}" if variant else ""
     if not queue:
+        _step(group, task, f"{m['key']} 上的结果拉回后已评满,不用再跑")
         return 0
     rdir = f"{REMOTE_DIR}/{task}_eval_{datetime.now():%Y%m%d_%H%M%S}"
     r = {"machine": m["key"], "dir": rdir, "started_at": now(),
@@ -1838,19 +1869,20 @@ def run_eval_remote(group: str, task: str, gpus: str, policy: str, m: dict, vari
     update_job(group, task, remote=r)
     _step(group, task, f"同步代码 + 评测布局到 {m['key']}")
     sync_code(m)
-    dest = f"{sv.target(m)}:{m['repo_path']}"
     layout_rel = rp.rel(EVAL_LAYOUT)
     sv.run(m, f"mkdir -p {shlex.quote(layout_rel)} {shlex.quote(rp.rel(EVAL_LOGS))}", timeout=30)
     # <task>_*.json 也包括 S1 变体的 <task>__<variant>_*.json
     if _rsync(m, "--include", f"{task}_*.json", "--exclude", "*", f"{EVAL_LAYOUT}/", f"{dest}/{layout_rel}/") != 0:
         raise PlanError(f"同步评测布局到 {m['key']} 失败")
-    result_rel = rp.rel(EVAL_RESULT / task)
-    for item in queue:  # 要续评的结果先推过去(ROBODOJO_RUN_ID 接着同一个目录评)
+    for item in queue:  # 要续评的结果 + 续评清单先推过去(ROBODOJO_RUN_ID 接着同一个目录评;main.py 靠清单续)
         if item["run_id"]:
             base = eval_result_base(task, item["policy"], item["ckpt"], variant)
             rel = rp.rel(base / item["run_id"])
+            manifest = eval_manifest(task, item["policy"], item["ckpt"], item["run_id"], variant)
             sv.run(m, f"mkdir -p {shlex.quote(rel)}", timeout=30)
-            if _rsync(m, f"{base / item['run_id']}/", f"{dest}/{rel}/") != 0:
+            # --update:远端比本地新的文件不盖(远端可能评得更多)
+            if (_rsync(m, "--update", f"{base / item['run_id']}/", f"{dest}/{rel}/") != 0
+                    or _rsync(m, "--update", str(manifest), f"{dest}/{rp.rel(manifest)}") != 0):
                 raise PlanError(f"推送续评结果 {rel} 到 {m['key']} 失败")
     ids = [int(x) for x in gpus.split(",") if x.strip()]
     pairs = [(ids[i], ids[i + 1] if i + 1 < len(ids) else ids[i]) for i in range(0, len(ids), 2)] or [(0, 0)]
