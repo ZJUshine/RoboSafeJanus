@@ -85,6 +85,103 @@
       },
       "collect_output": "data/RoboSafeJanus-Benchmark/<group>/<level>/<task>/<config>/"
     },
+    "autodl_eval": {
+      "role": "remote",
+      "description": "远端评测服务器(AutoDL 新实例;/root/autodl-fs 与 autodl 是同一份共享存储,仓库/模型/uv 环境共用,别和 autodl 同时跑同一组任务)",
+      "ssh": {
+        "user": "root",
+        "host": "connect.westd.seetacloud.com",
+        "port": 16974,
+        "command": "ssh -p 16974 root@connect.westd.seetacloud.com"
+      },
+      "os": "Ubuntu 22.04.5 LTS",
+      "cpu": {
+        "model": "Intel Xeon Platinum 8470Q",
+        "threads": 208
+      },
+      "memory_gib": 1007,
+      "gpus": [
+        {
+          "model": "NVIDIA RTX PRO 6000 Blackwell Server Edition",
+          "count": 1,
+          "memory_gib_per_gpu": 96
+        }
+      ],
+      "driver": {
+        "version": "580.82.09",
+        "cuda": "13.x",
+        "isaac_sim_compatible": true,
+        "required_major": 580
+      },
+      "repo_path": "/root/autodl-fs/RoboDojo",
+      "data_root": "/root/autodl-fs",
+      "shared_storage_with": "autodl",
+      "assets": {
+        "path": "data/RoboSafeJanus-Asset/Assets"
+      },
+      "conda_root": "/root/miniconda3",
+      "conda_env": {
+        "name": "RoboDojo",
+        "activate": "conda activate RoboDojo",
+        "python": "3.11.17",
+        "torch": "2.7.0+cu128",
+        "isaacsim": "5.1.0"
+      },
+      "policy_uv_envs": {
+        "Pi_05": "XPolicyLab/policy/Pi_05/openpi/.venv",
+        "Pi_0": "XPolicyLab/policy/Pi_0/openpi/.venv",
+        "note": "openpi uv venv(base = conda RoboDojo python 3.11.17),jax 0.5.3 走 CUDA;装在共享盘上,autodl 也直接可用"
+      },
+      "collect_output": "data/RoboSafeJanus-Benchmark/<group>/<level>/<task>/<config>/"
+    },
+    "hz01": {
+      "role": "remote",
+      "description": "远端采集 / 评测服务器(gpuhome hz01;仓库/资产/模型在 JuiceFS /root/rivermind-fs,只有 10 万 inode;conda、Pi uv venv、缓存在本地盘 /root/rivermind-data)",
+      "ssh": {
+        "user": "root",
+        "host": "hz01-ssh.gpuhome.cc",
+        "port": 30164,
+        "command": "ssh -p 30164 root@hz01-ssh.gpuhome.cc"
+      },
+      "os": "Ubuntu 24.04.4 LTS",
+      "cpu": {
+        "model": null,
+        "threads": 224
+      },
+      "memory_gib": 1007,
+      "gpus": [
+        {
+          "model": "NVIDIA RTX 6000D",
+          "count": 1,
+          "memory_gib_per_gpu": 84
+        }
+      ],
+      "driver": {
+        "version": "580.119.02",
+        "cuda": "13.x",
+        "isaac_sim_compatible": true,
+        "required_major": 580
+      },
+      "repo_path": "/root/rivermind-fs/RoboSafeJanus",
+      "data_root": "/root/rivermind-fs",
+      "assets": {
+        "path": "data/RoboSafeJanus-Asset/Assets"
+      },
+      "conda_root": "/root/rivermind-data/miniconda3",
+      "conda_env": {
+        "name": "RoboDojo",
+        "activate": "conda activate RoboDojo",
+        "python": "3.11",
+        "torch": "2.7.0+cu128",
+        "isaacsim": "5.1.0"
+      },
+      "policy_uv_envs": {
+        "Pi_05": "XPolicyLab/policy/Pi_05/openpi/.venv -> /root/rivermind-data/venvs/Pi_05",
+        "Pi_0": "XPolicyLab/policy/Pi_0/openpi/.venv -> /root/rivermind-data/venvs/Pi_0",
+        "note": "openpi uv venv(base = conda RoboDojo python);~/.bashrc source /root/rivermind-fs/env.sh(缓存/TMPDIR 在本地盘、EULA)"
+      },
+      "collect_output": "data/RoboSafeJanus-Benchmark/<group>/<level>/<task>/<config>/"
+    },
     "chpc": {
       "role": "remote",
       "description": "外部采集 / 评测服务器",

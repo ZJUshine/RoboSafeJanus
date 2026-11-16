@@ -11,7 +11,7 @@
 | 项目 | 约定 |
 | :-- | :-- |
 | 评测范围 | 任务定义(`task/robosafejanus_tasks`) 中的组;每组评测**全部** safe + risky 任务 |
-| 机器 | 本地 8× RTX 5880 Ada,或远端 8× RTX 5090;见 `docs/servers.json` |
+| 机器 | 本地 8× RTX 5880 Ada、远端 1× RTX PRO 6000(`autodl` / `autodl_eval`,两者共用一块 AutoFS)、或远端 8× RTX 5090;见 `docs/servers.json` |
 | 环境 | sim: conda `RoboDojo`;policy: `uv`(如 Pi_05 / Pi_0)或策略自己的 conda 环境 |
 | env config | `arx_x5` |
 | action type | `joint` |
@@ -167,6 +167,37 @@ bash scripts/robodojo.sh doctor
 
 - Pi_0 / Pi_05:OpenPI 的 uv 环境,`--policy-env uv`;
 - 其他策略:按 `XPolicyLab/policy/<POLICY>/README.md`,通常传 conda 环境名或环境路径。
+
+**远端机器必须先装好 uv 环境**(`group_jobs` 只在本地装):
+
+```bash
+ssh -p <port> <user>@<host>
+pip install uv && ln -sf /root/miniconda3/bin/uv /usr/local/bin/uv
+REPO=<repo_path>
+cd $REPO/XPolicyLab/policy/Pi_05                      # Pi_0 同理
+[ -f openpi/.venv/bin/activate ] || ( cd openpi && uv venv --python /root/miniconda3/envs/RoboDojo/bin/python )
+export UV_DEFAULT_INDEX=https://pypi.tuna.tsinghua.edu.cn/simple UV_LINK_MODE=copy
+( cd openpi && uv sync --group lerobot )
+uv pip install --python $PWD/openpi/.venv/bin/python -e openpi
+uv pip install --python $PWD/openpi/.venv/bin/python -e $REPO/XPolicyLab   # h5py 等 XPolicyLab 自己的依赖
+```
+
+> ⚠️ 三个坑(都会把 openpi 依赖写进 **sim 的 conda 环境**,把 torch 2.7 换成 2.10 直接弄坏 Isaac):
+>
+> 1. **不要 `conda activate RoboDojo`** 再跑 `install.sh`/`uv pip`:uv pip 会装进“当前激活的环境”。
+> 2. **不要 `export UV_PYTHON=<conda python>`** 再跑 `uv pip`:它会让 uv 直接改用那个解释器,覆盖 `VIRTUAL_ENV`。
+>    要么一开始就 `uv venv --python <conda python>`,要么给每条 `uv pip` 加 `--python <venv>/bin/python`。
+> 3. `install.sh` 最后一步 `uv run python -c "import XPolicyLab"` 会因 `uv run` 的自动 sync 冲掉手工装的
+>    XPolicyLab 及其依赖,报 `No module named 'XPolicyLab'`/`'h5py'` 不是环境坏了——按 policy 自带 install.sh
+>    的分步命令自己跑,并用 eval 的方式验证:
+>
+> ```bash
+> PYTHONPATH=$REPO:$PWD/openpi/src $PWD/openpi/.venv/bin/python \
+>   -c "import XPolicyLab, openpi, jax, h5py; print(jax.devices())"
+> ```
+
+装好后 `openpi/.venv/bin/activate` 必须在;远端评测时就按这个路径检查(`remote_eval_missing`)。模型文件
+(`data/RoboSafeJanus-Model/...`)也要在远端存在,否则该模型这次不评。
 
 策略目录必须至少包含:
 
@@ -386,6 +417,7 @@ python src/data_collect/eval_layouts.py write \
 | :-- | :-- | :-- |
 | 本地 8× RTX 5880 Ada | 最多 3 条(6 卡) | 留卡给临时调试/采集;旧报告按 3 条执行 |
 | 远端 8× RTX 5090 | 4 条(8 卡) | pod 上专用评测 |
+| 远端 1× RTX PRO 6000(`autodl` / `autodl_eval`) | 1 条 | 只有一张卡,policy 和 sim 共用;两台机器共用同一仓库,同一 `(task, ckpt)` 不要在两台上同时跑 |
 
 约束:
 
