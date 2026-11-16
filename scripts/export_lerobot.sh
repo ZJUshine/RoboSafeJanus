@@ -89,6 +89,8 @@ source_view=${ROBOSAFEJANUS_LEROBOT_SOURCE:-data/${flat_bench}}
 
 # shellcheck disable=SC1091
 source "$(conda info --base)/etc/profile.d/conda.sh"
+# 用 ${CONDA_PREFIX}/bin/python 而不是 `python`:调用方(group_jobs._sh)会把 RoboDojo/bin 插到 PATH 最前,
+# conda activate 只替换 base 的 PATH 项,裸 `python` 仍会解析到 RoboDojo(没有 pandas)
 
 for fmt in "${formats[@]}"; do
   env_name=${env_name_v30}
@@ -126,7 +128,7 @@ for task_link in "${source_view}"/${task_glob}; do
       mkdir -p "$(dirname "${v30_dir}")"
       echo "[export_lerobot] v30 ${task_name} -> ${v30_dir}"
       conda activate "${env_name_v30}"
-      if ! HF_LEROBOT_HOME="$(dirname "${v30_dir}")" python XPolicyLab/scripts/transform_lerobot_v30_format.py \
+      if ! HF_LEROBOT_HOME="$(dirname "${v30_dir}")" "${CONDA_PREFIX}/bin/python" XPolicyLab/scripts/transform_lerobot_v30_format.py \
           "${flat_bench}.${task_name}.${env_cfg_type}" --repo_id "${task_name}" "${extra_args[@]}"; then
         failed+=("v30:${task_name}")
         # v3.0 失败时不能用残缺的 v3.0 派生 v2.1
@@ -142,7 +144,7 @@ for task_link in "${source_view}"/${task_glob}; do
       mkdir -p "$(dirname "${v21_dir}")"
       echo "[export_lerobot] v21 ${task_name} <- ${v30_dir}"
       conda activate "${env_name_v21}"
-      if ! python src/data_collect/lerobot_v30_to_v21.py "${v30_dir}" "${v21_dir}"; then
+      if ! "${CONDA_PREFIX}/bin/python" src/data_collect/lerobot_v30_to_v21.py "${v30_dir}" "${v21_dir}"; then
         failed+=("v21:${task_name}")
       fi
     fi
