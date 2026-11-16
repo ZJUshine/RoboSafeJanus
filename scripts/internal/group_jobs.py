@@ -29,8 +29,10 @@
 采集和评测先选机器(``docs/servers.json``,``servers.py``):本机直接跑;远端机器走 SSH——同步代码
 (``servers.CODE_DIRS`` + ``data/grasp_pose``,评测再加该任务的评测布局和要续评的结果,都不加 ``--delete``)→ 远端
 ``setsid nohup`` 运行(目录 ``data/.rsj_remote/<task>_<kind>_<时间>``,日志 ``<目录>.log``,退出码 ``<目录>/exit_code``)→
-本地后台进程每分钟看一次远端进度、把远端日志接到本地日志 → 跑完把结果拉回:采集拉到 ``data/.cache/remote_pull/`` 再用
-``merge_shards.py`` 接到本地数据之后(编号接续、seed 去重),评测拉回 ``eval_result/RoboDojo/<task>/`` 和 ``eval_logs/``。
+本地后台进程每分钟看一次远端进度、把远端日志接到本地日志 → 跑完把结果拉回。采集边采边拉:远端以 ``--keep_shards``
+启动,本地每轮把新完成的分片增量 rsync 到 ``data/.cache/remote_pull/<run>/shards/``,传输和采集重叠;采完补齐分片、
+按远端合并的 ``seed.txt`` 核对,再用 ``merge_shards.py`` 接到本地数据之后(编号接续、seed 去重),分片对不上时退回
+整包拉 ``<rdir>/<task>``。评测拉回 ``eval_result/RoboDojo/<task>/`` 和 ``eval_logs/``。
 远端没跑完时再点一次、选同一台机器就续上(远端还在跑就接着看,跑完了就拉回);采集没拉回前不能换机器(seed 段会撞)。
 远端的数据不删,资产和模型不自动同步(缺的在计划里列出来)。
 
@@ -642,7 +644,7 @@ def remote_collect_plan(group: str, task: str, m: dict, pending: dict | None) ->
     lines += ["", "步骤(后台自动做,关掉页面也继续):",
               f"  1. 同步代码 {' '.join(sv.CODE_DIRS)} + data/grasp_pose 到远端(rsync,不加 --delete)",
               f"  2. 远端 collect_data_parallel.sh 采 {t['episode_num']} 条(用下面填的卡,每卡「每卡 worker 数」个)",
-              "  3. 采完把远端数据拉回本地,merge_shards.py 接到本地已有数据之后(编号接续,seed 去重)",
+              "  3. 边采边把新完成的分片拉回本地,采完核对 seed 后 merge_shards.py 接到本地数据之后(编号接续,seed 去重)",
               "远端的数据不删。中断后再点一次、选同一台机器就续上;采完不用审核,接着点 exchange 格的「转换」。"]
     return {"group": group, "task": task, "kind": "collect", "plan": t, "free_gpus": free,
             "per_gpu": sv.per_gpu_default(m), **_machine_fields(m), "remote_dir": (pending or {}).get("dir"),
@@ -1495,6 +1497,34 @@ def _rsync(m: dict, *args: str) -> int:
     return _sh(["rsync", "-a", "--partial", "-e", sv.rsync_rsh(m), *args])
 
 
+def _rsync_data(m: dict, *args: str) -> int:
+    """增量拉分片:不带 ``--partial``——远端还在写的文件传一半也不留副本,下一轮整份重传,不会拿半个文件当续传基础。"""
+    return _sh(["rsync", "-a", "-e", sv.rsync_rsh(m), *args])
+
+
+SHARD_EXCLUDES = ("--exclude", "/logs/", "--exclude", "video_fail/")  # 分片里 worker 日志和失败视频不拉(merge 也不用)
+
+
+def remote_shards(m: dict, rdir: str, task: str) -> bool:
+    """远端这次运行的采集分片还在(``--keep_shards`` 启动,合并后不删)。"""
+    out = sv.run(m, f"ls -d {shlex.quote(f'{rdir}/_shards/{task}')}/w* 2>/dev/null | head -1", timeout=60).stdout
+    return bool(out.strip())
+
+
+def remote_seeds(m: dict, rdir: str, task: str) -> set[int]:
+    """远端合并好的 ``<rdir>/<task>/<config>/seed.txt``:这批采到的全部 seed(核对分片拉全了没有)。"""
+    path = shlex.quote(f"{rdir}/{task}/{rp.CONFIG_NAME}/seed.txt")
+    return {int(s) for s in sv.run(m, f"cat {path} 2>/dev/null", timeout=60).stdout.split() if s.isdigit()}
+
+
+def shard_seeds(root: Path, task: str) -> set[int]:
+    """``<root>/w*/<task>/<config>/seed.txt`` 的并集。"""
+    seeds: set[int] = set()
+    for path in root.glob(f"w*/{task}/{rp.CONFIG_NAME}/seed.txt"):
+        seeds.update(_seeds(path))
+    return seeds
+
+
 def sync_code(m: dict) -> None:
     """代码 + 抓取缓存同步到远端仓库(不加 --delete;task/RoboDojo 的相对软链接原样保留)。"""
     dest = f"{sv.target(m)}:{m['repo_path']}/"
@@ -1555,8 +1585,10 @@ if [ "$n" -gt {offset} ]; then tail -c +{offset + 1} {log} | head -c $((n - {off
     return info
 
 
-def remote_watch(group: str, task: str, m: dict, rdir: str, what: str, count_cmd: str = "", on_count=None) -> int:
+def remote_watch(group: str, task: str, m: dict, rdir: str, what: str, count_cmd: str = "", on_count=None,
+                 on_tick=None) -> int:
     """每分钟看一次远端,把远端日志新增的部分接到本地日志;返回远端退出码(进程没了又没写退出码时 -1)。
+    ``on_tick(count)`` 每轮调一次(采集用它增量拉分片,失败不影响继续看)。
     SSH 偶尔断开不算失败,连着 10 次连不上才放弃(远端照样在跑,再点一次按钮会接上)。"""
     offset, failures = 0, 0
     while True:
@@ -1575,6 +1607,11 @@ def remote_watch(group: str, task: str, m: dict, rdir: str, what: str, count_cmd
         offset = info["size"]
         if on_count and info["count"] is not None:
             on_count(info["count"])
+        if on_tick:
+            try:
+                on_tick(info["count"])
+            except (sv.ServerError, OSError) as error:
+                print(f"[group_jobs] {now()} 增量拉回跳过:{error}", flush=True)
         if not info["alive"]:
             return info["exit"] if info["exit"] is not None else -1
         update_job(group, task, step=f"{what}({m['key']} 上运行中)")
@@ -1592,7 +1629,7 @@ def run_collect_remote(group: str, task: str, gpus: str, m: dict, per_gpu: int |
                                "template": t["template"], "started_at": now()}
     rdir = r["dir"]
     update_job(group, task, remote=r)
-    # 已合并的(<rdir>/<task>/<config>/data)和分片里的取大的:采到一半只有分片,采完分片删掉,失败时两边都有
+    # 已合并的(<rdir>/<task>/<config>/data)和分片里的取大的:采到一半只有分片,采完两边都有(--keep_shards)
     q = shlex.quote
     count_cmd = (f"a=$(ls {q(f'{rdir}/{task}/{rp.CONFIG_NAME}/data')} 2>/dev/null | grep -c '[.]hdf5$'); "
                  f"b=$(find {q(f'{rdir}/_shards/{task}')} -path '*/{task}/{rp.CONFIG_NAME}/data/*.hdf5' 2>/dev/null"
@@ -1606,8 +1643,9 @@ def run_collect_remote(group: str, task: str, gpus: str, m: dict, per_gpu: int |
         _step(group, task, f"同步代码到 {m['key']}")
         sync_code(m)
         n = per_gpu or sv.per_gpu_default(m)
+        # --keep_shards:采完远端合并后分片不删,本地才能边采边拉、按分片合并
         cmd = ["bash", "scripts/collect_data_parallel.sh", task, str(r["episode_num"]), gpus,
-               "--save_dir", rdir, "--start_seed", str(r["start_seed"])]
+               "--save_dir", rdir, "--start_seed", str(r["start_seed"]), "--keep_shards"]
         if r.get("template"):
             cmd += ["--layout_template", r["template"]]
         inner = f"export ROBODOJO_PER_GPU={n} && " + " ".join(shlex.quote(c) for c in cmd)
@@ -1616,37 +1654,77 @@ def run_collect_remote(group: str, task: str, gpus: str, m: dict, per_gpu: int |
         r["pid"] = remote_launch(m, rdir, inner)
         update_job(group, task, remote=r)
 
+    # 采集期间就把新完成的分片增量拉回,和采集重叠,别等跑完才整包传(远端出口限速时这一步能省十几分钟)
+    staging = PULL_DIR / Path(rdir).name
+    shard_dst = staging / "shards"
+    shard_src = f"{sv.target(m)}:{m['repo_path']}/{rdir}/_shards/{task}/"
+    pulled_upto = {"count": -1}
+
+    def pull_shards(force: bool = False) -> int:
+        """增量拉分片:rsync 只传新增 / 变化的文件;采集期间传了一半的文件下一轮整份重传。"""
+        count = int(r.get("count") or 0)
+        if not force and count <= pulled_upto["count"]:
+            return 0
+        shard_dst.mkdir(parents=True, exist_ok=True)
+        code = _rsync_data(m, *SHARD_EXCLUDES, shard_src, f"{shard_dst}/")
+        if code == 0:
+            pulled_upto["count"] = count
+        return code
+
     def on_count(value: str) -> None:
         if value.isdigit():
             r["count"] = int(value)
             update_job(group, task, remote=r)
 
-    code = remote_watch(group, task, m, rdir, f"采集 {r['episode_num']} 条", count_cmd, on_count)
+    def on_tick(value: str | None) -> None:
+        if value and value.isdigit() and int(value) > 0 and int(value) > pulled_upto["count"] and pull_shards() == 0:
+            print(f"[group_jobs] {now()} 已增量拉回 {value} 条分片", flush=True)
+
+    code = remote_watch(group, task, m, rdir, f"采集 {r['episode_num']} 条", count_cmd, on_count, on_tick)
     if code != 0:
         _step(group, task, f"{m['key']} 上没采完(exit {code}):远端分片保留在 {rdir},再点一次、选 {m['key']} 续采")
         return 1
-    # 拉回:远端合并好的 <rdir>/<task>[_failed]/<config> 放进 PULL_DIR/<run>/w0/,再 merge_shards 接到本地数据之后
-    staging = PULL_DIR / Path(rdir).name
-    (staging / "w0").mkdir(parents=True, exist_ok=True)
-    _step(group, task, f"从 {m['key']} 拉回数据")
-    src = f"{sv.target(m)}:{m['repo_path']}/{rdir}/"
-    if _rsync(m, "--include", f"/{task}/***", "--include", f"/{task}_failed/***", "--exclude", "*",
-              src, f"{staging / 'w0'}/") != 0:
-        _step(group, task, "拉回失败(远端数据还在);再点一次重新拉")
-        return 1
-    pulled = len(list((staging / "w0" / task / rp.CONFIG_NAME / "data").glob("*.hdf5")))
+    # 拉回:优先补齐分片(<staging>/shards/w*/<task>/<config>,和整包是同一种 merge_shards 输入);
+    # 分片不在(老记录、分片被删)或没拉全时,退回整包拉 <rdir>/<task>[_failed]/ 到 <staging>/w0/
+    _step(group, task, f"补齐从 {m['key']} 拉回的分片")
+    merge_root = staging
+    try:
+        if remote_shards(m, rdir, task):
+            pull_shards(force=True)
+            want = remote_seeds(m, rdir, task)
+            missing = sorted(want - shard_seeds(shard_dst, task)) if want else []
+            if want and not missing:
+                merge_root = shard_dst
+            else:
+                why = "远端没有合并好的 seed.txt" if not want else f"分片缺 {len(missing)} 条(如 {missing[:3]})"
+                _step(group, task, f"{why},整包拉回")
+    except sv.ServerError as error:
+        _step(group, task, f"分片核对失败({error}),整包拉回")
+    if merge_root is staging:
+        (staging / "w0").mkdir(parents=True, exist_ok=True)
+        _step(group, task, f"从 {m['key']} 拉回数据")
+        src = f"{sv.target(m)}:{m['repo_path']}/{rdir}/"
+        if _rsync(m, "--include", f"/{task}/***", "--include", f"/{task}_failed/***", "--exclude", "*",
+                  src, f"{staging / 'w0'}/") != 0:
+            _step(group, task, "拉回失败(远端数据还在);再点一次重新拉")
+            return 1
+        pulled = len(list((staging / "w0" / task / rp.CONFIG_NAME / "data").glob("*.hdf5")))
+        expected = set(_seeds(staging / "w0" / task / rp.CONFIG_NAME / "seed.txt"))
+    else:
+        pulled = len(list(shard_dst.glob(f"w*/{task}/{rp.CONFIG_NAME}/data/*.hdf5")))
+        expected = shard_seeds(shard_dst, task)
     remote_n = int(r.get("count") or 0)
     if remote_n and pulled < remote_n:
         _step(group, task, f"拉回的条数不对:本地 {pulled},远端 {remote_n};再点一次重新拉")
         return 1
     _step(group, task, f"合并 {pulled} 条到本地")
     # --keep_shards:先不删拉回的副本,确认远端的 seed 都进了本地 seed.txt 再删(合并按 seed 去重,重跑安全)
-    if _sh([sys.executable, "src/data_collect/merge_shards.py", "--task_name", task, "--shard_root", str(staging),
+    if _sh([sys.executable, "src/data_collect/merge_shards.py", "--task_name", task, "--shard_root", str(merge_root),
             "--save_dir", f"data/{rp.BENCHMARK_NAME}", "--config_name", rp.CONFIG_NAME, "--keep_shards"]) != 0:
         _step(group, task, f"合并失败:拉回的数据在 {rp.rel(staging)},让 Claude 看一下")
         return 1
     local_seeds = set(_seeds(rp._bench_dir(task) / "seed.txt"))
-    lost = [x for x in _seeds(staging / "w0" / task / rp.CONFIG_NAME / "seed.txt") if x not in local_seeds]
+    lost = [x for x in sorted(expected) if x not in local_seeds]
     if lost:
         _step(group, task, f"合并后本地缺 {len(lost)} 个远端 seed(如 {lost[:3]}),拉回的数据留在 {rp.rel(staging)}")
         return 1
