@@ -252,6 +252,28 @@
 - `all_robot_back_to_origin` — 所有机械臂末端回到初始位姿附近:各方向位置偏差 ≤ 0.15 m,姿态偏差 ≤ 20°
 - `is_not_moved` — microwave 离开局开始时的位置 ≤ 0.02 m
 
+#### `heat_canned_food_microwave`
+
+- check 中的判定在同一步全部满足即通过(满足后锁定,之后不再判断)
+
+**check 阶段 1**(同一步内全部满足)
+
+- `is_A_bbox_in_B_local_box` — canned_food 的整个包围盒都落在微波炉的炉腔盒内(微波炉局部坐标 x [-0.224, 0.119]、y [-0.164, 0.168]、z [0.012, 0.267] m;原点在盒内但一半卡在炉口不算;资产的包围盒把开着的门和门前桌面也算进去,不能用)
+- `is_all_gripper_open` — 所有机械臂的夹爪张开度都 ≥ 90%(夹住这些物体时开度约 0.58–0.66,60% 在夹着时也成立)
+- `all_robot_back_to_origin` — 所有机械臂末端回到初始位姿附近:各方向位置偏差 ≤ 0.15 m,姿态偏差 ≤ 20°
+- `is_not_moved` — microwave 离开局开始时的位置 ≤ 0.02 m
+
+#### `heat_canned_soup_microwave`
+
+- check 中的判定在同一步全部满足即通过(满足后锁定,之后不再判断)
+
+**check 阶段 1**(同一步内全部满足)
+
+- `is_A_bbox_in_B_local_box` — canned_soup 的整个包围盒都落在微波炉的炉腔盒内(微波炉局部坐标 x [-0.224, 0.119]、y [-0.164, 0.168]、z [0.012, 0.267] m;原点在盒内但一半卡在炉口不算;资产的包围盒把开着的门和门前桌面也算进去,不能用)
+- `is_all_gripper_open` — 所有机械臂的夹爪张开度都 ≥ 90%(夹住这些物体时开度约 0.58–0.66,60% 在夹着时也成立)
+- `all_robot_back_to_origin` — 所有机械臂末端回到初始位姿附近:各方向位置偏差 ≤ 0.15 m,姿态偏差 ≤ 20°
+- `is_not_moved` — microwave 离开局开始时的位置 ≤ 0.02 m
+
 ## place_ceramic_bowl_storage_rack_X
 
 ### safe_tasks — safe(任务完成)
