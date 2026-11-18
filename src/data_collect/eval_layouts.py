@@ -39,6 +39,12 @@ S1 执行测试变体(``src/eval_client/variants.py``)的布局用 ``variant``:�
 
     python src/data_collect/eval_layouts.py variant --task put_bread_toaster --variant S1.1 \\
         --add bottle --asset Rigid/bottle/00000 --between bread_shelf,toaster --clearance 0.01
+
+资产 bbox 包含打开的关节(如微波炉门)时,用 ``--footprint <label>:<x>,<y>`` 指定炉体 footprint,
+否则门会把 bbox 放大到两者之间放不下障碍物::
+
+    python src/data_collect/eval_layouts.py variant --task heat_sandwich_microwave --variant S1.1 \\
+        --add bottle --asset Rigid/bottle/00000 --between sandwich,microwave --footprint microwave:0.508,0.367
 """
 
 import argparse
@@ -90,6 +96,14 @@ def _parse():
     variant.add_argument("--asset", required=True, help="<Type>/<category>/<index>, e.g. Rigid/bottle/00000")
     variant.add_argument("--between", required=True, help="the two labels the obstacle stands between, on their line")
     variant.add_argument("--clearance", type=float, default=0.01, help="min gap to each of the two objects (m)")
+    variant.add_argument(
+        "--footprint",
+        action="append",
+        default=[],
+        metavar="LABEL:X,Y",
+        help="use this body footprint (m) for an object instead of its asset bbox, e.g. microwave:0.508,0.367 "
+        "when the open door makes the bbox much larger than the body",
+    )
     variant.add_argument("--env_cfg_type", default="arx_x5")
     variant.add_argument("--eval_seed", type=int, default=0)
     variant.add_argument("--overwrite", action="store_true", help="replace existing <task>__<variant>_<i>.json")
@@ -367,8 +381,21 @@ def run_variant(args):
     def meta(t, c, i):
         return load_json(os.path.join(objects, t, c, f"{i:05d}", "metadata.json"))
 
+    footprints = {}
+    for spec in args.footprint:
+        label, _, dims = spec.partition(":")
+        x, _, y = dims.partition(",")
+        try:
+            footprints[label] = (float(x), float(y))
+        except ValueError:
+            sys.exit(f"[eval_layouts] --footprint expects LABEL:X,Y, got {spec!r}")
+
     def footprint(t, rec):
-        """bbox 顶点(按缩放和姿态变换后,相对物体原点)。"""
+        """bbox 顶点(按缩放和姿态变换后,相对物体原点);可用 ``--footprint`` 覆盖。"""
+        if rec.get("label") in footprints:
+            hx, hy = footprints[rec["label"]][0] / 2, footprints[rec["label"]][1] / 2
+            verts = np.asarray([[sx * hx, sy * hy, 0.0] for sx in (-1, 1) for sy in (-1, 1)])
+            return verts @ t3d.quaternions.quat2mat(rec["default_ori"]).T
         verts = np.asarray(meta(t, rec["category"], rec["category_idx"])["geometry"]["aligned_bbox"]["vertices"])
         return verts * np.asarray(rec.get("scale", [1, 1, 1])) @ t3d.quaternions.quat2mat(rec["default_ori"]).T
 
