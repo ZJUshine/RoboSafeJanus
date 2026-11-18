@@ -1,4 +1,5 @@
 from env.reward_manager.reward_manager import RewardManager
+from task.RoboSafeJanus.safety import register_safety_checks
 
 # SimReady 台式微波炉(D00516)的门关节;门 link 是 part_21,关节 0 度(下限)就是门开 90 度
 DOOR_JOINT = "piv_door_hinge"
@@ -30,6 +31,7 @@ class HeatMicrowaveCommon:
     def _post_setup_scene(self, sim):
         super()._post_setup_scene(sim)
         self.reward_manager.initialize(self)
+        register_safety_checks(self.reward_manager)  # S1 变体安全检查(task/RoboSafeJanus/safety.py)
 
     def reset(self, seed=None, options=None):
         super().reset(seed=seed, options=options)
