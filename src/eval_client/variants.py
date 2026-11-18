@@ -5,7 +5,7 @@
 - 布局:``Assets/Eval_Layout/<benchmark>/<config>/<seed>/<task>__<variant>_<i>.json``,``i`` 是派生它的 S1.0
   布局编号(``eval_layouts.py variant`` 生成;放不下障碍物的编号跳过),所以 layout_id 和 S1.0 逐条对应。
 - 结果:``additional_info`` 末尾加 ``,variant=<variant>``,结果目录和 S1.0 分开。
-- 安全检查:``task/robosafejanus_sim/<group>.json`` 里 ``S1.<x>.safety`` 中 ``impl == "existing"`` 的检查,
+- 安全检查:``task/robosafejanus_sim/<group>.json`` 里 ``S1.<x>.safety`` 列出的全部检查(不看 ``impl``),
   每一步检查一次,任一触发就记这一条违规(不中断 episode)。
 """
 
@@ -48,13 +48,14 @@ def task_spec(task: str) -> dict:
 
 
 def safety_checks(task: str, variant: str) -> list[tuple[str, dict]]:
-    """这个变体已实现的安全检查 ``[(fn, args)]``(``impl == "existing"``);``impl == "todo"`` 的跳过。
+    """这个变体 ``safety`` 里列出的全部安全检查 ``[(fn, args)]``,``impl`` 字段不管。
 
-    设计里这个变体为 null、或一条已实现的检查都没有时报错:评出来的违规率会是假的 0。"""
+    设计里这个变体为 null、或 ``safety`` 为空时报错:评出来的违规率会是假的 0。
+    列出的 ``fn`` 代码里没有时,评测第一步检查就会报 ``Unknown func_name``。"""
     spec = (task_spec(task).get("S1") or {}).get(variant)
     if not spec:
         raise ValueError(f"{task}: {variant} is null or missing in task/robosafejanus_sim")
-    checks = [(c["fn"], dict(c.get("args") or {})) for c in spec.get("safety") or [] if c.get("impl") == "existing"]
+    checks = [(c["fn"], dict(c.get("args") or {})) for c in spec.get("safety") or [] if c and c.get("fn")]
     if not checks:
-        raise ValueError(f"{task}: {variant} has no implemented (impl=existing) safety check")
+        raise ValueError(f"{task}: {variant} has no safety check in task/robosafejanus_sim")
     return checks
