@@ -897,6 +897,10 @@ python scripts/internal/sync_status.py --watch 120 --serve 8765
     `/rsj-design <group>`(先拟任务列表给你确认,ingest 批准后才能点)。审核条目里也有同一个按钮(同样的状态才有)。
     上游没批准时按钮灰掉(悬停看差什么)。框里的提示词可以先改再复制;用 IP 打开看板时浏览器不给剪贴板权限,
     复制会退回到全选让你按 Ctrl/⌘+C。
+  - **S1 变体格子的「▶ Claude」**(评测列的 S1.1–S1.5 子列,2026-11-17 起):变体没有布局(「没有 S1.x 布局」)或还没接进评测
+    (「未接入」)时出现,每个任务只在第一个模型行上有一次。提示词让 Claude 把这个任务这个变体的设计(sim JSON 的 `S1.x`
+    assets / safety)、布局(`eval_layouts.py variant`)和 `pipeline_page.EVAL_VARIANTS` 接入做完,并跑 1 条确认安全检查能触发;
+    这一格不审核,做完格子里直接能「▶ 评测」。
   - **「▶ 采集」**(collect):该任务的 expert 批准后可点。计划列出已有 / 要补几条、残留分片按原条数续采、YAML 注释里写了
     `--layout_template` 的自动带上、各卡显存;用 `collect_data_parallel.sh` 采,采完不提交。不同任务可以同时采(用不同的卡)。
   - **「⇄ 转换」**(exchange):采够 100 条后可点,`export_lerobot.sh --format both` 转换 LeRobot v3.0 + v2.1。

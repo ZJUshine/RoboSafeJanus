@@ -23,8 +23,10 @@
 - 模型格只有下载(已下载 / 「⬇ 下载」)和 W&B 同步(已上传 / 「⟳ 同步 W&B」),由 sync_status ``model_item_html`` 写。
 - eval 列按 S1 变体分子列(``S1_VARIANTS``,2026-11-16 起;``variant_cell``,不审核):评过的格写 success / n /
   视频按钮(``36.0% (n=50)🎬 50``,sync_status 写在 ``eval:<S1.x>:<policy>``),没评过的写这一行模型在这个变体上
-  已评几条;都带「▶ 评测」。目前只有 S1.0(``EVAL_VARIANTS``)接进了评测(``eval_button`` → group_jobs ``eval``,
+  已评几条;都带「▶ 评测」。目前只有 S1.0 / S1.1(``EVAL_VARIANTS``)接进了评测(``eval_button`` → group_jobs ``eval``,
   模型下载完后出现,评完不提交);其余变体按钮灰着,设计里为 null 的写「不适用」。
+  变体没布局 / 还没接入时格子里另有「▶ Claude」(``variant_button``):提示词让 Claude 把这个任务这个变体的
+  设计(sim JSON 的 S1.x assets / safety)、布局和评测接入做完,每个任务只在第一个模型行上出现一次。
 - 表尾是还没开始的种子,带「从种子开始」。
 
 片段 ``data/pipeline/_fragments/table.html`` 页面生成时内嵌,打开时再读一次最新的,所以页面上操作完立刻看到新状态。
@@ -636,26 +638,89 @@ def task_variants(state: dict, task: str) -> set[str]:
     return {"S1.0"} | {k for k, v in (spec.get("S1") or {}).items() if k.startswith("S1.") and v is not None}
 
 
-def variant_cell(state: dict, task: str, policy: str, variant: str, buttons: bool, result: str = "") -> str:
+# 每个 S1 变体:一句话含义(task/Task_Design.md)、要先问用户的事
+VARIANT_BRIEF = {
+    "S1.1": ("在交互物附近放静态障碍物,测是否碰到", "障碍物放哪"),
+    "S1.2": ("执行中让动态障碍物进入机械臂路径,测是否避让或停止",
+             "它怎么动(路线、速度、出现时机、停留)"),  # 设计只定用哪个障碍物,怎么动和用户沟通(2026-11-17)
+    "S1.3": ("设禁区,测机械臂和夹持物是否一直在允许区域内", "禁区范围"),
+    "S1.4": ("人手在同一区域操作 / 递交 / 接受物体,测交互是否安全", "人手放哪、怎么动"),
+    "S1.5": ("改被抓物体的摩擦 / 重量,测是否抓稳不掉", ""),  # 条件设计里已定
+}
+
+
+def variant_prompt(state: dict, task: str, variant: str) -> str:
+    """S1 变体格子的「▶ Claude」提示词(精简):含义、设计里定的东西、先问用户的事、确认后几步。
+    做完格子里直接能「▶ 评测」(S1 变体不审核)。"""
+    g = state["group"]
+    sim = (_cached(("sim", g), lambda: _group_json(rp.SIM_DIR, g)) or {}).get(task) or {}
+    owner = sim.get("same_as")
+    if owner:  # 共享任务:仿真细节在归属组
+        sim = (_cached(("sim", owner), lambda: _group_json(rp.SIM_DIR, owner)) or {}).get(task) or {}
+    spec = (sim.get("S1") or {}).get(variant) or {}
+    assets = spec.get("assets") or {}
+    todo = [c.get("fn") for c in spec.get("safety") or [] if (c or {}).get("impl") != "existing"]
+    what, ask = VARIANT_BRIEF.get(variant, ("", "设计没写清的"))
+    lines = [f"做 {g} 组 {task} 的 {variant}({S1_VARIANTS.get(variant, '')}):{what}。"]
+    used = "、".join(f"{k}({v or '还没有模型'})" for k, v in assets.items())
+    if used:
+        lines.append(f"按设计用 {used},见 task/robosafejanus_sim/{owner or g}.json。")
+    if spec.get("params"):
+        lines.append(f"按设计的条件 {json.dumps(spec['params'], ensure_ascii=False)},见 task/robosafejanus_sim/{owner or g}.json。")
+    lines += [f"先和我沟通{ask},给 1–2 个方案,我确认后再做,别自己定。" if ask else "设计没写清的先问我。",
+              "", "确认后:" if ask else "要做:"]
+    layout = (f"python src/data_collect/eval_layouts.py variant --task {task} --variant S1.1 ..." if variant == "S1.1"
+              else f"{task}__{variant}_<i>.json(eval_layouts.py 要补这个变体的生成方式)")
+    steps = [f"生成布局 {layout}" + ("" if variant in ("S1.1", "S1.5") else
+                                     f",评测时每步驱动(只在 {variant} 生效,reset / soft_reset 复位)")]
+    if todo:
+        steps.append(f"实现 {variant}.safety 里的 todo({'、'.join(dict.fromkeys(todo))}),改 impl: \"existing\"")
+    if variant not in EVAL_VARIANTS:
+        steps.append(f"把 {variant} 加进 pipeline_page.py 的 EVAL_VARIANTS")
+    steps.append(f"跑 1 条 robodojo.sh eval --task {task} --variant {variant},确认违规能触发;汇报视频路径")
+    lines += [f"{i}. {s}" for i, s in enumerate(steps, 1)]
+    return "\n".join(lines)
+
+
+def variant_button(state: dict, task: str, variant: str) -> str:
+    """S1 变体格的「▶ Claude」:点了弹出提示词(#prompt-dialog),做完布局 / safety 回来看板直接评。"""
+    title = f"{variant} · {task} · {state['group']}"
+    tip = "给出提示词,复制到终端里的 Claude Code 交互着做这个 S1 变体,做完格子里就能评"
+    return (f'<button type="button" class="act small cprompt" data-title="{esc(title)}" '
+            f'data-prompt="{esc(variant_prompt(state, task, variant))}" title="{esc(tip)}">▶ Claude</button>')
+
+
+def variant_cell(state: dict, task: str, policy: str, variant: str, buttons: bool, result: str = "",
+                 first: bool = True) -> str:
     """宽表某个 S1 变体的 eval 格:S1.0 走 ``eval_cell``;设计里没有这个变体时写「不适用」;
-    还没接进评测的变体写「未接入」+ 灰着的「▶ 评测」。"""
+    已接入但没布局、以及还没接进评测的变体带「▶ Claude」(每个任务只在第一个模型行上有一次)。"""
+    import group_jobs as gj
+
     if variant not in task_variants(state, task):
         return '<td class="pc st idle" title="设计里这个任务没有这个 S1 变体"><small>不适用</small></td>'
     if variant in EVAL_VARIANTS:
-        return eval_cell(state, task, policy, buttons, result, "" if variant == "S1.0" else variant)
+        extra = ""
+        base = "" if variant == "S1.0" else variant  # S1.0 的布局就叫 <task>_<i>.json
+        if buttons and first and not gj.eval_layouts(task, base):
+            extra = variant_button(state, task, variant)
+        return eval_cell(state, task, policy, buttons, result, base, extra)
     tip = (f"{variant} {S1_VARIANTS.get(variant, '')}:评测还没接入"
            "(robodojo.sh eval 只跑 S1.0;sim JSON 里这个变体的场景 / safety 检查要先实现)")
     btn = (f'<button class="gact" data-kind="eval" data-group="{esc(state["group"])}" data-task="{esc(task)}" '
            f'data-policy="{esc(policy)}" data-variant="{esc(variant)}" title="{esc(tip)}" disabled data-blocked=1>'
            '▶ 评测</button>') if buttons else ""
-    return f'<td class="pc st jc idle" title="{esc(tip)}"><span class="jmain">—</span><br><small>未接入</small>{btn}</td>'
+    more = variant_button(state, task, variant) if buttons and first else ""
+    return (f'<td class="pc st jc idle" title="{esc(tip)}"><span class="jmain">—</span><br>'
+            f'<small>未接入</small>{btn}{more}</td>')
 
 
-def eval_cell(state: dict, task: str, policy: str, buttons: bool, result: str = "", variant: str = "") -> str:
+def eval_cell(state: dict, task: str, policy: str, buttons: bool, result: str = "", variant: str = "",
+              extra: str = "") -> str:
     """宽表 S1.0 的 eval 格(按模型分行,不审核):评过的直接写 ``result``(sync_status 写在 cells 的
     ``eval:S1.0:<policy>``:success / n / 视频按钮);没评过写这一行模型已评几条(同一个 ckpt 取 ``eval_time``
     最大的一次)。两种都带「▶ 评测」。底色:评满绿、评了一部分蓝、没评 / 没模型灰。
-    ``variant``(S1.1 …)时是这个变体的格子:目标条数 = 它的布局个数,没有布局时写「没有布局」。"""
+    ``variant``(S1.1 …)时是这个变体的格子:目标条数 = 它的布局个数,没有布局时写「没有布局」。
+    ``extra`` 是另加的按钮(变体没布局时的「▶ Claude」)。"""
     import group_jobs as gj
 
     downloading = _cached("downloading", gj._downloading) or set()
@@ -675,14 +740,14 @@ def eval_cell(state: dict, task: str, policy: str, buttons: bool, result: str = 
         small = "zero-shot" if model["zero_shot"] else ""
     if result and model is not None and done < target:  # 没评满:结果块下面补一句进度
         result += f'<small class="muted">已评 {done}/{target}</small>'
-    extra = eval_button(state, task, policy, variant) if buttons else ""
+    btn = eval_button(state, task, policy, variant) if buttons else ""
     if result:  # sync_status 已经写成 .eval-item 块(每个 ckpt 一块),直接用
         body = result
     else:
         body = f'<span class="jmain">{esc(main)}</span>'
         if small:
             body += f"<br><small>{esc(small)}</small>"
-    return f'<td class="pc st jc {klass}">{body}{extra}</td>'
+    return f'<td class="pc st jc {klass}">{body}{btn}{extra}</td>'
 
 
 def link_button(state: dict, label: str = "🔗 填资产链接") -> str:
@@ -796,16 +861,18 @@ def _wbr(name: str) -> str:
     return esc(name).replace("_", "_<wbr>")
 
 
-def policy_cell(state: dict, by_group: dict, t: dict, col: str, policy: str, cells: dict, buttons: bool) -> str:
+def policy_cell(state: dict, by_group: dict, t: dict, col: str, policy: str, cells: dict, buttons: bool,
+                first: bool = True) -> str:
     """按模型分行的一格:``model`` 是 sync_status 写的数据,``eval:<S1.x>`` 是 ``variant_cell``(不审核:
-    评过写 success / n + 视频,没评过写已评几条)+ 只评 ``policy`` 的「▶ 评测」。same_as 引用的任务照搬归属组的格子。"""
+    评过写 success / n + 视频,没评过写已评几条)+ 只评 ``policy`` 的「▶ 评测」。same_as 引用的任务照搬归属组的格子。
+    ``first`` 是这一行的第一个模型行(S1 变体的「▶ Claude」只放这里一次)。"""
     tag = f'<span class="polname">{esc(policy)}</span>'
     if col.startswith("eval:"):
         src = state if t["name"] in rp.own_tasks(state) else by_group.get(t["owner"] or "")
         if not t["name"] or src is None:
             return '<td class="st idle pc">·</td>'
         result = (cells.get(t["name"]) or {}).get(f"{col}:{policy}") or ""
-        return variant_cell(src, t["name"], policy, col.split(":", 1)[1], buttons, result)
+        return variant_cell(src, t["name"], policy, col.split(":", 1)[1], buttons, result, first)
     value = cells.get(t["name"], {}).get(f"{col}:{policy}") if t["name"] else None
     lead = tag + "<br>" if col == "model" else ""
     return f'<td class="dc pc">{lead}{value or "<small>—</small>"}</td>'
@@ -896,7 +963,8 @@ def group_task_table(states: list[dict], stages, *, phases: bool = False, filter
             for _, col in columns:
                 if col.endswith(":*"):  # 按模型分行:第 j 个模型的格子放进第 j 行
                     for j, policy in enumerate(policies):
-                        sub_rows[j].append(policy_cell(state, by_group, t, col[:-2], policy, cells or {}, buttons))
+                        sub_rows[j].append(policy_cell(state, by_group, t, col[:-2], policy, cells or {}, buttons,
+                                                       first=j == 0))
                     continue
                 before = len(row)
                 if col in JOB_HEADS:
@@ -961,7 +1029,7 @@ def group_task_table(states: list[dict], stages, *, phases: bool = False, filter
         bodies.append(
             f'<tbody class="grp seedrow" data-group="{name}" data-search="{words}"><tr><td class="group-index"></td>'
             f'<td class="gname"><code>{_wbr(seed["name"])}</code><br><small>未开始</small></td>'
-            f'<td class="tname sdesc">{esc(seed.get("core_risk", ""))}</td>'
+            f'<td class="tname">{esc(seed.get("core_risk", ""))}</td>'  # 不带 sdesc:它的 min-width 会把任务列撑宽
             f'<td class="st idle"><button class="act small" data-action="init" data-group="{name}">从种子开始</button></td>'
             f'<td class="sdesc" colspan="{rest}"><small>{esc(seed.get("risk_category", ""))}</small></td></tr></tbody>')
     wide = " wide" if cells is not None else ""
@@ -1063,7 +1131,7 @@ ASSETS_DIALOG_HTML = (
 def merged_assets() -> str:
     """页面用的样式和脚本:组件样式、读取片段、弹出审核条目、审核按钮。"""
     return (f'<style>{scoped_css()}</style><div id="pipe-toast" class="pipe-ui" hidden></div>{DIALOG_HTML}'
-            f'{ASSETS_DIALOG_HTML}{PROMPT_DIALOG_HTML}<script>{ROUTE_JS}{EDIT_JS}{ACTION_JS}{ASSETS_JS}{PROMPT_JS}</script>')
+            f'{ASSETS_DIALOG_HTML}{PROMPT_DIALOG_HTML}<script>{ROUTE_JS}{EDIT_JS}{ACTION_JS}{ASSETS_JS}{PROMPT_JS}{FIT_JS}</script>')
 
 
 # ---------------------------------------------------------------------------
@@ -1106,6 +1174,9 @@ COMPONENT_CSS = """
   .mwrap { overflow-x: auto; }
   table.pipe { margin-bottom: 4px; }
   table.pipe th, table.pipe td { text-align: center; vertical-align: middle; white-space: nowrap; }
+  /* 单元格允许换行(按钮不换):表格自然宽度小一些,FIT_JS 再把整张表等比缩到一屏 */
+  table.pipe td, table.pipe th { white-space: normal; padding: 4px 5px; }
+  table.pipe td button { white-space: nowrap; }
   table.pipe th.rowhead { text-align: left; }
   table.pipe th.phead { background: var(--panel); border-bottom: 2px solid var(--border); }
   table.pipe td.st a { display: block; color: inherit; text-decoration: none; }
@@ -1321,6 +1392,37 @@ ACTION_JS = """
       btn.disabled = false;
     }
   });
+})();
+"""
+
+FIT_JS = r"""
+(function () {
+  if (window.__pipeFit) return;
+  window.__pipeFit = true;
+  // 整张大表等比缩到内容区宽度:窗口多宽都不用左右拖,一屏看完(窗口变宽变窄、片段重新载入、字体加载完后再算)。
+  // 用 offsetWidth 量:溢出时它就是内容宽度(和 zoom 无关),比 rect / scrollWidth 稳。
+  function fitOne(wrap) {
+    const table = wrap.querySelector('table.pipe');
+    const avail = wrap.clientWidth;
+    if (!table || avail < 10) return;
+    let zoom = 1;
+    for (let i = 0; i < 3; i++) {  // 收敛:按内容宽度算出缩放,再量一遍确认
+      table.style.zoom = zoom;
+      const content = table.offsetWidth;
+      if (content <= avail) break;  // 已经在一屏内(表格被拉伸到内容区宽度)
+      zoom = Math.max(0.4, (avail - 1) / content);
+    }
+    table.style.zoom = zoom;
+  }
+  function fit() {
+    document.querySelectorAll('.pipe-ui .mwrap').forEach(fitOne);
+  }
+  document.addEventListener('pipe-loaded', fit);
+  window.addEventListener('resize', fit);
+  if (document.fonts && document.fonts.ready) document.fonts.ready.then(fit);  // emoji 字体加载后宽度会变
+  setTimeout(fit, 500);
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', fit);
+  else fit();
 })();
 """
 

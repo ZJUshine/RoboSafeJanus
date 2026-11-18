@@ -3121,7 +3121,7 @@ BASE_CSS = """
   * { box-sizing: border-box; }
   body { margin: 0; padding: 28px 32px 48px; background: var(--bg); color: var(--text);
     font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", sans-serif; }
-  .page { max-width: 1680px; margin: 0 auto; }
+  .page { max-width: none; margin: 0; }  /* 不封顶:大表用满窗口,浏览器缩小后能一行看完 */
   header.top { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; flex-wrap: wrap; margin-bottom: 20px; }
   h1 { margin: 0; font-size: 22px; font-weight: 650; letter-spacing: -.01em; }
   .meta { color: var(--muted); font-size: 12px; margin-top: 4px; }
