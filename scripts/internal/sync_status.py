@@ -2686,7 +2686,7 @@ def html_page(snapshot: dict, refresh: int, out_dir: Path = DEFAULT_OUT) -> str:
   let groupJobs = {};
   let groupSeen = {};
 
-  // 任务面板只显示进度(不显示日志):进度条 + 一行字;没有进度时写当前步骤,失败时写一行原因
+  // 任务面板只显示正在进行的进度(不显示日志):进度条 + 一行字;没有进度时写当前步骤
   function progressEl(job) {
     const box = document.createElement('div');
     box.className = 'jprog';
@@ -2704,28 +2704,20 @@ def html_page(snapshot: dict, refresh: int, out_dir: Path = DEFAULT_OUT) -> str:
       box.append(t);
     } else if (p && p.text) {
       box.textContent = p.text;
-    } else if (job.state === 'running') {
+    } else {
       box.textContent = job.step || job.message || '运行中…';
-    }
-    if (job.state !== 'running' && (job.reason || (job.step && !(p && p.text)))) {
-      const why = document.createElement('div');
-      why.className = 'jwhy' + (job.state === 'failed' ? ' bad' : '');
-      why.textContent = job.reason || job.step;
-      box.append(why);
     }
     return box;
   }
 
   function renderGroupJobs(groups) {
     groupJobs = groups || {};
-    const recent = Date.now() - 12 * 3600 * 1000;
     for (const [jid, job] of Object.entries(groupJobs)) {
       const prev = groupSeen[jid];
       groupSeen[jid] = job.state;
       // 组任务刚结束:页面上的状态由服务端重建,稍后自动重载
       if (prev === 'running' && job.state !== 'running') setTimeout(() => location.reload(), 4000);
-      const started = Date.parse(job.started_at || '') || 0;
-      if (job.state !== 'running' && started < recent) continue;
+      if (job.state !== 'running') continue;  // 面板只显示正在进行的进度(完成 / 失败的不列)
       const card = document.createElement('div');
       card.className = 'job';
       const head = document.createElement('div');
@@ -2733,10 +2725,10 @@ def html_page(snapshot: dict, refresh: int, out_dir: Path = DEFAULT_OUT) -> str:
       const name = document.createElement('strong');
       name.textContent = (job.task === '__group__' ? job.group : (job.task || jid)) + ' · ' + (job.label || job.kind);
       const state = document.createElement('span');
-      state.className = 'state ' + (job.state === 'running' ? 'running' : (job.state === 'done' ? 'done' : 'failed'));
-      state.textContent = job.state === 'running' && job.waiting ? '排队中' : (groupStates[job.state] || job.state);
+      state.className = 'state running';
+      state.textContent = job.waiting ? '排队中' : '运行中';
       const time = document.createElement('span');
-      time.textContent = (job.started_at || '') + (job.finished_at ? ' → ' + job.finished_at : '');
+      time.textContent = job.started_at || '';
       head.append(name, state, time);
       if (job.session_id) {
         const resume = document.createElement('code');
@@ -2745,18 +2737,16 @@ def html_page(snapshot: dict, refresh: int, out_dir: Path = DEFAULT_OUT) -> str:
         head.append(resume);
       }
 
-      if (job.state === 'running') {
-        const stopBtn = document.createElement('button');
-        stopBtn.type = 'button';
-        stopBtn.className = 'gact';
-        stopBtn.dataset.kind = 'stop';
-        stopBtn.dataset.group = job.group;
-        stopBtn.dataset.task = job.task;
-        if (jid.split('.').length > 2) stopBtn.dataset.policy = job.policy || '';  // 按模型的评测记录
-        if (job.variant) stopBtn.dataset.variant = job.variant;  // S1 变体的评测记录
-        stopBtn.textContent = '⏹ 停止';
-        head.append(stopBtn);
-      }
+      const stopBtn = document.createElement('button');
+      stopBtn.type = 'button';
+      stopBtn.className = 'gact';
+      stopBtn.dataset.kind = 'stop';
+      stopBtn.dataset.group = job.group;
+      stopBtn.dataset.task = job.task;
+      if (jid.split('.').length > 2) stopBtn.dataset.policy = job.policy || '';  // 按模型的评测记录
+      if (job.variant) stopBtn.dataset.variant = job.variant;  // S1 变体的评测记录
+      stopBtn.textContent = '⏹ 停止';
+      head.append(stopBtn);
       card.append(head);
       card.append(progressEl(job));
       jobsBox.append(card);
@@ -2803,7 +2793,8 @@ def html_page(snapshot: dict, refresh: int, out_dir: Path = DEFAULT_OUT) -> str:
   document.addEventListener('pipe-loaded', paintGroupCells);
 
   function renderJobs(jobs, groups) {
-    const active = Object.entries(jobs).filter(([, job]) => job.state !== 'idle');
+    // 面板只显示正在进行的进度:已经结束(完成 / 失败)的不再列,结果看大表里对应的格子
+    const active = Object.entries(jobs).filter(([, job]) => job.state === 'running');
     jobsBox.innerHTML = '';
     active.sort((a, b) => String(b[1].started_at || '').localeCompare(String(a[1].started_at || '')));
     for (const [kind, job] of active) {
@@ -2814,11 +2805,8 @@ def html_page(snapshot: dict, refresh: int, out_dir: Path = DEFAULT_OUT) -> str:
       const name = document.createElement('strong');
       name.textContent = job.label || kind;
       const state = document.createElement('span');
-      state.className = 'state ' + job.state;
-      const part = job.state === 'done' && String(job.message || '').startsWith('部分');  // 如 W&B 部分上传
-      state.className = 'state ' + (part ? 'partial' : job.state);
-      state.textContent = job.state === 'running' ? '运行中'
-        : (part ? job.message : (job.state === 'done' ? '完成' : '失败'));
+      state.className = 'state running';
+      state.textContent = '运行中';
       const time = document.createElement('span');
       time.textContent = (job.started_at || '') + (job.finished_at ? ' → ' + job.finished_at : '');
       head.append(name, state, time);
