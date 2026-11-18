@@ -29,7 +29,8 @@
   设计(sim JSON 的 S1.x assets / safety)、布局和评测接入做完,每个任务只在第一个模型行上出现一次。
 - 表尾是还没开始的种子,带「从种子开始」。
 
-片段 ``data/pipeline/_fragments/table.html`` 页面生成时内嵌,打开时再读一次最新的,所以页面上操作完立刻看到新状态。
+片段 ``data/pipeline/_fragments/table.html`` 页面生成时内嵌;打开时先读同目录的 ``table.gen``(片段内容的 hash),
+和内嵌的不一样(页面上操作后只重画了片段)才再读一次整个片段,所以操作完立刻看到新状态,平时不用重复下载。
 旧地址 ``TASK_BUILD.html`` / ``SYNC_STATUS.html`` / ``MODELS_EVAL.html`` 是跳到 ``PIPELINE.html`` 的小页面。
 
 用 ``sync_status.py --serve`` 打开时可以在页面上操作(``/api/pipeline/<action>``,见 ``ACTIONS``):
@@ -46,6 +47,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import html
 import json
 from pathlib import Path
@@ -1063,6 +1065,11 @@ def group_store_html(state: dict, seeds: list[dict], out_dir: Path) -> str:
 
 def table_html(out_dir: Path) -> str:
     """看板唯一的内容:流水线大表 + 隐藏的审核条目(点格子弹出)。"""
+    with rp.memo_scope():
+        return _table_html(out_dir)
+
+
+def _table_html(out_dir: Path) -> str:
     _CACHE.clear()
     states = rp.all_states()
     seeds, seed_error = load_seeds()
@@ -1084,13 +1091,19 @@ def fragments(out_dir: Path) -> dict[str, str]:
     return {"table": table_html(out_dir)}
 
 
+def _gen(text: str) -> str:
+    return hashlib.sha1(text.encode("utf-8")).hexdigest()[:12]
+
+
 def fragment_box(key: str, out_dir: Path) -> str:
-    """页面里放片段的容器:内嵌上次写好的片段(静态打开也能看),打开时脚本再读一次最新的。"""
+    """页面里放片段的容器:内嵌上次写好的片段(静态打开也能看);打开时脚本比一下 ``<key>.gen``,变了才重读。"""
     try:
         inner = (out_dir / FRAGMENT_DIR / f"{key}.html").read_text(encoding="utf-8")
+        gen = _gen(inner)
     except OSError:
-        inner = '<p class="empty">流水线片段还没生成</p>'
-    return f'<div class="pipe-ui pipe-frag" data-frag="{FRAGMENT_DIR}/{key}.html">{inner}</div>'
+        inner, gen = '<p class="empty">流水线片段还没生成</p>', ""
+    return (f'<div class="pipe-ui pipe-frag" data-frag="{FRAGMENT_DIR}/{key}.html" data-gen="{gen}">'
+            f'{inner}</div>')
 
 
 # 点审核格 / 组名弹出的对话框:条目从隐藏的 #gstores 挪进来,关闭时放回(ROUTE_JS)
@@ -1831,11 +1844,14 @@ ROUTE_JS = r"""
   }, true);
   window.addEventListener('hashchange', route);
   route();
-  // 片段:页面里内嵌的是生成时的版本,这里再读一次最新的(页面上审核操作后立即生效)
+  // 片段:页面里内嵌的是生成时的版本;<片段>.gen 和内嵌的不一样(页面上审核操作后只重画了片段)才重读整个片段。
+  // 读不到 gen(旧片段、静态打开)时照旧重读。
   const boxes = Array.from(document.querySelectorAll('[data-frag]'));
-  Promise.all(boxes.map((box) => fetch(box.dataset.frag + '?t=' + Date.now(), { cache: 'no-store' })
-    .then((r) => (r.ok ? r.text() : Promise.reject(r.status)))
-    .then((text) => { closeDialog(true, true); box.innerHTML = text; })
+  const fresh = (url) => fetch(url + '?t=' + Date.now(), { cache: 'no-store' })
+    .then((r) => (r.ok ? r.text() : Promise.reject(r.status)));
+  Promise.all(boxes.map((box) => fresh(box.dataset.frag.replace(/\.html$/, '.gen')).catch(() => '')
+    .then((gen) => (gen.trim() && gen.trim() === box.dataset.gen ? null : fresh(box.dataset.frag)
+      .then((text) => { closeDialog(true, true); box.innerHTML = text; })))
     .catch(() => {}))).then(() => {
     route();
     const filter = byId('filter');
@@ -1886,6 +1902,7 @@ def render(out_dir: Path) -> Path:
     """
     for key, text in fragments(out_dir).items():
         _write(out_dir / FRAGMENT_DIR / f"{key}.html", text)
+        _write(out_dir / FRAGMENT_DIR / f"{key}.gen", _gen(text))  # 写完片段再写 gen:读到新 gen 时片段一定是新的
     for key in OLD_FRAGMENTS:
         (out_dir / FRAGMENT_DIR / f"{key}.html").unlink(missing_ok=True)
     return out_dir / PAGE

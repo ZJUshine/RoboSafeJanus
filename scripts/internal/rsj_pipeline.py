@@ -59,7 +59,10 @@ design 对草稿里的全部任务审(含 ``same_as`` 共用的);layout 起只�
 from __future__ import annotations
 
 import argparse
+import contextlib
+import contextvars
 import datetime as dt
+import functools
 import hashlib
 import json
 import os
@@ -257,6 +260,37 @@ def _select(data, selector: str):
     return data
 
 
+_MEMO: contextvars.ContextVar[dict | None] = contextvars.ContextVar("rsj_memo", default=None)
+
+
+@contextlib.contextmanager
+def memo_scope():
+    """这段代码里 ``@memoized`` 的函数同样参数只算一次(看板渲染一次大表要问几百遍同样的磁盘状态)。
+    只在当前线程 / 上下文生效,出了 with 就清掉;后台任务进程不进这个范围,总是读最新的。"""
+    if _MEMO.get() is not None:  # 嵌套时沿用外层
+        yield
+        return
+    token = _MEMO.set({})
+    try:
+        yield
+    finally:
+        _MEMO.reset(token)
+
+
+def memoized(fn):
+    @functools.wraps(fn)
+    def wrap(*args):
+        memo = _MEMO.get()
+        if memo is None:
+            return fn(*args)
+        key = (fn, args)
+        if key not in memo:
+            memo[key] = fn(*args)
+        return memo[key]
+
+    return wrap
+
+
 def _hash_bytes(b: bytes) -> str:
     return hashlib.sha256(b).hexdigest()[:16]
 
@@ -294,6 +328,11 @@ def artifact_hash(spec: str, state: dict) -> str:
     if spec.startswith("state:task:"):  # 该任务在草稿里
         task = spec.split(":", 2)[2]
         return _hash_bytes(task.encode()) if task in state.get("draft_tasks", []) else "MISSING"
+    return _path_hash(spec)
+
+
+@memoized
+def _path_hash(spec: str) -> str:
     path_s, _, selector = spec.partition("#")
     path = ROOT / path_s
     if not path.exists():

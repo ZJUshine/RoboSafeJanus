@@ -191,6 +191,11 @@ def _alive(pid: int | None) -> bool:
         return False
     except PermissionError:
         pass
+    try:  # Linux:直接读命令行,不用每个任务起一次 ps(看板每 5 秒轮询)
+        args = Path(f"/proc/{pid}/cmdline").read_bytes().decode("utf-8", "replace").replace("\0", " ")
+        return "group_jobs.py" in args and " run " in args
+    except OSError:
+        pass
     try:
         args = subprocess.run(["ps", "-p", str(pid), "-o", "args="], capture_output=True, text=True,
                               timeout=5).stdout
@@ -232,20 +237,36 @@ def log_tail(path: str | None, limit: int = 6000, lines: int = 40) -> str:
     return "\n".join(text.replace("\r", "\n").splitlines()[-lines:])
 
 
+_DONE_PROGRESS: dict[tuple[str, int], dict | None] = {}  # 已结束任务的进度(按记录文件 mtime;记录一改就重算)
+
+
 def all_jobs(tail: bool = True) -> dict[str, dict]:
-    """``{<group>.<task>[.<policy>]: 任务记录}``(旧的按组记录没有 task,跳过)。"""
+    """``{<group>.<task>[.<policy>]: 任务记录}``(旧的按组记录没有 task,跳过)。
+
+    ``tail`` 时算进度:已结束的任务进度不会再变,同一份记录只算一次(看板每 5 秒轮询一次)。"""
     out = {}
     if not JOB_DIR.exists():
         return out
-    for path in sorted(JOB_DIR.glob("*.json")):
-        job = read_job(path.stem)
-        if not job or not job.get("task"):
-            continue
-        job["state"] = job_state(job)
-        job["label"] = job_label(job)
-        if tail:
-            job["progress"] = job_progress(job)
-        out[path.stem] = job
+    with rp.memo_scope():
+        for path in sorted(JOB_DIR.glob("*.json")):
+            try:
+                mtime = path.stat().st_mtime_ns
+            except OSError:
+                continue
+            job = read_job(path.stem)
+            if not job or not job.get("task"):
+                continue
+            job["state"] = job_state(job)
+            job["label"] = job_label(job)
+            if tail:
+                key = (path.stem, mtime)
+                if job["state"] == "running":
+                    job["progress"] = job_progress(job)
+                elif key in _DONE_PROGRESS:
+                    job["progress"] = _DONE_PROGRESS[key]
+                else:
+                    job["progress"] = _DONE_PROGRESS[key] = job_progress(job)
+            out[path.stem] = job
     return out
 
 
@@ -499,14 +520,31 @@ ABS_ASSET_RE = re.compile(
 ASSET_SCAN_MAX_BYTES = 8 * 1024 * 1024
 
 
+@rp.memoized
+def _layout_index() -> dict[str, list[str]]:
+    """评测布局目录 ``{<名字>: [<名字>_<i>.json, ...]}``(看板渲染时整张表共用一次列目录)。"""
+    index: dict[str, list[str]] = {}
+    try:
+        names = sorted(os.listdir(EVAL_LAYOUT))
+    except OSError:
+        return index
+    for n in names:
+        match = re.fullmatch(r"(.+)_\d+\.json", n)
+        if match:
+            index.setdefault(match.group(1), []).append(n)
+    return index
+
+
+def eval_layout_files(task: str, variant: str = "") -> list[Path]:
+    """评测布局文件 ``<task>_<i>.json``;变体是 ``<task>__<variant>_<i>.json``(src/eval_client/variants.py)。"""
+    name = f"{task}__{variant}" if variant else task
+    return [EVAL_LAYOUT / n for n in _layout_index().get(name, [])]
+
+
 def layout_asset_dirs(task: str, variant: str = "") -> list[str]:
     """评测布局里用到的物体资产目录(本地存在的;和 ``load_saved_layout`` 的路径规则一致)。"""
-    name = f"{task}__{variant}" if variant else task
-    pattern = re.compile(rf"{re.escape(name)}_\d+\.json")
     out = set()
-    for path in EVAL_LAYOUT.glob(f"{name}_*.json"):
-        if not pattern.fullmatch(path.name):
-            continue
+    for path in eval_layout_files(task, variant):
         try:
             cfg = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
@@ -1090,6 +1128,7 @@ def _step_num(name: str) -> int:
     return int(re.findall(r"\d+", name)[-1])
 
 
+@rp.memoized
 def _complete_step(run_dir: Path) -> str | None:
     """run 目录里下载完整的最新 step(没有 ``*.incomplete`` 临时文件);没有时 None。"""
     steps = sorted((d for d in run_dir.iterdir() if d.is_dir() and _is_step(d.name)), key=lambda d: _step_num(d.name))
@@ -1099,6 +1138,7 @@ def _complete_step(run_dir: Path) -> str | None:
     return None
 
 
+@rp.memoized
 def eval_policies() -> tuple[str, ...]:
     """要评的模型 = ModelScope 模型仓库里有的 policy(读 sync_status 的快照;Pi_0 / Pi_05 在前)。
     快照读不到时退回本地 data/RoboSafeJanus-Model/ 下已有的。只算 XPolicyLab/policy/ 里有适配的。"""
@@ -1113,6 +1153,7 @@ def eval_policies() -> tuple[str, ...]:
     return (*[p for p in EVAL_POLICIES if p in found], *sorted(found - set(EVAL_POLICIES)))
 
 
+@rp.memoized
 def _deploy_cfg(policy: str) -> dict:
     import yaml
 
@@ -1192,10 +1233,8 @@ def eval_models(group: str, task: str, downloading: set | None = None) -> list[d
 
 
 def eval_layouts(task: str, variant: str = "") -> int:
-    """评测布局个数:``<task>_<i>.json``;变体是 ``<task>__<variant>_<i>.json``(src/eval_client/variants.py)。"""
-    name = f"{task}__{variant}" if variant else task
-    pattern = re.compile(rf"{re.escape(name)}_\d+\.json")
-    return sum(1 for p in EVAL_LAYOUT.glob(f"{name}_*.json") if pattern.fullmatch(p.name))
+    """评测布局个数(``eval_layout_files``)。"""
+    return len(eval_layout_files(task, variant))
 
 
 def eval_target(task: str, variant: str = "") -> int:
@@ -1260,14 +1299,8 @@ def eval_blocked(state: dict, group: str, task: str, downloading: set | None = N
 
 def policy_venv(policy: str) -> str:
     """policy 的 uv 环境目录(相对仓库根):deploy.yml 的 ``policy_uv_env_path``(相对 policy 目录)。"""
-    import yaml
-
     pdir = Path("XPolicyLab") / "policy" / policy
-    try:
-        cfg = yaml.safe_load((ROOT / pdir / "deploy.yml").read_text(encoding="utf-8")) or {}
-    except OSError:
-        cfg = {}
-    env = Path(str(cfg.get("policy_uv_env_path") or "openpi")).expanduser()
+    env = Path(str(_deploy_cfg(policy).get("policy_uv_env_path") or "openpi")).expanduser()
     return str(env if env.is_absolute() else pdir / env)
 
 
