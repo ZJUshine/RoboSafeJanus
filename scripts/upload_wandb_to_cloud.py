@@ -8,7 +8,9 @@
 或 ``--api_key_file``。entity 默认用 key 所属账号,可用 ``--entity`` / ``WANDB_ENTITY`` 覆盖。
 
 上传状态记在 ``data/.cache/wandb/synced.json``(不进 run 目录,避免污染数据),用于跳过已上传的 run
-(``--all`` 重传,``--force`` 给 wandb sync 加 ``--include-synced``)。
+(``--all`` 重传,``--force`` 给 wandb sync 加 ``--include-synced``)。W&B 上删过的 run id 留墓碑,
+``wandb sync`` 不能再用同一个 id 建 run:遇到这种情况自动换一个新 id 重传一次,并把新 id 记进状态文件
+(``upload_id``),以后重同步继续用它。
 
 本机没装 wandb 时,脚本会用 ``uv`` 在 ``data/.cache/wandb/venv`` 建一个专用环境
 (``--venv_dir`` 可改),或退回 ``uvx --from wandb wandb``;也可用 ``WANDB_CLI`` 指定命令。
@@ -29,7 +31,9 @@ import json
 import os
 from pathlib import Path
 import re
+import secrets
 import shutil
+import string
 import subprocess
 import sys
 from urllib.parse import urlparse
@@ -37,8 +41,15 @@ import urllib.request
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 RUN_RE = re.compile(r"^(?:offline-)?run-\d{8}_\d{6}-[A-Za-z0-9]+$")
+# 训练机写进 run 文件的 project 名不一定和官方仓库统一:同一个 run 续训后 project 可能改名
+# (LingBot 的续训 run 自带 ``LingBotVLA``,仓库里统一叫 ``RoboSafeJanus-lingbot-vla``),不覆盖就会
+# 把续训那段传到另一个 project,曲线被拆成两半。没给 ``--project`` 时按 policy 用这里的默认值。
+PROJECT_BY_POLICY = {"LingBot_VLA": "RoboSafeJanus-lingbot-vla"}
 URL_RE = re.compile(r"https?://[^\s]*(?:/runs/|/r/)[A-Za-z0-9]+")
 BRACKET_RE = re.compile(r"\[([^/\s\]]+)/([^/\s\]]+)/([A-Za-z0-9]+)\]")
+# 在 W&B 上删过的 run id 会留墓碑,``wandb sync`` 再建同一个 id 会 410:
+# ``run <id> was previously created and deleted; try a new run id``
+TOMBSTONE_RE = re.compile(r"run ([A-Za-z0-9]+) was previously created and deleted")
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--local_dir", default=str(REPO_ROOT / "data" / "RoboSafeJanus-Wandb"),
@@ -274,9 +285,12 @@ if args.proxy:
     env.update({"HTTP_PROXY": args.proxy, "HTTPS_PROXY": args.proxy, "ALL_PROXY": args.proxy})
 online_flag = supports_online(cmd)
 print(f"[upload_wandb] target: {args.base_url}" + (f" via {args.proxy}" if args.proxy else ""))
+if not args.project:
+    mapped = sorted({PROJECT_BY_POLICY[i["policy"]] for i in selected if i["policy"] in PROJECT_BY_POLICY})
+    if mapped:
+        print(f"[upload_wandb] project 按 policy 指定(训练机自带的 project 名不统一): {', '.join(mapped)}")
 
-failed, partial = [], []
-for index, item in enumerate(selected, 1):
+def sync_command(item: dict, run_id: str = "") -> list[str]:
     command = [*cmd, "sync", "--yes"]
     if online_flag:
         command.append("--include-online")
@@ -284,25 +298,67 @@ for index, item in enumerate(selected, 1):
         command.append("--include-synced")
     if args.entity:
         command += ["--entity", args.entity]
-    if args.project:
-        command += ["--project", args.project]
+    project = args.project or PROJECT_BY_POLICY.get(item["policy"])
+    if project:
+        command += ["--project", project]
+    if run_id:
+        command += ["--id", run_id]
     command.append(item["path"])
+    return command
+
+
+def run_sync(command: list[str]) -> tuple[int, str] | None:
+    """跑一次 ``wandb sync``;超时返回 None。"""
+    try:
+        result = subprocess.run(command, capture_output=True, text=True, timeout=args.timeout, env=env)
+    except subprocess.TimeoutExpired:
+        return None
+    output = (result.stdout or "") + (result.stderr or "")
+    print("\n".join(output.strip().splitlines()[-12:]))
+    return result.returncode, output
+
+
+def unused_run_id() -> str:
+    """新的 run id(8 位小写字母+数字),避开本地 run 目录名和状态文件里已经用过的 id。"""
+    taken = {r["name"].rsplit("-", 1)[-1] for r in runs}
+    taken |= {s.get("upload_id", "") for s in state.values()}
+    while True:
+        candidate = "".join(secrets.choice(string.ascii_lowercase + string.digits) for _ in range(8))
+        if candidate not in taken:
+            return candidate
+
+
+failed, partial = [], []
+for index, item in enumerate(selected, 1):
+    saved = state.get(item["run_dir"]) or {}
+    run_id = saved.get("upload_id", "")  # 被删过、换过 id 的 run 后续重同步继续用同一个新 id
+    command = sync_command(item, run_id)
     print(f"\n===== [{index}/{len(selected)}] {item['run_dir']} ({item['size'] / 1e6:.1f} MB) =====")
     print("  " + " ".join(command))
     if args.dry_run:
         continue
-    try:
-        result = subprocess.run(command, capture_output=True, text=True, timeout=args.timeout, env=env)
-    except subprocess.TimeoutExpired:
+    attempt = run_sync(command)
+    if attempt is None:
         failed.append(item["run_dir"])
         print(f"[upload_wandb] timeout after {args.timeout}s")
         continue
-    output = (result.stdout or "") + (result.stderr or "")
-    tail = "\n".join(output.strip().splitlines()[-12:])
-    print(tail)
-    if result.returncode != 0:
+    returncode, output = attempt
+    tombstone = TOMBSTONE_RE.search(output)
+    if tombstone and (not run_id or tombstone.group(1) == run_id):
+        run_id = unused_run_id()
+        print(f"[upload_wandb] run {tombstone.group(1)} 在 W&B 上被删过(id 留了墓碑,不能重建),"
+              f"换新 id {run_id} 重传")
+        command = sync_command(item, run_id)
+        print("  " + " ".join(command))
+        attempt = run_sync(command)
+        if attempt is None:
+            failed.append(item["run_dir"])
+            print(f"[upload_wandb] timeout after {args.timeout}s")
+            continue
+        returncode, output = attempt
+    if returncode != 0:
         failed.append(item["run_dir"])
-        print(f"[upload_wandb] FAILED: exit {result.returncode}")
+        print(f"[upload_wandb] FAILED: exit {returncode}")
         continue
     # .wandb 文件结尾有一条没写完的记录:训练机在训练还没结束时就把 wandb/ 传上了 ModelScope。
     # 写完的部分已经传上去了,记成"部分上传",等远端换成完整文件后再同步
@@ -324,6 +380,8 @@ for index, item in enumerate(selected, 1):
         "source_url": source_url,
         "wandb_bytes": wandb_bytes(item["path"]),
     }
+    if run_id:  # 原 id 在 W&B 上删过,这个 run 传到了新 id 下
+        state[item["run_dir"]]["upload_id"] = run_id
     later = [r for r in runs if r["run_dir"] > item["run_dir"] and same_run(r, item)]
     if incomplete:
         state[item["run_dir"]].update({"partial": True, "last_step": step})
