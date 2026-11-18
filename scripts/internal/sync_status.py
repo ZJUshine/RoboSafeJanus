@@ -2268,6 +2268,11 @@ DASHBOARD_CSS = BASE_CSS + """
   .plan-machine label.mopt:has(input:checked) { border-color: var(--accent); background: var(--hover); }
   .plan-machine label.mopt.off { opacity: .5; cursor: not-allowed; }
   .plan-machine label.mopt small { color: var(--muted); }
+  .plan-machine .mbody { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+  .plan-machine .mstat { font-size: 12px; color: var(--muted); display: flex; flex-wrap: wrap; gap: 4px 6px; }
+  .plan-machine .mstat .on { color: var(--good-fg); } .plan-machine .mstat .down { color: var(--bad-fg); }
+  .plan-machine .menv { padding: 0 6px; border-radius: 9px; border: 1px solid var(--border); }
+  .plan-machine .menv.ok { color: var(--good-fg); } .plan-machine .menv.no { color: var(--bad-fg); opacity: .8; }
   .plan-fields input[type=text] { margin-left: 6px; font: inherit; background: var(--panel); color: var(--text);
     border: 1px solid var(--border); border-radius: 6px; padding: 4px 8px; width: 160px; }
   .job { background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); padding: 10px 14px; margin-bottom: 8px; font-size: 13px; }
@@ -2948,6 +2953,45 @@ def html_page(snapshot: dict, refresh: int, out_dir: Path = DEFAULT_OUT) -> str:
   // 任务按钮(采集 / 转换 / 上传):点了弹出计划对话框,确认后在服务端后台运行 group_jobs.py
   const actionTitle = {ingest: '下载资产', collect: '采集', exchange: '转换 LeRobot', upload: '上传 ModelScope',
     eval: '评测', layouts: '生成评测布局'};
+  // 机器选择框里每台机器的状态:在不在线、空闲 GPU、(评测)哪些模型的评测环境装好了;逐台异步查,不挡选择
+  async function machineStatus(key, kind, stat, radio, label) {
+    stat.textContent = '⏳ 检查在线和评测环境…';
+    let res;
+    try {
+      const query = 'machine=' + encodeURIComponent(key) + '&kind=' + encodeURIComponent(kind);
+      res = await api('api/group/machine_status?' + query, {method: 'POST'});
+    } catch (error) {
+      stat.textContent = '⚠ 查不了:' + error.message;
+      return;
+    }
+    stat.innerHTML = '';
+    const span = (cls, text, tip) => {
+      const el = document.createElement('span');
+      el.className = cls;
+      el.textContent = text;
+      if (tip) el.title = tip;
+      stat.append(el);
+      return el;
+    };
+    if (!res.online) {
+      span('down', '🔴 离线', res.why);
+      if (res.why) span('', res.why);
+      if (!radio.checked) { radio.disabled = true; label.classList.add('off'); }
+      return;
+    }
+    span('on', '🟢 在线' + (res.gpus_total != null ? ' · 空闲 GPU ' + res.gpus_free + '/' + res.gpus_total : ''));
+    if (res.why) span('down', '⚠ ' + res.why);
+    if (kind !== 'eval') return;
+    const envs = res.envs || [];
+    if (!envs.length) { span('', '没有要评的模型'); return; }
+    const ok = envs.filter((e) => e.ok).length;
+    span('', '评测环境 ' + ok + '/' + envs.length + ':');
+    for (const e of envs) {
+      span('menv ' + (e.ok ? 'ok' : 'no'), (e.ok ? '✓ ' : '✗ ') + e.policy,
+        e.ok ? (e.env === 'uv' ? 'uv 环境' : 'conda 环境 ' + e.env) : e.why);
+    }
+  }
+
   async function groupAction(button, kind, group, task) {
     button.disabled = true;
     const policy = button.dataset.policy || '';
@@ -3011,9 +3055,17 @@ def html_page(snapshot: dict, refresh: int, out_dir: Path = DEFAULT_OUT) -> str:
           const info = document.createElement('small');
           info.textContent = [m.gpus, m.description, m.usable ? '' : '不能用:' + m.why,
             m.key === last ? '上次用的' : ''].filter(Boolean).join(' · ');
-          label.append(radio, name, info);
+          const head2 = document.createElement('div');
+          head2.append(name, ' ', info);
+          const stat = document.createElement('div');
+          stat.className = 'mstat';
+          const body = document.createElement('div');
+          body.className = 'mbody';
+          body.append(head2, stat);
+          label.append(radio, body);
           box.append(label);
           radios.push(radio);
+          if (m.usable) machineStatus(m.key, kind, stat, radio, label);
         }
         machineCtl = radios;
         text.textContent = '先选一台机器,选了再生成计划(远端要通过 SSH 查 GPU 和缺的东西,可能要几十秒)。';
@@ -3340,6 +3392,14 @@ class StatusRequestHandler(SimpleHTTPRequestHandler):
                 return self._json({"machines": servers.machines()})
             except servers.ServerError as error:
                 return self._json({"error": str(error)}, status=500)
+        if action == "machine_status":  # 机器列表里每台在不在线、有哪些模型的评测环境(页面逐台异步查)
+            if not re.fullmatch(r"[A-Za-z0-9_.-]+", machine):
+                return self._json({"error": "机器名不合法"}, status=400)
+            kind = (query.get("kind") or ["eval"])[0]
+            try:
+                return self._json(group_jobs.machine_status(machine, kind))
+            except group_jobs.PlanError as error:
+                return self._json({"error": str(error)}, status=400)
         if machine and not re.fullmatch(r"[A-Za-z0-9_.-]+", machine):
             return self._json({"error": "机器名不合法"}, status=400)
         if per_gpu_s and not per_gpu_s.isdigit():

@@ -1333,10 +1333,8 @@ def policy_venv(policy: str) -> str:
 def _remote_needs(m: dict, item: dict) -> dict[str, str]:
     """远端评这个模型要有的路径(仓库相对,按本地的 ckpt / step):``venv`` uv / conda 环境、``link``
     checkpoint 链接、``model`` 模型文件。"""
-    env = policy_env(item["policy"])
     return {
-        "venv": (f"{policy_venv(item['policy'])}/.venv/bin/activate" if env == "uv"
-                 else f"{m['conda_root']}/envs/{env}/bin/python"),
+        "venv": policy_env_path(m, item["policy"]),
         "link": f"XPolicyLab/policy/{item['policy']}/checkpoints/{item['ckpt']}",
         "model": f"{rp.rel(MODEL_DIR)}/{item['policy']}/{item['key']}/{item['ckpt']}/{item['step']}",
     }
@@ -1348,6 +1346,62 @@ def remote_eval_missing(m: dict, item: dict, absent: set[str] | None = None) -> 
     need = list(_remote_needs(m, item).values())
     missing = [p for p in need if p in absent] if absent is not None else sv.missing_paths(m, need)
     return missing + policy_env_vars(item["policy"], m)[1]
+
+
+def policy_env_path(m: dict, policy: str) -> str:
+    """这台机器上 ``policy`` 的评测环境要有的文件:uv 环境的 ``activate`` / conda 环境的 ``python``。"""
+    env = policy_env(policy)
+    if env == "uv":
+        return f"{policy_venv(policy)}/.venv/bin/activate"
+    return f"{m['conda_root']}/envs/{env}/bin/python"
+
+
+def machine_status(machine: str, kind: str = "eval") -> dict:
+    """采集 / 评测对话框里每台机器的状态:``{key, online, why, gpus_free, gpus_total, envs}``。
+
+    远端一次 SSH 同时查在线、空闲 GPU 和每个要评的模型的评测环境(``policy_env_path``);本机直接查。
+    ``envs`` 只在 ``kind == "eval"`` 时给:``[{policy, ok, env, why}]``,``ok`` = 环境在且策略要的环境变量都有。"""
+    m = machine_cfg(machine)
+    policies = eval_policies() if kind == "eval" else ()
+    paths = {p: policy_env_path(m, p) for p in policies}
+    out = {"key": m["key"], "online": True, "why": "", "gpus_free": None, "gpus_total": None, "envs": []}
+    if sv.is_local(m):
+        gpus = gpu_usage()
+        absent = {path for path in paths.values() if not (ROOT / path).exists()}
+    else:
+        script = ("nvidia-smi --query-gpu=index,memory.used,memory.total,utilization.gpu "
+                  "--format=csv,noheader,nounits 2>/dev/null | sed 's/^/GPU /'\n"
+                  "for p in " + " ".join(shlex.quote(p) for p in paths.values()) +
+                  '; do [ -e "$p" ] || echo "MISS $p"; done')
+        try:
+            proc = sv.run(m, script, timeout=25, check=False)
+        except sv.ServerError as error:
+            return {**out, "online": False, "why": str(error).split(":", 1)[-1]}
+        if proc.returncode == 255:
+            tail = (proc.stderr or "").strip().splitlines()[-1:] or ["ssh 失败"]
+            return {**out, "online": False, "why": tail[0][-160:]}
+        if proc.returncode == 97:
+            return {**out, "why": f"远端没有仓库目录 {m['repo_path']}",
+                    "envs": [{"policy": p, "ok": False, "env": policy_env(p), "why": "没有仓库"} for p in policies]}
+        gpus, absent = [], set()
+        for line in proc.stdout.splitlines():
+            if line.startswith("MISS "):
+                absent.add(line[5:].strip())
+            elif line.startswith("GPU "):
+                parts = [x.strip() for x in line[4:].split(",")]
+                if len(parts) == 4 and parts[0].isdigit():
+                    gpus.append({"index": int(parts[0]), "used": int(parts[1]), "total": int(parts[2])})
+    if gpus:
+        out["gpus_total"] = len(gpus)
+        out["gpus_free"] = sum(1 for g in gpus if g["used"] < FREE_GPU_MIB)
+    for policy, path in paths.items():
+        env = policy_env(policy)
+        why = []
+        if path in absent:
+            why.append(f"缺{' uv' if env == 'uv' else ' conda'} 环境({path})")
+        why += policy_env_vars(policy, m)[1]
+        out["envs"].append({"policy": policy, "ok": not why, "env": env, "why": ";".join(why)})
+    return out
 
 
 def _ssh_hint(m: dict) -> str:
