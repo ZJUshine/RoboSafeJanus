@@ -36,17 +36,18 @@
 按远端合并的 ``seed.txt`` 核对,再用 ``merge_shards.py`` 接到本地数据之后(编号接续、seed 去重),分片对不上时退回
 整包拉 ``<rdir>/<task>``。评测拉回 ``eval_result/RoboDojo/<task>/`` 和 ``eval_logs/``。
 远端没跑完时再点一次、选同一台机器就续上(远端还在跑就接着看,跑完了就拉回);采集没拉回前不能换机器(seed 段会撞)。
-远端的数据不删,资产和模型不自动同步(缺的在计划里列出来)。
+远端的数据不删,模型不自动同步(缺的在计划里列出来)。评测前会把布局 / 任务 YAML 用到、远端缺的资产(含它们
+引用到的原件)自动同步过去,并把写死的本机绝对路径改成远端仓库路径;采集仍然只在计划里列出来。
 
 采集 / 转换 / 上传(2026-11-13 起)和评测(2026-11-15 起)不审核,做完不提交;只要求该任务的 expert 已批准。
 命令行(看板调用的就是这些函数)::
 
     python scripts/internal/group_jobs.py plan ingest <group> __group__
     python scripts/internal/group_jobs.py plan collect|exchange|upload <group> <task>
-    python scripts/internal/group_jobs.py start collect <group> <task> --gpus 0,1 [--machine autodl] [--per_gpu 2]
+    python scripts/internal/group_jobs.py start collect <group> <task> --gpus 0,1 [--machine autodl-A18] [--per_gpu 2]
     python scripts/internal/group_jobs.py start exchange <group> <task>
     python scripts/internal/group_jobs.py start upload <group> <task> [--delete]
-    python scripts/internal/group_jobs.py start eval <group> <task> --gpus 2,3,5,7 [--machine autodl]
+    python scripts/internal/group_jobs.py start eval <group> <task> --gpus 2,3,5,7 [--machine autodl-A18]
     python scripts/internal/group_jobs.py start layouts <group> <task> --gpus 2
     python scripts/internal/group_jobs.py status
     python scripts/internal/group_jobs.py stop <group> <task> [--policy Pi_0]
@@ -491,6 +492,197 @@ def task_asset_dirs(task: str) -> list[str]:
     return sorted(set(out))
 
 
+LAYOUT_ASSET_SECTIONS = ("Rigid", "Dynamic", "Geometry", "Articulation", "Garment", "Fluid")
+USD_REF_RE = re.compile(r"@([^@\n]{1,500}?\.usd[a]?)@")
+ABS_ASSET_RE = re.compile(
+    r"(/[A-Za-z0-9_./+@\-]*(?:data/RoboSafeJanus-Asset|ext_assets|Assets)/[A-Za-z0-9_./+@\-]+)")
+ASSET_SCAN_MAX_BYTES = 8 * 1024 * 1024
+
+
+def layout_asset_dirs(task: str, variant: str = "") -> list[str]:
+    """评测布局里用到的物体资产目录(本地存在的;和 ``load_saved_layout`` 的路径规则一致)。"""
+    name = f"{task}__{variant}" if variant else task
+    pattern = re.compile(rf"{re.escape(name)}_\d+\.json")
+    out = set()
+    for path in EVAL_LAYOUT.glob(f"{name}_*.json"):
+        if not pattern.fullmatch(path.name):
+            continue
+        try:
+            cfg = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        for section in LAYOUT_ASSET_SECTIONS:
+            cats = cfg.get(section)
+            if not isinstance(cats, dict):
+                continue
+            for cat, insts in cats.items():
+                for inst in insts or []:
+                    if not isinstance(inst, dict) or inst.get("category_idx") is None:
+                        continue
+                    root = "Clutter" if inst.get("type") == "cluttered" else section
+                    rel = f"{ASSET_ROOT}/{root}/{cat}/{int(inst['category_idx']):05d}"
+                    if (ROOT / rel).exists():
+                        out.add(rel)
+    return sorted(out)
+
+
+def _local_to_rel(path: Path) -> str | None:
+    """本地绝对路径 → 仓库相对路径(``Assets`` / ``ext_assets`` 的软链接解析到 ``data/RoboSafeJanus-Asset``)。"""
+    try:
+        resolved = path.resolve()
+    except OSError:
+        return None
+    for name in ("Assets", "ext_assets"):
+        try:
+            return f"{name}/{resolved.relative_to((ROOT / name).resolve())}"
+        except ValueError:
+            pass
+    try:
+        return str(resolved.relative_to(ROOT.resolve()))
+    except ValueError:
+        return None
+
+
+def _normalize_asset_rel(rel: str) -> str:
+    """``data/RoboSafeJanus-Asset/{Assets,ext_assets}/...`` → ``{Assets,ext_assets}/...``(远端两者等价,去重)。"""
+    prefix = "data/RoboSafeJanus-Asset/"
+    if rel.startswith(prefix):
+        rest = rel[len(prefix):]
+        if rest.startswith(("Assets/", "ext_assets/")):
+            return rest
+    return rel
+
+
+def _ref_to_rel(ref: str, base_dir: Path) -> str | None:
+    """资产文件里的一个引用(绝对 / 相对)→ 仓库相对路径;映射不了或不在本仓库时返回 None。"""
+    ref = ref.strip().strip("@")
+    if not ref:
+        return None
+    if os.path.isabs(ref):
+        prefix = str(ROOT.resolve()).rstrip("/") + "/"
+        if ref.startswith(prefix):
+            return _normalize_asset_rel(ref[len(prefix):])
+        # 换机器构建的资产 / 旧文档里的前缀:按资产根标记剥离
+        for marker in ("/data/RoboSafeJanus-Asset/", "/ext_assets/", "/Assets/"):
+            i = ref.find(marker)
+            if i >= 0:
+                return _normalize_asset_rel(ref[i + 1:])
+        return None
+    try:
+        rel = _local_to_rel((base_dir / ref).resolve())
+    except OSError:
+        return None
+    return _normalize_asset_rel(rel) if rel else None
+
+
+def _asset_deps(rel: str) -> list[str]:
+    """资产目录里引用到的、不在本目录内的其它资产目录(SimReady 包装 usd、metadata、curobo.yml)。"""
+    base = ROOT / rel
+    try:
+        own = base.resolve()
+    except OSError:
+        return []
+    out = set()
+    for f in base.rglob("*"):
+        if not f.is_file() or f.suffix.lower() not in (".usd", ".usda", ".json", ".yml", ".yaml"):
+            continue
+        try:
+            if f.stat().st_size > ASSET_SCAN_MAX_BYTES:
+                continue  # 二进制 crate 原件:纹理等同目录一起传,不解析
+            text = f.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            continue
+        refs = [m.group(1) for m in USD_REF_RE.finditer(text)]
+        refs += [m.group(0) for m in ABS_ASSET_RE.finditer(text)]
+        for ref in refs:
+            dep = _ref_to_rel(ref, f.parent)
+            if not dep:
+                continue
+            local = ROOT / dep
+            if not local.exists():
+                continue
+            try:
+                if own == local.resolve() or own in local.resolve().parents:
+                    continue  # 本目录内的文件,跟着目录一起传
+            except OSError:
+                continue
+            # 文件引用传所在目录(纹理等一起带上);目录引用直接传
+            out.add(dep if local.is_dir() else str(Path(dep).parent))
+    return sorted(out)
+
+
+def asset_sync_plan(task: str, variant: str = "") -> list[str]:
+    """评测该任务 / 变体要的资产目录:布局 + 任务 YAML + 它们引用到的原件目录(递归去重)。"""
+    todo = list(layout_asset_dirs(task, variant)) + task_asset_dirs(task)
+    seen: set[str] = set()
+    while todo:
+        rel = todo.pop(0)
+        if rel in seen:
+            continue
+        seen.add(rel)
+        if len(seen) > 300:
+            raise PlanError(f"{task} 的资产引用太多(超过 300 个目录),先检查布局 / 资产")
+        todo.extend(d for d in _asset_deps(rel) if d not in seen)
+    return sorted(seen)
+
+
+def asset_label(rel: str) -> str:
+    """资产目录 → 短名字(``.../SimReady_hazelnut_s300/00000`` → ``SimReady_hazelnut_s300``)。"""
+    path = Path(rel)
+    return path.parent.name if path.name.isdigit() else path.name
+
+
+def missing_asset_dirs(m: dict, task: str, variant: str = "") -> list[str]:
+    """远端缺的资产目录(仓库相对):目录不在,或目录里的 metadata.json / object.usd(z) 不全。"""
+    dirs = asset_sync_plan(task, variant)
+    probes: dict[str, str] = {}
+    for rel in dirs:
+        files = [f"{rel}/{name}" for name in ("metadata.json", "object.usd", "object.usdz")
+                 if (ROOT / rel / name).exists()]
+        for probe in files or [rel]:
+            probes[probe] = rel
+    missing = sv.missing_paths(m, list(probes))
+    return sorted({probes.get(path, path) for path in missing})
+
+
+def _rewrite_asset_paths(m: dict, dirs: list[str]) -> None:
+    """刚同步过去的资产里写死的本机仓库绝对路径 → 远端仓库路径(否则 usd 引用加载不到)。"""
+    repo = str(m["repo_path"]).rstrip("/") + "/"
+    replacements = [(str(ROOT.resolve()).rstrip("/") + "/", repo),
+                    ("/home/xuancun/RoboSafeJanus/", repo)]  # 旧构建机的路径( docs/data_collection.md 8.6 )
+    includes = " ".join(f"--include='*.{ext}'" for ext in ("usd", "usda", "json", "yml", "yaml"))
+    lines = []
+    for rel in dirs:
+        q = shlex.quote(rel)
+        for old, new in replacements:
+            # grep 没匹配时退出 1,不能让 set -o pipefail 把整段判失败;-I 跳过二进制 crate
+            lines.append(f"( set +o pipefail; grep -I -rlZF {includes} {shlex.quote(old)} {q} 2>/dev/null "
+                         f"| xargs -0 -r sed -i {shlex.quote(f's#{old}#{new}#g')} ) || exit 1")
+        # 有些 NFS 上 sed -i 生成的新文件权限是 0000
+        lines.append(f"find {q} -type f -perm 0000 -exec chmod 664 {{}} + || exit 1")
+    proc = sv.run(m, "; ".join(lines), timeout=300)
+    if proc.returncode != 0:
+        raise PlanError(f"改写 {m['key']} 上资产的绝对路径失败:{(proc.stderr or proc.stdout).strip()[-300:]}")
+
+
+def sync_assets(m: dict, dirs: list[str]) -> None:
+    """把本地 ``dirs``(仓库相对)同步到远端,并改写写死的本机绝对路径。"""
+    if not dirs:
+        return
+    parents = sorted({str(Path(d).parent) for d in dirs})
+    proc = sv.run(m, "mkdir -p " + " ".join(shlex.quote(p) for p in parents), timeout=120)
+    if proc.returncode != 0:
+        raise PlanError(f"在 {m['key']} 上建资产目录失败:{(proc.stderr or proc.stdout).strip()[-300:]}")
+    dest = f"{sv.target(m)}:{m['repo_path']}/"
+    for rel in dirs:
+        src = ROOT / rel
+        if not src.exists():
+            raise PlanError(f"本地缺资产 {rel},没法同步到 {m['key']}")
+        if _rsync(m, "-L", f"{src}/", f"{dest}{rel}/") != 0:
+            raise PlanError(f"同步资产 {rel} 到 {m['key']} 失败")
+    _rewrite_asset_paths(m, dirs)
+
+
 def label_problem(problem: str) -> str:
     """``layout/x: none`` → ``layout/x: 未提交``(状态换成页面上的中文)。"""
     return re.sub(r": (\w+)", lambda m: ": " + (rp.STATUS_LABEL.get(m[1]) or "未提交"), problem, count=1)
@@ -889,8 +1081,9 @@ def _downloading() -> set[tuple[str, str]]:
 
 
 def _is_step(name: str) -> bool:
-    """checkpoint step 目录:纯数字或 step_<n> / global_step_<n>(和 download_models_from_modelscope.py 一致)。"""
-    return bool(re.match(r"^(?:global_)?step[_-]?\d+$|^\d+$", name, re.IGNORECASE))
+    """checkpoint step 目录:纯数字、step_<n> / global_step_<n>(LingBot_VLA)或 checkpoint-<n>(GR00T_N17,
+    和 download_models_from_modelscope.py / sync_status.py 的 STEP_RE 一致)。"""
+    return bool(re.match(r"^(?:(?:global_)?step|checkpoint)[_-]?\d+$|^\d+$", name, re.IGNORECASE))
 
 
 def _step_num(name: str) -> int:
@@ -1090,10 +1283,55 @@ def remote_eval_missing(m: dict, item: dict) -> list[str]:
     return sv.missing_paths(m, need) + policy_env_vars(item["policy"], m)[1]
 
 
+def _ssh_hint(m: dict) -> str:
+    """``docs/servers.json`` 里那台机器的 ssh 命令(没写 ``ssh.command`` 时自己拼)。"""
+    ssh = m.get("ssh") or {}
+    command = str(ssh.get("command") or "").strip()
+    if command:
+        return command
+    port = f"-p {ssh['port']} " if ssh.get("port") else ""
+    return f"ssh {port}{sv.target(m)}"
+
+
+def remote_fix_lines(m: dict, missing_items: list[tuple[dict, list[str]]]) -> list[str]:
+    """远端缺 uv 环境 / checkpoint 链接 / 模型文件时怎么补:一条 ssh + 每个模型一条下载命令,看板里直接抄。"""
+    out = [f"要在 {m['key']} 上补(和本地同一个 ckpt / step):",
+           f"    {_ssh_hint(m)}"]
+    conda = ((m.get("conda_env") or {}).get("name") or "").strip()
+    if conda:  # 下载脚本要 modelscope,装在 conda 环境里(远端默认 python 不一定有)
+        out.append(f"    conda activate {conda}")
+    out.append(f"    cd {m['repo_path']}")
+    notes = []
+    for item, missing in missing_items:
+        pdir = f"XPolicyLab/policy/{item['policy']}"
+        env = policy_env(item["policy"])
+        venv = (f"{policy_venv(item['policy'])}/.venv/bin/activate" if env == "uv"
+                else f"{m['conda_root']}/envs/{env}/bin/python")
+        model_rel = f"{rp.rel(MODEL_DIR)}/{item['policy']}/{item['key']}/{item['ckpt']}/{item['step']}"
+        if model_rel in missing or f"{pdir}/checkpoints/{item['ckpt']}" in missing:
+            cmd = ["python", "scripts/download_models_from_modelscope.py", "--policy", item["policy"],
+                   "--task", item["key"], "--run", item["ckpt"]]
+            if item["step"]:
+                cmd += ["--step", str(item["step"])]
+            out.append("    " + " ".join(cmd))
+        if venv in missing:
+            kind = " uv 环境" if env == "uv" else f" conda 环境 {env}"
+            notes.append(f"  {item['policy']} 的{kind}也没有({venv}):先按 docs/model_evaluation.md §3.2 在远端装好")
+    out.append('  说明:下载脚本会顺带建 checkpoints/<run> 软链接;远端没装 modelscope 先 '
+               'pip install -U "modelscope>=1.40",私有仓库要先 modelscope login --token <token>'
+               '(或设 MODELSCOPE_API_TOKEN)。')
+    if m.get("shared_storage_with"):
+        out.append(f"  {m['key']} 和 {m['shared_storage_with']} 共用同一份存储,下完两台都能用。")
+    out += notes
+    out.append("  补完回来再点一次「评测」。")
+    return out
+
+
 def eval_plan(group: str, task: str, policy: str = "", machine: str = "", variant: str = "") -> dict:
     """eval 格的「评测」:ModelScope 上有的模型(已下载的)各评 50 条,没评满的续评;``policy`` 给出时只评这个模型。
 
-    ``machine`` 是远端机器时,模型 / 策略环境要远端已经有(按本地的 ckpt / step 查),缺的这次不评。
+    ``machine`` 是远端机器时,模型 / 策略环境要远端已经有(按本地的 ckpt / step 查),缺的这次不评;
+    布局 / 任务 YAML 用到而远端缺的资产,评测前会自动同步(计划 ``missing_assets``)。
     ``variant``(S1.1 …)时评这个 S1 变体:它自己的布局各评一遍(条数 = 布局个数),结果单独存。"""
     variant = norm_variant(variant)
     if policy and policy not in eval_policies():
@@ -1110,6 +1348,14 @@ def eval_plan(group: str, task: str, policy: str = "", machine: str = "", varian
     what = (f"{variant} 变体评 {target} 条({target} 个 {variant} 布局,layout_id 和 S1.0 对应;"
             "每步查安全检查,记成功率 + 违规率)" if variant else f"评 {EVAL_NUM} 条")
     queue, lines = [], [f"{task}:{where}{who}{what}(seed {EVAL_SEED},{EVAL_CFG},joint)", ""]
+    try:
+        missing_assets = missing_asset_dirs(m, task, variant) if remote else []
+    except sv.ServerError as error:
+        raise PlanError(str(error)) from None
+    if missing_assets:
+        names = "、".join(asset_label(p) for p in missing_assets[:6]) + (" 等" if len(missing_assets) > 6 else "")
+        lines.append(f"  📦 {m['key']} 上缺 {len(missing_assets)} 个资产目录,评测前会自动同步:{names}")
+    missing_items: list[tuple[dict, list[str]]] = []
     for item in eval_models(group, task):
         if policy and item["policy"] != policy:
             continue
@@ -1131,6 +1377,7 @@ def eval_plan(group: str, task: str, policy: str = "", machine: str = "", varian
                 raise PlanError(str(error)) from None
             if missing:
                 lines.append(f"  ⏭ {name}:{m['key']} 上缺 " + "、".join(missing) + ",这次不评")
+                missing_items.append((item, missing))
                 continue
         if resume:
             how = f"续评 {resume}(已有 {partial[1]}/{target})"
@@ -1140,24 +1387,32 @@ def eval_plan(group: str, task: str, policy: str = "", machine: str = "", varian
             how = "新评"
         lines.append(f"  ▶ {name}:{how}")
         queue.append({**item, "run_id": resume})
+    fix = remote_fix_lines(m, missing_items) if missing_items else []
     if not queue:
-        tail = (f"{m['key']} 上没有能评的模型:先在远端装好 uv 环境、下好模型(和本地同一个 ckpt / step),再点一次。"
-                if remote and any(ln.startswith("  ⏭") for ln in lines) else
-                "都评满了,不用再跑。")
+        if fix:
+            tail = [f"{m['key']} 上没有能评的模型,先按下面补,再点一次:", "", *fix]
+        elif remote and any(ln.startswith("  ⏭") for ln in lines):
+            tail = [f"{m['key']} 上没有能评的模型:先在远端装好 uv 环境、下好模型(和本地同一个 ckpt / step),再点一次。"]
+        else:
+            tail = ["都评满了,不用再跑。"]
         return {"group": group, "task": task, "kind": "eval", "policy": policy, "variant": variant, "queue": [],
-                "nothing": True, **_machine_fields(m), "text": "\n".join([*lines, "", tail])}
+                "missing_assets": missing_assets, "nothing": True, **_machine_fields(m),
+                "text": "\n".join([*lines, "", *tail])}
     jid = job_id(group, task, policy, variant)
     busy = busy_gpus(("collect", "eval", "layouts"), jid, m["key"])
     gpus = machine_gpus(m)
     free = [g["index"] for g in gpus if g["used"] < FREE_GPU_MIB and g["index"] not in busy]
+    if fix:
+        lines += ["", "上面 ⏭ 的模型这次不评,要在远端补完再点一次:", *fix]
     lines += gpu_lines(gpus, busy, m)
     lines += ["", "下面填的卡两两一对(policy 卡 + sim 卡),一对跑一条,填几对就并行几条;只填 1 张时 policy 和 sim 共用。",
               f"每条约 1–2 小时。中断后再点一次就续评;日志在 {rp.rel(EVAL_LOGS)}/。"]
     if remote:
-        lines += [f"远端:先同步代码 + 这个任务的评测布局 + 要续评的结果,评完把 eval_result/RoboDojo/{task}/ 和日志拉回本地。"]
+        lines += [f"远端:先同步代码 + 这个任务的评测布局 + 缺的资产(自动) + 要续评的结果,"
+                  f"评完把 eval_result/RoboDojo/{task}/ 和日志拉回本地。"]
     lines += ["评测不审核,评完不用提交。"]
     return {"group": group, "task": task, "kind": "eval", "policy": policy, "variant": variant, "queue": queue,
-            "free_gpus": free[: 2 * len(queue)], **_machine_fields(m),
+            "free_gpus": free[: 2 * len(queue)], "missing_assets": missing_assets, **_machine_fields(m),
             "need_gpus": True, "nothing": False, "text": "\n".join(lines)}
 
 
@@ -1857,7 +2112,8 @@ def run_eval_remote(group: str, task: str, gpus: str, policy: str, m: dict, vari
     if sv.run(m, f"test -d {shlex.quote(result_rel)}", timeout=30).returncode == 0 \
             and _rsync(m, "--update", f"{dest}/{result_rel}/", f"{EVAL_RESULT / task}/") != 0:
         raise PlanError(f"从 {m['key']} 拉回已有评测结果失败,没开评(避免把远端更全的结果当成没评)")
-    queue = eval_plan(group, task, policy, m["key"], variant)["queue"]  # 再确认一次闸门(含远端模型检查),重新算续评
+    plan = eval_plan(group, task, policy, m["key"], variant)  # 再确认一次闸门(含远端模型检查),重新算续评
+    queue, missing_assets = plan["queue"], plan.get("missing_assets") or []
     target = eval_target(task, variant)
     tag = f"_{variant}" if variant else ""
     if not queue:
@@ -1874,6 +2130,9 @@ def run_eval_remote(group: str, task: str, gpus: str, policy: str, m: dict, vari
     # <task>_*.json 也包括 S1 变体的 <task>__<variant>_*.json
     if _rsync(m, "--include", f"{task}_*.json", "--exclude", "*", f"{EVAL_LAYOUT}/", f"{dest}/{layout_rel}/") != 0:
         raise PlanError(f"同步评测布局到 {m['key']} 失败")
+    if missing_assets:  # 缺的资产 + 它们引用到的原件;传完把写死的本机绝对路径改成远端仓库路径
+        _step(group, task, f"同步 {len(missing_assets)} 个缺少的资产到 {m['key']}")
+        sync_assets(m, missing_assets)
     for item in queue:  # 要续评的结果 + 续评清单先推过去(ROBODOJO_RUN_ID 接着同一个目录评;main.py 靠清单续)
         if item["run_id"]:
             base = eval_result_base(task, item["policy"], item["ckpt"], variant)

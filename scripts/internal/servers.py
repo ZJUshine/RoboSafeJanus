@@ -4,13 +4,13 @@
 ``role: local`` 的机器(仓库所在的这台)直接本地运行;``role: remote`` 的机器走 SSH(``BatchMode``,要先配好免密):
 同步代码(``rsync``,不加 ``--delete``)→ 远端 ``setsid nohup`` 运行 → 轮询日志 → 跑完再把结果拉回本地。
 远端机器要在 servers.json 里写全 ``ssh``(user / host / port)、``repo_path``、``conda_root``、``conda_env.name``,
-否则在选择框里灰掉。资产不自动同步(资产文件里有本机绝对路径),远端缺资产时计划里列出来,先按
-``docs/data_collection.md`` 8.6 节准备好。
+否则在选择框里灰掉。模型不自动同步(缺的在计划里列出来)。评测前会把该任务缺的资产自动同步过去并改写资产里
+写死的本机绝对路径;采集不自动同步,远端缺资产时计划里列出来,先按 ``docs/data_collection.md`` 8.6 节准备好。
 
 命令行(调试用)::
 
     python scripts/internal/servers.py list            # 机器列表、能不能用
-    python scripts/internal/servers.py gpus autodl     # 远端 GPU 显存占用
+    python scripts/internal/servers.py gpus autodl-A18 # 远端 GPU 显存占用
 """
 
 from __future__ import annotations

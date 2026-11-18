@@ -11,7 +11,7 @@
 | 项目 | 约定 |
 | :-- | :-- |
 | 评测范围 | 任务定义(`task/robosafejanus_tasks`) 中的组;每组评测**全部** safe + risky 任务 |
-| 机器 | 本地 8× RTX 5880 Ada、远端 1× RTX PRO 6000(`autodl` / `autodl_eval`,两者共用一块 AutoFS)、或远端 8× RTX 5090;见 `docs/servers.json` |
+| 机器 | 本地 8× RTX 5880 Ada、远端 1× RTX PRO 6000(`autodl-A18` / `autodl-A40`,两者共用一块 AutoFS)、或远端 8× RTX 5090;见 `docs/servers.json` |
 | 环境 | sim: conda `RoboDojo`;policy: `uv`(如 Pi_05 / Pi_0)或策略自己的 conda 环境 |
 | env config | `arx_x5` |
 | action type | `joint` |
@@ -198,6 +198,38 @@ uv pip install --python $PWD/openpi/.venv/bin/python -e $REPO/XPolicyLab   # h5p
 
 装好后 `openpi/.venv/bin/activate` 必须在;远端评测时就按这个路径检查(`remote_eval_missing`)。模型文件
 (`data/RoboSafeJanus-Model/...`)也要在远端存在,否则该模型这次不评。
+
+**GR00T_N17**:环境在 `gr00t_n17/.venv`,解释器要用 CPython 3.10(项目 `requires-python ==3.10.*`,
+RoboDojo 的 conda 是 3.11,不能复用)。多台挂同一块 `autodl-fs` 的机器共用一套 uv 环境:
+
+```bash
+ssh -p <port> <user>@<host>
+REPO=<repo_path>
+ln -sf /root/autodl-fs/uv/bin/uv /usr/local/bin/uv      # uv 本体也在共享盘(每台机器建一次软链)
+bash $REPO/XPolicyLab/policy/GR00T_N17/install.sh       # 自动识别 /root/autodl-fs 并复用共享目录
+```
+
+- 共享目录 `/root/autodl-fs/uv/`:`python/`(uv 管的 CPython 3.10,各机器绝对路径一致,`.venv` 里的
+  python 符号链接才不会断)、`cache/`(uv cache)、`wheels/`(`UV_FIND_LINKS`;flash-attn 的 wheel 在
+  GitHub release 上,AutoDL 直连不到,先放到这里)。环境本体 `gr00t_n17/.venv` 在仓库里、仓库在共享盘,
+  所以装一次所有机器都能直接用;`GR00T_SHARED_UV_ROOT` 可以改共享目录,本地开发机(没有 `/root/autodl-fs`)行为不变。
+- 额外下载的骨干模型统一放 `/root/autodl-fs/model/`(Cosmos-Reason2-2B 已放好),
+  `XPolicyLab/policy/GR00T_N17/shared/Cosmos-Reason2-2B` 软链过去;`deploy.yml` 的
+  `cosmos_model_path` 必须保持相对路径(`shared/Cosmos-Reason2-2B`)。
+- 不用 `uv sync`:`gr00t_n17/pyproject.toml` 的 `[tool.uv] required-environments` 同时要求 aarch64,而
+  `scripts/deployment/dgpu/wheels/` 里没有 aarch64 的 torchcodec/flash-attn wheel,`uv sync` 解析必然失败;
+  `uv venv` + `uv pip install -e .` 只按当前平台(x86_64)解析。
+- 验证(不要用 `uv run`,它会按 pyproject 重新 sync 冲掉手工装的包):
+
+```bash
+$REPO/XPolicyLab/policy/GR00T_N17/gr00t_n17/.venv/bin/python \
+  -c "import gr00t, XPolicyLab, h5py, torch; print(torch.cuda.is_available())"
+```
+
+
+物体资产不用手工准备:点「评测」后,`group_jobs` 会按该任务的评测布局 + 任务 YAML 找出远端缺的资产目录,
+连同它们引用到的原件(SimReady 包装 usd、`ext_assets` 里的源文件)一起 rsync 过去,再把资产里写死的
+本机仓库绝对路径改写成远端 `repo_path`;同步完才开始评测。计划里会列出这次要自动同步的资产。
 
 策略目录必须至少包含:
 
@@ -417,7 +449,7 @@ python src/data_collect/eval_layouts.py write \
 | :-- | :-- | :-- |
 | 本地 8× RTX 5880 Ada | 最多 3 条(6 卡) | 留卡给临时调试/采集;旧报告按 3 条执行 |
 | 远端 8× RTX 5090 | 4 条(8 卡) | pod 上专用评测 |
-| 远端 1× RTX PRO 6000(`autodl` / `autodl_eval`) | 1 条 | 只有一张卡,policy 和 sim 共用;两台机器共用同一仓库,同一 `(task, ckpt)` 不要在两台上同时跑 |
+| 远端 1× RTX PRO 6000(`autodl-A18` / `autodl-A40`) | 1 条 | 只有一张卡,policy 和 sim 共用;两台机器共用同一仓库,同一 `(task, ckpt)` 不要在两台上同时跑 |
 
 约束:
 
