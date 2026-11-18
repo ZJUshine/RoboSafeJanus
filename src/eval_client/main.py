@@ -278,6 +278,8 @@ def main():
         print(f"[main] S1 variant {variant}: layouts {eval_cfg['layout_name']}_<i>.json, "
               f"safety checks {eval_cfg['safety_checks']}")
     eval_cfg["seed"] = args_cli.seed
+    # 轨迹 HDF5(与采集数据同格式),默认不存;robodojo.sh --save-traj 设 ROBODOJO_SAVE_TRAJ=1 打开
+    eval_cfg["save_traj"] = os.environ.get("ROBODOJO_SAVE_TRAJ", "0") == "1"
     eval_cfg["physx_monitor_enabled"] = enable_monitor
 
     deploy_cfg = {}

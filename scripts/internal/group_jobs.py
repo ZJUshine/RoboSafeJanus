@@ -211,6 +211,8 @@ def job_label(job: dict) -> str:
     label = KIND_LABEL.get(job.get("kind"), job.get("kind"))
     if job.get("machine") and job["machine"] != sv.default_key():
         label = f"{label}@{job['machine']}"
+    if job.get("traj"):
+        label = f"{label}(存轨迹)"
     who = " ".join(x for x in (job.get("policy"), job.get("variant")) if x)
     return f"{who} {label}" if who else label
 
@@ -1697,10 +1699,12 @@ def plan(button: str, group: str, task: str, dry_run: bool = True, policy: str =
 
 
 def start(button: str, group: str, task: str, gpus: str = "", delete: bool = False, policy: str = "",
-          machine: str = "", per_gpu: int | None = None, variant: str = "") -> dict:
+          machine: str = "", per_gpu: int | None = None, variant: str = "", traj: bool = False) -> dict:
     """重新算一遍计划,通过后在新会话里后台运行 ``run``;返回任务记录。``policy`` 只用于 eval(只评这个模型);
-    ``machine`` 只用于 collect / eval(``docs/servers.json`` 的键,空 = 默认机器);``per_gpu`` 只用于 collect。"""
+    ``machine`` 只用于 collect / eval(``docs/servers.json`` 的键,空 = 默认机器);``per_gpu`` 只用于 collect;
+    ``traj`` 只用于 eval(评测对话框里勾了「保存轨迹」:每条另存 data/episode_*.hdf5)。"""
     policy = policy if button == "eval" else ""
+    traj = bool(traj) and button == "eval"
     variant = norm_variant(variant) if button == "eval" else ""
     _busy(group, task, "eval" if button == "eval" else "", policy, variant)
     if button not in MACHINE_KINDS:
@@ -1726,6 +1730,8 @@ def start(button: str, group: str, task: str, gpus: str = "", delete: bool = Fal
         args += ["--policy", policy]
     if variant:
         args += ["--variant", variant]
+    if traj:
+        args.append("--traj")
     if machine:
         args += ["--machine", machine]
     if per_gpu:
@@ -1737,7 +1743,7 @@ def start(button: str, group: str, task: str, gpus: str = "", delete: bool = Fal
     job = {"group": group, "task": task, "kind": kind, "pid": None, "log": str(log), "started_at": now(),
            "tasks": p.get("tasks") or [task],
            "finished_at": None, "returncode": None, "step": "启动中", "gpus": gpu_list, "delete": bool(delete),
-           "policy": policy, "variant": variant, "machine": machine, "args": args}
+           "policy": policy, "variant": variant, "traj": traj, "machine": machine, "args": args}
     if kind in QUEUED_KINDS:
         job.update(waiting=True, step="排队中")
     old = read_job(job_id(group, task)) or {}
@@ -1858,20 +1864,22 @@ def run_upload(group: str, task: str, delete: bool) -> int:
                 "--modelscope", HDF5_REPO])
 
 
-def _eval_cmd(item: dict, task: str, pair: tuple[int, int], target: int, variant: str) -> list[str]:
-    """一个模型的 ``robodojo.sh eval`` 命令(本机 / 远端一样)。"""
+def _eval_cmd(item: dict, task: str, pair: tuple[int, int], target: int, variant: str,
+              traj: bool = False) -> list[str]:
+    """一个模型的 ``robodojo.sh eval`` 命令(本机 / 远端一样);``traj`` 时加 ``--save-traj``(每条存轨迹 HDF5)。"""
     cmd = ["bash", "scripts/robodojo.sh", "eval", "--policy-dir", f"XPolicyLab/policy/{item['policy']}",
            "--task", task, "--ckpt", item["ckpt"], "--policy-env", policy_env(item["policy"]),
            "--action-type", policy_action_type(item["policy"]),
            "--env-cfg", EVAL_CFG, "--eval-num", str(target), "--seed", str(EVAL_SEED),
            "--policy-gpu", str(pair[0]), "--env-gpu", str(pair[1])]
-    return cmd + (["--variant", variant] if variant else [])
+    return cmd + (["--variant", variant] if variant else []) + (["--save-traj"] if traj else [])
 
 
-def run_eval(group: str, task: str, gpus: str, policy: str = "", machine: str = "", variant: str = "") -> int:
+def run_eval(group: str, task: str, gpus: str, policy: str = "", machine: str = "", variant: str = "",
+             traj: bool = False) -> int:
     m = machine_cfg(machine)
     if not sv.is_local(m):
-        return run_eval_remote(group, task, gpus, policy, m, variant)
+        return run_eval_remote(group, task, gpus, policy, m, variant, traj)
     queue = eval_plan(group, task, policy, m["key"], variant)["queue"]  # 再确认一次闸门,重新算续评
     target = eval_target(task, variant)
     tag = f"_{variant}" if variant else ""
@@ -1887,7 +1895,7 @@ def run_eval(group: str, task: str, gpus: str, policy: str = "", machine: str = 
                 break
             m = todo.pop(0)
             log = EVAL_LOGS / f"{task}{tag}_{m['policy']}_p{pair[0]}_{datetime.now():%Y%m%d_%H%M%S}.log"
-            cmd = _eval_cmd(m, task, pair, target, variant)
+            cmd = _eval_cmd(m, task, pair, target, variant, traj)
             env = {**os.environ, "OMNI_KIT_ACCEPT_EULA": "YES", **policy_env_vars(m["policy"])[0]}
             if m["run_id"]:
                 env["ROBODOJO_RUN_ID"] = m["run_id"]
@@ -2169,7 +2177,8 @@ def run_collect_remote(group: str, task: str, gpus: str, m: dict, per_gpu: int |
     return 0
 
 
-def run_eval_remote(group: str, task: str, gpus: str, policy: str, m: dict, variant: str = "") -> int:
+def run_eval_remote(group: str, task: str, gpus: str, policy: str, m: dict, variant: str = "",
+                    traj: bool = False) -> int:
     dest = f"{sv.target(m)}:{m['repo_path']}"
     result_rel = rp.rel(EVAL_RESULT / task)
     # 先把远端已有的结果拉回来(上次评完但拉回失败的、远端评得更多的);--update:本地更新的不盖
@@ -2215,7 +2224,7 @@ def run_eval_remote(group: str, task: str, gpus: str, policy: str, m: dict, vari
     stamp = f"{datetime.now():%Y%m%d_%H%M%S}"
     for i, item in enumerate(queue):
         pair = pairs[i % len(pairs)]
-        cmd = _eval_cmd(item, task, pair, target, variant)
+        cmd = _eval_cmd(item, task, pair, target, variant, traj)
         log = f"{rp.rel(EVAL_LOGS)}/{task}{tag}_{item['policy']}_p{pair[0]}_{stamp}.log"
         run_id = f"ROBODOJO_RUN_ID={shlex.quote(item['run_id'])} " if item["run_id"] else ""
         run_id += "".join(f"{k}={shlex.quote(v)} " for k, v in policy_env_vars(item["policy"], m)[0].items())
@@ -2262,7 +2271,7 @@ def run_eval_remote(group: str, task: str, gpus: str, policy: str, m: dict, vari
 
 
 def run(kind: str, group: str, task: str, gpus: str = "", delete: bool = False, policy: str = "",
-        machine: str = "", per_gpu: int | None = None, variant: str = "") -> int:
+        machine: str = "", per_gpu: int | None = None, variant: str = "", traj: bool = False) -> int:
     global _RUN_POLICY, _RUN_VARIANT
     _RUN_POLICY = policy if kind == "eval" else ""
     _RUN_VARIANT = norm_variant(variant) if kind == "eval" else ""
@@ -2278,7 +2287,7 @@ def run(kind: str, group: str, task: str, gpus: str = "", delete: bool = False, 
         elif kind == "export":
             code = run_export(group, task)
         elif kind == "eval":
-            code = run_eval(group, task, gpus, policy, machine, _RUN_VARIANT)
+            code = run_eval(group, task, gpus, policy, machine, _RUN_VARIANT, traj)
         elif kind == "layouts":
             code = run_layouts(group, task, gpus)
         else:
@@ -2311,6 +2320,7 @@ def main() -> int:
             s.add_argument("--gpus", default="")
             s.add_argument("--delete", action="store_true", help="上传时删除远端多余文件(默认保留)")
             s.add_argument("--per_gpu", type=int, default=None, help="collect:每卡几个 worker")
+            s.add_argument("--traj", action="store_true", help="eval:每条另存轨迹 HDF5(默认不存)")
     s = sub.add_parser("run", help="内部用:后台会话里执行")
     s.add_argument("kind", choices=("ingest", "collect", "export", "upload", "eval", "layouts"))
     s.add_argument("group")
@@ -2321,6 +2331,7 @@ def main() -> int:
     s.add_argument("--variant", default="")
     s.add_argument("--machine", default="")
     s.add_argument("--per_gpu", type=int, default=None)
+    s.add_argument("--traj", action="store_true")
     sub.add_parser("status")
     s = sub.add_parser("stop")
     s.add_argument("group")
@@ -2332,10 +2343,11 @@ def main() -> int:
         if a.cmd == "plan":
             print(plan(a.button, a.group, a.task, policy=a.policy, machine=a.machine, variant=a.variant)["text"])
         elif a.cmd == "start":
-            job = start(a.button, a.group, a.task, a.gpus, a.delete, a.policy, a.machine, a.per_gpu, a.variant)
+            job = start(a.button, a.group, a.task, a.gpus, a.delete, a.policy, a.machine, a.per_gpu, a.variant,
+                        a.traj)
             print(f"已启动 {job_label(job)} {a.group}/{a.task}:pid {job['pid']},日志 {job['log']}")
         elif a.cmd == "run":
-            return run(a.kind, a.group, a.task, a.gpus, a.delete, a.policy, a.machine, a.per_gpu, a.variant)
+            return run(a.kind, a.group, a.task, a.gpus, a.delete, a.policy, a.machine, a.per_gpu, a.variant, a.traj)
         elif a.cmd == "status":
             for jid, j in all_jobs(tail=False).items():
                 where = f" @{j['machine']}" if j.get("machine") else ""

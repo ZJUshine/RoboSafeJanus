@@ -56,6 +56,7 @@ Options:
   --env-gpu-ids IDS     Optional per-worker env GPU ids. Defaults to --gpu-ids.
   --resume            Skip tasks already marked PASS in the summary file.
   --fail-fast         Stop after the first failed task.
+  --save-traj         Also write per-episode trajectory HDF5 (data/episode_*.hdf5; ~50 MB each).
   --dry-run           Print eval commands and mark tasks DRY_RUN without launching eval.
   --all               Explicitly run all runnable tasks (default when --only is omitted).
   --limit NUM         Run only the first NUM tasks after filtering.
@@ -117,6 +118,7 @@ while [[ $# -gt 0 ]]; do
     --resume) resume="true"; shift ;;
     --all) shift ;;
     --fail-fast) fail_fast="true"; shift ;;
+    --save-traj) export ROBODOJO_SAVE_TRAJ=1; shift ;;
     --dry-run) dry_run="true"; shift ;;
     --limit) need_value "$@"; limit="$2"; shift 2 ;;
     --summary) need_value "$@"; summary_path="$2"; shift 2 ;;

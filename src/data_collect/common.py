@@ -11,7 +11,7 @@ import random
 from omegaconf import OmegaConf
 
 from env.global_configs import BENCHMARK, ENV_CONFIG_PATH, ROOT_DIR
-from src.data_collect.hdf5_writer import write_episode
+from src.data_collect.hdf5_writer import delta_matrices, write_episode
 from src.data_collect.layout_generator import LayoutGenerator, list_eval_layouts
 from utils.load_file import load_json, load_yaml
 from utils.pipeline_utils import process_config, process_randomization
@@ -64,12 +64,6 @@ def make_layout_getter(env_cfg, collect_cfg, task_name, source="random", templat
     return generator.sample
 
 
-def _delta_matrices(env):
-    """每个目标机械臂的状态键前缀 -> 其 delta_matrix(见 RobotManager.get_delta_endpose)。"""
-    robots = env._target_robots()
-    return {(r.arm_name.split("_")[0] + "_" if len(robots) > 1 else ""): r.delta_matrix for r in robots}
-
-
 def save_episode(env, layout, save_path, name, frequency, seed, video=True, meta=None):
     """把 ``env.frames`` 写成 ``data/<name>.hdf5``(以及 ``preview_video/<name>_<camera>.mp4``),
     并把布局写成 ``layout/<name>.json``。
@@ -82,7 +76,7 @@ def save_episode(env, layout, save_path, name, frequency, seed, video=True, meta
         os.path.join(save_path, "data", f"{name}.hdf5"),
         instruction=random.Random(seed).choice(env.instructions()),
         frequency=frequency,
-        delta_matrices=_delta_matrices(env),
+        delta_matrices=delta_matrices(env._target_robots()),
         video_dir=os.path.join(save_path, "preview_video") if video else None,
         meta=meta,
     )

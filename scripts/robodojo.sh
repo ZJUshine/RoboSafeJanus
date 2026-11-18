@@ -128,6 +128,7 @@ run_eval() {
       --policy-dir) need_value "$@"; policy_dir="$(abs_path "$2")"; shift 2 ;;
       --eval-num) need_value "$@"; eval_num="$2"; shift 2 ;;
       --variant) need_value "$@"; variant="$2"; shift 2 ;;
+      --save-traj) export ROBODOJO_SAVE_TRAJ=1; shift ;;
       --dry-run) dry_run="true"; shift ;;
       -h|--help)
         cat <<'EOF'
@@ -150,6 +151,7 @@ Common options:
   --eval-env ENV        Simulator conda env (default: RoboDojo)
   --variant S1.x        S1 execution-test variant (S1.1 … S1.5): <task>__<variant>_<i>.json layouts, per-step
                         safety checks, results under ...,variant=<variant>; default S1.0 (the task itself)
+  --save-traj           Also write per-episode trajectory HDF5 (data/episode_*.hdf5, collect format; ~50 MB each)
   --dry-run             Print command without running it
 
 Split / multi-machine: use `robodojo.sh server` + `robodojo.sh client` (see docs/SPLIT_EVAL.md).
@@ -211,7 +213,8 @@ EOF
   echo "[robodojo eval] task=${task} env_cfg=${env_cfg} eval_num=${EVAL_NUM:-default} variant=${ROBODOJO_EVAL_VARIANT:-S1.0}"
 
   if [[ "${dry_run}" == "true" ]]; then
-    printf '[robodojo eval] dry-run: %sbash %q' "${ROBODOJO_EVAL_VARIANT:+ROBODOJO_EVAL_VARIANT=${ROBODOJO_EVAL_VARIANT} }" \
+    printf '[robodojo eval] dry-run: %s%sbash %q' "${ROBODOJO_EVAL_VARIANT:+ROBODOJO_EVAL_VARIANT=${ROBODOJO_EVAL_VARIANT} }" \
+      "${ROBODOJO_SAVE_TRAJ:+ROBODOJO_SAVE_TRAJ=${ROBODOJO_SAVE_TRAJ} }" \
       "${ROOT_DIR}/scripts/internal/run_policy_eval.sh"
     printf ' %q' "${policy_dir}"
     printf ' %q' "${eval_args[@]}"
@@ -385,6 +388,7 @@ run_client() {
       --action-type) need_value "$@"; action_type="$2"; shift 2 ;;
       --eval-num) need_value "$@"; eval_num="$2"; shift 2 ;;
       --variant) need_value "$@"; variant="$2"; shift 2 ;;
+      --save-traj) export ROBODOJO_SAVE_TRAJ=1; shift ;;
       --connect-timeout) need_value "$@"; connect_timeout="$2"; shift 2 ;;
       --only) need_value "$@"; only_tasks="$2"; shift 2 ;;
       --tasks-file) need_value "$@"; tasks_file="$2"; shift 2 ;;
@@ -430,6 +434,7 @@ Common options:
   --action-type NAME     Action type label recorded in result paths (default: ee)
   --connect-timeout SEC  Pre-flight policy-server reachability probe timeout (default: 5)
   --variant S1.x         S1 execution-test variant (S1.1 … S1.5); default S1.0 (the task itself)
+  --save-traj            Also write per-episode trajectory HDF5 (data/episode_*.hdf5, collect format; ~50 MB each)
   --only a,b,c           Batch mode task subset
   --tasks-file PATH      Batch mode task subset file
   --dimension NAMES      Batch mode capability dimensions

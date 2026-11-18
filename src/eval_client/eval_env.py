@@ -118,6 +118,10 @@ def create_eval_env(config, app, resume_state=None, **kwargs):
             # Replaces the old full-episode frame cache; only vision frames are
             # streamed to disk as they arrive instead of buffered in RAM.
             self.video_writers: dict[int, dict[str, VideoStreamWriter]] = {}
+            # 轨迹:每条 episode 写一个 data/episode_<i>.hdf5,格式与采集数据相同
+            # (src/data_collect/hdf5_writer.py)。{env_idx: [frame]},图像逐帧编码成 JPEG 后再攒。
+            self.save_traj = bool(self.eval_cfg.get("save_traj", False))
+            self.traj_frames: dict[int, list] = {}
             self.episode_nums = self.num_envs
             self.unstable_nums = 0
             self.unstable_envs: set[int] = set()
@@ -231,6 +235,7 @@ def create_eval_env(config, app, resume_state=None, **kwargs):
             # Discard any writers left open by a previous (e.g. crashed or
             # unstable) batch before starting a fresh one.
             self._abort_video_writers()
+            self.traj_frames = {}
             self.episode_nums = len(real_indices)
             self.unstable_envs = set()
             self.violation = [False] * self.num_envs
@@ -294,6 +299,7 @@ def create_eval_env(config, app, resume_state=None, **kwargs):
             for env_idx in env_idx_list:
                 if not self.end_flag[env_idx] or last_frame:
                     self._stream_vision(env_idx, data[env_idx])
+                    self._record_traj(env_idx, data[env_idx])
                 env_data = deepcopy(data[env_idx])
                 env_data["env_idx"] = env_idx
                 data_list.append(env_data)
@@ -866,9 +872,11 @@ def create_eval_env(config, app, resume_state=None, **kwargs):
                     )
                 video_path = os.path.join(self.save_dir, f"episode_{index:07d}.mp4")
                 self.save_video(env_idx, video_path, tag)
+                self._save_traj(env_idx, index)
 
             # Drop streams for envs not saved this batch (e.g. unstable ones).
             self._abort_video_writers()
+            self.traj_frames = {}
 
             fail = self.episode_nums - success
             self.success_nums += success
@@ -944,6 +952,73 @@ def create_eval_env(config, app, resume_state=None, **kwargs):
                     tmp_path = os.path.join(self._stream_dir, f"env{env_idx}_{cam_key}.tmp.mp4")
                     writers[cam_key] = VideoStreamWriter(tmp_path, height, width, channels, fps=fps)
                 writers[cam_key].append(color)
+
+        def _record_traj(self, env_idx, frame):
+            """把这一帧的 state 和各相机图像(JPEG)、内外参追加到 ``traj_frames[env_idx]``。
+
+            内外参直接问 camera_manager,不打开 obs 配置里的 intrinsic/extrinsic_matrix,
+            免得发给策略的观测多出字段;内参只在第一帧取(writer 只用第一帧的)。
+            """
+            if not self.save_traj or not isinstance(frame, dict):
+                return
+            from XPolicyLab.utils.process_data import encode_image_bit
+
+            frames = self.traj_frames.setdefault(env_idx, [])
+            cams = self.obs_manager.camera_manager
+            cam_ids = {name: i for i, name in enumerate(cams.camera_names[env_idx])} if cams is not None else {}
+            vision = {}
+            for cam_key, cam_data in (frame.get("vision") or {}).items():
+                color = cam_data.get("color") if isinstance(cam_data, dict) else None
+                if color is None:
+                    continue
+                color = np.ascontiguousarray(color, dtype=np.uint8)
+                entry = {"color": encode_image_bit(color), "shape": color.shape}
+                ith = cam_ids.get(cam_key)
+                if ith is not None:
+                    if not frames:
+                        entry["intrinsic_matrix"] = cams.get_camera_intrinsics(ith, env_idx)
+                    entry["extrinsic_matrix"] = cams.get_camera_extrinsics(ith, env_idx)
+                vision[cam_key] = entry
+            state = {k: np.array(v) for k, v in (frame.get("state") or {}).items()}
+            frames.append({"state": state, "vision": vision})
+
+        def _save_traj(self, env_idx, index):
+            """把 env 的轨迹写成 ``data/episode_<index>.hdf5``;评测结果(成功、得分、布局、违规)写在 ``meta/``。"""
+            frames = self.traj_frames.pop(env_idx, [])
+            if not self.save_traj or len(frames) < 2:
+                return
+            from src.data_collect.hdf5_writer import delta_matrices, write_episode
+
+            detail = self.eval_result["details"][index]
+            meta = {
+                "task_name": self.task_name,
+                "policy_name": self.policy_name,
+                "layout_id": detail["layout_id"],
+                "success": detail["success"],
+                "score": detail["score"],
+                "steps": self.take_action_cnt[env_idx],
+            }
+            if self.variant:
+                meta.update(
+                    variant=self.variant,
+                    violation=detail["violation"],
+                    violated_by=",".join(detail["violated_by"]),
+                )
+            path = os.path.join(self.save_dir, "data", f"episode_{index:07d}.hdf5")
+            robots = [r for r in self.robot_manager.robot_list if r.type == "target"]
+            try:
+                n = write_episode(
+                    frames,
+                    path,
+                    instruction=str(detail["instruction"] or self.task_name.replace("_", " ")),
+                    frequency=int(self.obs_manager.collect_freq),
+                    delta_matrices=delta_matrices(robots),
+                    meta=meta,
+                )
+            except Exception as e:
+                print(f"[EvalEnv] Failed to save trajectory for env {env_idx}: {type(e).__name__}: {e}")
+                return
+            print(f"[EvalEnv] Trajectory saved to {path} ({n} steps)")
 
         def _sweep_stream_dir(self):
             """Remove orphan temp videos left by a previous hard kill/crash."""

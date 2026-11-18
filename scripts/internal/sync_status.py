@@ -3059,6 +3059,7 @@ def html_page(snapshot: dict, refresh: int, out_dir: Path = DEFAULT_OUT) -> str:
       let gpuInput = null;
       let perGpuInput = null;
       let deleteBox = null;
+      let trajBox = null;
       if (['collect', 'eval', 'layouts'].includes(plan.kind) && plan.need_gpus) {
         const label = document.createElement('label');
         label.textContent = {eval: '用哪几张 GPU(两两一对:policy 卡,sim 卡):',
@@ -3080,6 +3081,14 @@ def html_page(snapshot: dict, refresh: int, out_dir: Path = DEFAULT_OUT) -> str:
         label.append(perGpuInput, '(一个 worker 约 14–20 GB 显存;默认按这台机器每卡显存估)');
         fields.append(label);
       }
+      if (plan.kind === 'eval') {
+        const label = document.createElement('label');
+        trajBox = document.createElement('input');
+        trajBox.type = 'checkbox';
+        label.append(trajBox, ' 同时保存轨迹 HDF5(和采集数据同格式,每条约 50 MB,在结果目录 data/ 下;'
+          + '续评时只有这次新评的条数有轨迹)');
+        fields.append(label);
+      }
       if (plan.kind === 'upload' && plan.deletes) {
         const label = document.createElement('label');
         deleteBox = document.createElement('input');
@@ -3098,6 +3107,7 @@ def html_page(snapshot: dict, refresh: int, out_dir: Path = DEFAULT_OUT) -> str:
         if (gpuInput) params.set('gpus', gpuInput.value.trim());
         if (perGpuInput && perGpuInput.value.trim()) params.set('per_gpu', perGpuInput.value.trim());
         if (deleteBox && deleteBox.checked) params.set('delete', '1');
+        if (trajBox && trajBox.checked) params.set('traj', '1');
         try {
           const started = await api(base + '&' + params.toString(), {method: 'POST'});
           if (machine) { try { localStorage.setItem('rsj-machine-' + kind, machine); } catch (e) { /* 无痕模式 */ } }
@@ -3362,7 +3372,8 @@ class StatusRequestHandler(SimpleHTTPRequestHandler):
                 return self._json(group_jobs.plan(action, group, task, policy=policy, machine=machine,
                                                   variant=variant))
             job = group_jobs.start(action, group, task, (query.get("gpus") or [""])[0],
-                                   (query.get("delete") or [""])[0] == "1", policy, machine, per_gpu, variant)
+                                   (query.get("delete") or [""])[0] == "1", policy, machine, per_gpu, variant,
+                                   (query.get("traj") or [""])[0] == "1")
         except group_jobs.PlanError as error:
             return self._json({"error": str(error)}, status=409)
         except subprocess.TimeoutExpired:

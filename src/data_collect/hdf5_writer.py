@@ -58,6 +58,14 @@ def _delta_ee_poses(ee_poses, delta_matrix):
     return np.concatenate([ee_poses[:, :3], np.asarray(rot)], axis=1)
 
 
+def delta_matrices(robots):
+    """被控制手臂的状态键前缀 -> 其 delta_matrix(见 RobotManager.get_delta_endpose)。
+
+    ``robots`` 是 ``type == "target"`` 的机器人;单臂时前缀为空串,双臂时为 ``left_`` / ``right_``。
+    """
+    return {(r.arm_name.split("_")[0] + "_" if len(robots) > 1 else ""): r.delta_matrix for r in robots}
+
+
 def _string(text):
     """纯 ASCII 文本用 ascii 字符串类型(与已发布数据一致),否则退回 utf-8。"""
     try:
@@ -101,14 +109,21 @@ def write_episode(frames, hdf5_path, instruction, frequency, delta_matrices=None
                 state.create_dataset(f"{prefix}delta_ee_poses", data=delta)
 
         # 图像只存前 T-1 帧,与 state 对齐;JPEG 编码后按最长字节串定长存储
+        # ``color`` 可以是 RGB 数组,也可以是已经用 encode_image_bit 编好的 JPEG 字节串(此时须带 ``shape``),
+        # 两种输入写出的字节完全一样;评测边跑边编码,省得整条 episode 的原图留在内存里。
         vision = f.create_group("vision")
         for cam in frames[0]["vision"]:
             first = frames[0]["vision"][cam]
-            colors = np.asarray([fr["vision"][cam]["color"] for fr in frames[:-1]], dtype=np.uint8)
+            colors = [fr["vision"][cam]["color"] for fr in frames[:-1]]
+            if isinstance(colors[0], bytes):
+                shape = first["shape"]
+            else:
+                colors = [np.asarray(c, dtype=np.uint8) for c in colors]
+                shape = colors[0].shape
             encoded, max_len = images_encoding(colors)
             group = vision.create_group(cam)
             group.create_dataset("colors", data=encoded, dtype=f"S{max_len}")
-            group.create_dataset("shape", data=np.asarray(colors[0].shape, dtype=np.int64))
+            group.create_dataset("shape", data=np.asarray(shape, dtype=np.int64))
             if "intrinsic_matrix" in first:
                 group.create_dataset("intrinsic_matrix", data=np.asarray(first["intrinsic_matrix"], dtype=np.float64))
             if "extrinsic_matrix" in first:
