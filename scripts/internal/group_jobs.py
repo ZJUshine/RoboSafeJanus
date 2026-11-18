@@ -670,16 +670,22 @@ def asset_label(rel: str) -> str:
     return path.parent.name if path.name.isdigit() else path.name
 
 
-def missing_asset_dirs(m: dict, task: str, variant: str = "") -> list[str]:
-    """远端缺的资产目录(仓库相对):目录不在,或目录里的 metadata.json / object.usd(z) 不全。"""
-    dirs = asset_sync_plan(task, variant)
+def _asset_probes(task: str, variant: str = "") -> dict[str, str]:
+    """``{要在远端查的路径: 资产目录}``:目录里本地有的 metadata.json / object.usd(z),都没有时查目录本身。"""
     probes: dict[str, str] = {}
-    for rel in dirs:
+    for rel in asset_sync_plan(task, variant):
         files = [f"{rel}/{name}" for name in ("metadata.json", "object.usd", "object.usdz")
                  if (ROOT / rel / name).exists()]
         for probe in files or [rel]:
             probes[probe] = rel
-    missing = sv.missing_paths(m, list(probes))
+    return probes
+
+
+def missing_asset_dirs(m: dict, task: str, variant: str = "", absent: set[str] | None = None) -> list[str]:
+    """远端缺的资产目录(仓库相对):目录不在,或目录里的 metadata.json / object.usd(z) 不全。
+    ``absent`` 是已经一次查好的远端缺的路径(eval_plan 把资产和模型合成一次 SSH),没有时自己查。"""
+    probes = _asset_probes(task, variant)
+    missing = [p for p in probes if p in absent] if absent is not None else sv.missing_paths(m, list(probes))
     return sorted({probes.get(path, path) for path in missing})
 
 
@@ -1304,16 +1310,24 @@ def policy_venv(policy: str) -> str:
     return str(env if env.is_absolute() else pdir / env)
 
 
-def remote_eval_missing(m: dict, item: dict) -> list[str]:
-    """远端评这个模型还缺什么:uv / conda 环境、checkpoint 链接、模型文件(都按本地的 ckpt / step 找)、
-    策略要的环境变量(servers.json 的 policy_env)。"""
-    pdir = f"XPolicyLab/policy/{item['policy']}"
+def _remote_needs(m: dict, item: dict) -> dict[str, str]:
+    """远端评这个模型要有的路径(仓库相对,按本地的 ckpt / step):``venv`` uv / conda 环境、``link``
+    checkpoint 链接、``model`` 模型文件。"""
     env = policy_env(item["policy"])
-    venv = (f"{policy_venv(item['policy'])}/.venv/bin/activate" if env == "uv"
-            else f"{m['conda_root']}/envs/{env}/bin/python")
-    need = [venv, f"{pdir}/checkpoints/{item['ckpt']}",
-            f"{rp.rel(MODEL_DIR)}/{item['policy']}/{item['key']}/{item['ckpt']}/{item['step']}"]
-    return sv.missing_paths(m, need) + policy_env_vars(item["policy"], m)[1]
+    return {
+        "venv": (f"{policy_venv(item['policy'])}/.venv/bin/activate" if env == "uv"
+                 else f"{m['conda_root']}/envs/{env}/bin/python"),
+        "link": f"XPolicyLab/policy/{item['policy']}/checkpoints/{item['ckpt']}",
+        "model": f"{rp.rel(MODEL_DIR)}/{item['policy']}/{item['key']}/{item['ckpt']}/{item['step']}",
+    }
+
+
+def remote_eval_missing(m: dict, item: dict, absent: set[str] | None = None) -> list[str]:
+    """远端评这个模型还缺什么:``_remote_needs`` 里的路径、策略要的环境变量(servers.json 的 policy_env)。
+    ``absent`` 同 ``missing_asset_dirs``。"""
+    need = list(_remote_needs(m, item).values())
+    missing = [p for p in need if p in absent] if absent is not None else sv.missing_paths(m, need)
+    return missing + policy_env_vars(item["policy"], m)[1]
 
 
 def _ssh_hint(m: dict) -> str:
@@ -1336,12 +1350,10 @@ def remote_fix_lines(m: dict, missing_items: list[tuple[dict, list[str]]]) -> li
     out.append(f"    cd {m['repo_path']}")
     notes = []
     for item, missing in missing_items:
-        pdir = f"XPolicyLab/policy/{item['policy']}"
+        need = _remote_needs(m, item)
         env = policy_env(item["policy"])
-        venv = (f"{policy_venv(item['policy'])}/.venv/bin/activate" if env == "uv"
-                else f"{m['conda_root']}/envs/{env}/bin/python")
-        model_rel = f"{rp.rel(MODEL_DIR)}/{item['policy']}/{item['key']}/{item['ckpt']}/{item['step']}"
-        if model_rel in missing or f"{pdir}/checkpoints/{item['ckpt']}" in missing:
+        venv = need["venv"]
+        if need["model"] in missing or need["link"] in missing:
             cmd = ["python", "scripts/download_models_from_modelscope.py", "--policy", item["policy"],
                    "--task", item["key"], "--run", item["ckpt"]]
             if item["step"]:
@@ -1381,17 +1393,21 @@ def eval_plan(group: str, task: str, policy: str = "", machine: str = "", varian
     what = (f"{variant} 变体评 {target} 条({target} 个 {variant} 布局,layout_id 和 S1.0 对应;"
             "每步查安全检查,记成功率 + 违规率)" if variant else f"评 {EVAL_NUM} 条")
     queue, lines = [], [f"{task}:{where}{who}{what}(seed {EVAL_SEED},{EVAL_CFG},joint)", ""]
-    try:
-        missing_assets = missing_asset_dirs(m, task, variant) if remote else []
-    except sv.ServerError as error:
-        raise PlanError(str(error)) from None
+    models = [it for it in eval_models(group, task) if not policy or it["policy"] == policy]
+    absent: set[str] | None = None
+    if remote:  # 资产和每个模型要的路径合成一次 SSH 查
+        probe = [*_asset_probes(task, variant),
+                 *(p for it in models if it["ready"] for p in _remote_needs(m, it).values())]
+        try:
+            absent = set(sv.missing_paths(m, probe))
+        except sv.ServerError as error:
+            raise PlanError(str(error)) from None
+    missing_assets = missing_asset_dirs(m, task, variant, absent) if remote else []
     if missing_assets:
         names = "、".join(asset_label(p) for p in missing_assets[:6]) + (" 等" if len(missing_assets) > 6 else "")
         lines.append(f"  📦 {m['key']} 上缺 {len(missing_assets)} 个资产目录,评测前会自动同步:{names}")
     missing_items: list[tuple[dict, list[str]]] = []
-    for item in eval_models(group, task):
-        if policy and item["policy"] != policy:
-            continue
+    for item in models:
         name = f"{item['policy']} · {item['ckpt']}(step {item['step'] or '?'}{',zero-shot' if item['zero_shot'] else ''})"
         if not item["ready"]:
             lines.append(f"  ⏭ {name}:{item['why']},这次不评")
@@ -1404,10 +1420,7 @@ def eval_plan(group: str, task: str, policy: str = "", machine: str = "", varian
         partial = eval_resume_run(task, item["policy"], item["ckpt"], target, variant)
         resume = partial[0] if partial else None
         if remote:
-            try:
-                missing = remote_eval_missing(m, item)
-            except sv.ServerError as error:
-                raise PlanError(str(error)) from None
+            missing = remote_eval_missing(m, item, absent)
             if missing:
                 lines.append(f"  ⏭ {name}:{m['key']} 上缺 " + "、".join(missing) + ",这次不评")
                 missing_items.append((item, missing))

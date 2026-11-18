@@ -42,6 +42,7 @@ from __future__ import annotations
 
 import argparse
 from collections import Counter
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from functools import partial
 import html
@@ -339,17 +340,26 @@ def collect_local(local_dir: Path, json_tasks: dict[str, tuple[str, str]]) -> di
     return result
 
 
-def collect_remote(repo_id: str | None, repo_type: str, prefix: str) -> tuple[dict[str, dict], str | None]:
-    if not repo_id:
-        return {}, "未配置 repo_id"
+def list_repo_files(repo_id: str, repo_type: str) -> tuple[list, str | None]:
+    """ModelScope 仓库的全部文件 ``(files, 出错说明)``;看板要能在远端异常时继续。"""
     try:
         from modelscope_hub import HubApi
     except ImportError:
-        return {}, "未安装 modelscope_hub"
+        return [], "未安装 modelscope_hub"
     try:
-        files = HubApi().list_repo_files(repo_id, repo_type, recursive=True)
+        return HubApi().list_repo_files(repo_id, repo_type, recursive=True), None
     except Exception as error:  # noqa: BLE001 - a dashboard must survive API failures
-        return {}, f"{type(error).__name__}: {error}"
+        return [], f"{type(error).__name__}: {error}"
+
+
+def collect_remote(repo_id: str | None, repo_type: str, prefix: str,
+                   listing: tuple[list, str | None] | None = None) -> tuple[dict[str, dict], str | None]:
+    """``listing`` 是已经列好的 ``list_repo_files`` 结果(build_snapshot 并行列三个仓库),没有时自己列。"""
+    if not repo_id:
+        return {}, "未配置 repo_id"
+    files, error = listing or list_repo_files(repo_id, repo_type)
+    if error:
+        return {}, error
     prefix_parts = prefix.strip("/").split("/") if prefix else []
     result: dict[str, dict] = {}
     for item in files:
@@ -468,6 +478,7 @@ def collect_lerobot_remote(
     known_tasks: set[str],
     json_tasks: dict[str, tuple[str, str]],
     cache_path: Path,
+    listing: tuple[list, str | None] | None = None,
 ) -> tuple[dict[str, dict[str, dict]], str | None]:
     """扫描 ModelScope 上的 LeRobot 数据集,支持两种布局。
 
@@ -477,14 +488,10 @@ def collect_lerobot_remote(
     empty = {version: {} for version in LEROBOT_VERSIONS}
     if not repo_id:
         return empty, "未配置 LeRobot repo_id"
-    try:
-        from modelscope_hub import HubApi
-    except ImportError:
-        return empty, "未安装 modelscope_hub"
-    try:
-        files = HubApi().list_repo_files(repo_id, repo_type, recursive=True)
-    except Exception as error:  # noqa: BLE001 - 看板要能在远端异常时继续
-        return empty, f"{type(error).__name__}: {error}"
+    files, error = listing or list_repo_files(repo_id, repo_type)
+    if error:
+        return empty, error
+    from modelscope_hub import HubApi  # 列得出文件就一定装了
 
     datasets: dict[str, dict] = {}
     info_sizes: dict[str, int] = {}
@@ -652,6 +659,7 @@ def collect_models(
     json_tasks: dict[str, tuple[str, str]],
     local_root: Path | None = None,
     wandb_root: Path | None = None,
+    listing: tuple[list, str | None] | None = None,
 ) -> tuple[list[dict], list[dict], str | None]:
     """扫描 ModelScope model 仓库。
 
@@ -663,14 +671,9 @@ def collect_models(
     """
     if not repo_id:
         return [], [], "未配置模型仓库"
-    try:
-        from modelscope_hub import HubApi
-    except ImportError:
-        return [], [], "未安装 modelscope_hub"
-    try:
-        files = HubApi().list_repo_files(repo_id, "model", recursive=True)
-    except Exception as error:  # noqa: BLE001 - 看板要能在远端异常时继续
-        return [], [], f"{type(error).__name__}: {error}"
+    files, error = listing or list_repo_files(repo_id, "model")
+    if error:
+        return [], [], error
 
     entries: dict[str, dict] = {}
     wandb_entries: dict[tuple[str, str, str, str], dict] = {}
@@ -1557,14 +1560,24 @@ def build_snapshot(
     eval_num: int = 50,
     wandb_dir: Path | None = None,
 ) -> dict:
+    # 三个 ModelScope 仓库各要列几秒,先在后台一起列,同时扫本地
+    pool = ThreadPoolExecutor(max_workers=3)
+    listings = {key: pool.submit(list_repo_files, repo, kind) for key, repo, kind in (
+        ("hdf5", repo_id, repo_type), ("lerobot", lerobot_repo_id, repo_type), ("model", model_repo_id, "model"),
+    ) if repo}
+    pool.shutdown(wait=False)
+
+    def listing(key: str) -> tuple[list, str | None] | None:
+        return listings[key].result() if key in listings else None
+
     task_groups.cache_clear()
     json_tasks = task_groups()
     group_order, task_order = json_order(json_tasks)
     local = collect_local(local_dir, json_tasks)
-    remote, remote_error = collect_remote(repo_id, repo_type, prefix)
     lerobot = collect_lerobot(lerobot_dir)
+    remote, remote_error = collect_remote(repo_id, repo_type, prefix, listing("hdf5"))
     models, wandb_runs, model_error = collect_models(
-        model_repo_id, json_tasks, model_local_dir or DEFAULT_MODEL, wandb_dir or DEFAULT_WANDB
+        model_repo_id, json_tasks, model_local_dir or DEFAULT_MODEL, wandb_dir or DEFAULT_WANDB, listing("model")
     )
     all_results = collect_eval_results(eval_dir or DEFAULT_EVAL, json_tasks)
     # S1 变体的结果只进大表评测结果列(variant_evals);其余汇总 / 矩阵 / 进度都只算 S1.0
@@ -1600,7 +1613,7 @@ def build_snapshot(
     lerobot_remote, lerobot_remote_error = (
         collect_lerobot_remote(
             lerobot_repo_id, repo_type, prefix, known_tasks, json_tasks,
-            local_dir.parent / ".cache" / "lerobot_remote.json",
+            local_dir.parent / ".cache" / "lerobot_remote.json", listing("lerobot"),
         )
         if lerobot_repo_id
         else ({version: {} for version in LEROBOT_VERSIONS}, None)
