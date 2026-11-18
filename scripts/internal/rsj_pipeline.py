@@ -756,11 +756,10 @@ def write_html() -> Path | None:
     sys.path.insert(0, str(Path(__file__).parent))
     try:
         import pipeline_page
-        import sync_status
     except ImportError as e:  # 看板脚本不可用时只是不刷新页面
         print(f"(未刷新流水线页: {e})", file=sys.stderr)
         return None
-    return pipeline_page.render(STATE_DIR.parent, sync_status.nav_html, sync_status.BASE_CSS)
+    return pipeline_page.render(STATE_DIR.parent)
 
 
 # ---------------------------------------------------------------------------

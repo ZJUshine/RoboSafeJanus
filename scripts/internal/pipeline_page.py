@@ -840,7 +840,7 @@ def job_cell(state: dict, col: str, task: str, cells: dict, buttons: bool) -> st
         blocked = "expert 要先批准(现在:" + (rp.STATUS_LABEL.get(expert) or "未提交") + ")"
     extra = ""
     if col == "collect" and (cells.get(task) or {}).get("video", "—") != "—":
-        extra += f'<div class="jvideo">{cells[task]["video"].split("<br>")[0]}</div>'
+        extra += f'<div class="jvideo">{cells[task]["video"]}</div>'
     if buttons:
         g, t = esc(state["group"]), esc(task)
         label, tip = JOB_LABEL[col]
@@ -1879,10 +1879,10 @@ location.replace('{PAGE}' + (m ? '#g/' + m[1] : (h.startsWith('g/') || h.startsW
 """
 
 
-def render(out_dir: Path, nav=None, base_css: str = "") -> Path:
+def render(out_dir: Path) -> Path:
     """写流水线大表片段 ``data/pipeline/_fragments/table.html``(看板页面打开时读取)。
 
-    ``nav`` / ``base_css`` 是旧接口留下的参数,不再使用。页面不自动刷新输入框里的内容,操作后自动重载。
+    页面不自动刷新输入框里的内容,操作后自动重载。
     """
     for key, text in fragments(out_dir).items():
         _write(out_dir / FRAGMENT_DIR / f"{key}.html", text)

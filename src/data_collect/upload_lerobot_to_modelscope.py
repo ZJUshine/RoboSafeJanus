@@ -228,7 +228,7 @@ def main() -> int:
     except RuntimeError as error:
         sys.exit(f"[upload_lerobot] {error}")
     print(f"[upload_lerobot] hashed {len(local_hashes)} local files in {time.time() - started:.1f}s")
-    to_upload, stale = plan_sync(local_files, local_sizes, local_hashes, remote_map)
+    to_upload, _ = plan_sync(local_files, local_sizes, local_hashes, remote_map)  # 远端多余文件按数据集范围另算
     dataset_prefixes = tuple(f"{dataset['path']}/" for dataset in datasets)
     remote_in_scope = {path for path in remote_map if path.startswith(dataset_prefixes)}
     stale = sorted(remote_in_scope - set(local_files))

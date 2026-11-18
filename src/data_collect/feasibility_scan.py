@@ -300,10 +300,8 @@ class DryRun:
             "together_move",
         ):
             setattr(env, name, getattr(self, name))
-        env.open_gripper = lambda arm, val=1.0, steps=60: self.set_gripper(arm, val, steps)
-        env.close_gripper = lambda arm, val=0.0, steps=60: self.set_gripper(arm, val, steps)
+        # open_gripper / close_gripper / delay 走的是上面的 set_gripper 和下面的 execute
         env.execute = lambda *seqs: None
-        env.delay = lambda steps: None
         env.settle = lambda *a, **k: None
         for planner in {id(p): p for p in env.robot_manager.planner.values()}.values():
             self._wrap_plan_joint(planner)

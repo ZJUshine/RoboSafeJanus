@@ -27,7 +27,6 @@ args_cli = parser.parse_args()
 app_launcher = AppLauncher(args_cli)
 simulation_app = app_launcher.app
 
-from isaacsim.core.utils.stage import add_reference_to_stage  # noqa: E402
 import numpy as np  # noqa: E402
 from pxr import Usd, UsdGeom  # noqa: E402
 import trimesh  # noqa: E402
@@ -61,9 +60,6 @@ def _mesh(stage, root_path):
 
 
 def main():
-    add_reference_to_stage(usd_path=args_cli.usd, prim_path="/World/probe")
-    for _ in range(3):
-        simulation_app.update()
     stage = Usd.Stage.Open(args_cli.usd)  # 直接在 USD 层面算,不需要仿真
     root = stage.GetDefaultPrim()
     mesh = _mesh(stage, str(root.GetPath()))

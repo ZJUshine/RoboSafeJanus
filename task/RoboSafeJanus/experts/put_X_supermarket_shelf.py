@@ -90,7 +90,6 @@ FINGER_Z_MAX = 0.35
 TOP_APPROACH_Z = (-1.0, -0.6)
 MAX_GRASPS = 40
 FINGER_SPACING = 0.008  # 手指碰撞球铺满的间距(同 put_X_refrigerator)
-BOTTLE_SHRINK = (0.8, 0.8, 1.0)
 DISPLAY_SHRINK = 0.95  # 陈列品当障碍物时按这个比例缩小(都竖着立在层板上,手中物体从旁边擦过)
 SHELF_INFLATE = 0.005  # 货架盒子交给 cuRobo 前各向外扩这么多
 # 放入
