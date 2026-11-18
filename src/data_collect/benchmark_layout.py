@@ -44,6 +44,7 @@ BENCHMARK_NAME = "RoboSafeJanus-Benchmark"
 DEFAULT_SAVE_DIR = os.path.join("data", BENCHMARK_NAME)
 FLAT_VIEW_DIR = os.path.join(ROOT_DIR, "data", f"{BENCHMARK_NAME}-flat")
 LEVELS = ("safe_tasks", "risky_tasks")
+BASE_VARIANT = "S1.0"  # sim 文件里原任务的 assets / success 写在 S1[BASE_VARIANT] 下
 REMOTE_PREFIX = "RoboSafeJanus"
 
 
@@ -102,7 +103,8 @@ def load_tasks(include_shared=False):
 
     组和任务(及顺序)来自任务合集 ``task/robosafejanus_tasks.json``,内容由 ``task/robosafejanus_tasks/<group>.json``
     (指令、safe / risky)和 ``task/robosafejanus_sim/<group>.json``(资产、setup、success、S1 细节)合成,``assets`` 为
-    ``{label: {"asset": path}}``。三处的组和任务必须一一对应,否则报错。
+    ``{label: {"asset": path}}``。原任务的 ``assets`` / ``success`` 在 sim 文件里写在 ``S1["S1.0"]`` 下(S1.x 变体
+    用的资产 = S1.0 的资产 + 它自己 ``assets`` 里新增的),这里照旧提到顶层。三处的组和任务必须一一对应,否则报错。
 
     一个任务只归属一个组(数据目录、上传、success 写回都按归属组)。别的组要把它列进来时,在自己的 sim 文件里
     写 ``{"same_as": <归属组>}``(见 ``_check_shared``):默认不出现在本组里;``include_shared=True`` 时也列在
@@ -133,11 +135,12 @@ def load_tasks(include_shared=False):
                 if not include_shared:
                     continue
                 s = sim[owner]["tasks"][task]
-            spec = {"instruction": d["instruction"], "assets": {k: {"asset": v} for k, v in s["assets"].items()}}
+            base = s["S1"][BASE_VARIANT]  # 原任务的资产和成功判定写在 S1.0 里
+            spec = {"instruction": d["instruction"], "assets": {k: {"asset": v} for k, v in base["assets"].items()}}
             if "setup" in s:
                 spec["setup"] = s["setup"]
-            spec["success"] = s["success"]
-            spec["S1"] = s.get("S1", {})
+            spec["success"] = base["success"]
+            spec["S1"] = s["S1"]
             if owner is not None:
                 spec["same_as"] = owner
             levels[_level(d)][task] = spec
@@ -146,7 +149,7 @@ def load_tasks(include_shared=False):
 
 
 def save_success(task_name, success):
-    """把 ``success`` 写回 ``task/robosafejanus_sim/<group>.json`` 中的该任务(其余内容不动)。
+    """把 ``success`` 写回 ``task/robosafejanus_sim/<group>.json`` 中该任务的 ``S1.S1.0.success``(其余内容不动)。
 
     ``same_as`` 引用不算:写回任务的归属组。
     """
@@ -157,7 +160,7 @@ def save_success(task_name, success):
         with open(path, encoding="utf-8") as fp:
             data = json.load(fp)
         if task_name in data["tasks"] and "same_as" not in data["tasks"][task_name]:
-            data["tasks"][task_name]["success"] = success
+            data["tasks"][task_name]["S1"][BASE_VARIANT]["success"] = success
             with open(path, "w", encoding="utf-8") as fp:
                 fp.write(json.dumps(data, indent=2, ensure_ascii=False) + "\n")
             return path

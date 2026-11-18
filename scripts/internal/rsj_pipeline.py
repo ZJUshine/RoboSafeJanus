@@ -16,9 +16,9 @@ design 对草稿里的全部任务审(含 ``same_as`` 共用的);layout 起只�
              不审核(2026-11-15 起):检查通过即自动批准;改了资产链接 ingest 就失效,重新下载 / 提交
     design*  任务列表在这里定(set-tasks,先给用户确认),然后
              task/robosafejanus_tasks.json[<group>] 里有该任务 + robosafejanus_tasks/<group>.json 的该任务和 core_risk
-             + robosafejanus_sim/<group>.json 的该任务(success 不算在内,它在 expert 阶段由 task_success_spec.py 回填)
+             + robosafejanus_sim/<group>.json 的该任务(S1.0 的 success 不算,expert 阶段由 task_success_spec.py 回填)
     layout*  task/RoboSafeJanus/{config,tasks}/<task> 及其 *_X_* 组模块
-    expert*  task/RoboSafeJanus/experts/<task> 及其组模块 + sim 中该任务的 success;
+    expert*  task/RoboSafeJanus/experts/<task> 及其组模块 + sim 中该任务的 success(S1.S1.0.success);
              小批量(--report 目录)成功率 > 0.7 且尝试 >= 10 次时自动批准,否则等人工审核
 
 批量采集、LeRobot 转换、上传 ModelScope(2026-11-13 起)和模型评测(2026-11-15 起)不是审核阶段:expert 批准后
@@ -222,8 +222,28 @@ def stage_tasks(state: dict, stage: str) -> list[str]:
 # ---------------------------------------------------------------------------
 
 
+def selector_parts(selector: str) -> list[str]:
+    """按 ``.`` 拆选择器,但 ``.`` 后面是数字时不拆,所以 ``tasks.<t>.S1.S1.0.success`` 里的 ``S1.0`` 是一个键。"""
+    return [p for p in re.split(r"\.(?!\d)", selector) if p]
+
+
+# sim 文件里原任务的成功判定在任务下的这个位置(和 benchmark_layout.BASE_VARIANT 一致)
+SIM_SUCCESS = ("S1", "S1.0", "success")
+
+
+def without_success(task: dict) -> dict:
+    """sim 里的一个任务去掉成功判定(``S1.S1.0.success``)后的副本;原对象不动。"""
+    task = json.loads(json.dumps(task))
+    node = task
+    for key in SIM_SUCCESS[:-1]:
+        node = node.get(key) if isinstance(node, dict) else None
+    if isinstance(node, dict):
+        node.pop(SIM_SUCCESS[-1], None)
+    return task
+
+
 def _select(data, selector: str):
-    for part in selector.split("."):
+    for part in selector_parts(selector):
         m = re.fullmatch(r"\[(\w+)=(.+)\]", part)
         if m:
             k, v = m.groups()
@@ -263,11 +283,8 @@ def _hash_dir(path: Path) -> str:
 
 
 def _drop_success(sim: dict) -> dict:
-    sim = json.loads(json.dumps(sim))
-    for spec in sim.get("tasks", {}).values():
-        if isinstance(spec, dict):
-            spec.pop("success", None)
-    return sim
+    tasks = {t: without_success(s) if isinstance(s, dict) else s for t, s in sim.get("tasks", {}).items()}
+    return {**sim, "tasks": tasks}
 
 
 def artifact_hash(spec: str, state: dict) -> str:
@@ -288,10 +305,10 @@ def artifact_hash(spec: str, state: dict) -> str:
     data = read_json(path)
     if selector == "!success":
         data = _drop_success(data)
-    elif selector.endswith("!success"):  # tasks.<t>!success:该任务去掉 success
+    elif selector.endswith("!success"):  # tasks.<t>!success:该任务去掉 success(S1.S1.0.success)
         data = _select(data, selector[: -len("!success")])
         if isinstance(data, dict):
-            data = {k: v for k, v in data.items() if k != "success"}
+            data = without_success(data)
     elif "@" in selector:  # <key>@<item>:列表里有这一项
         key, _, item = selector.partition("@")
         items = _select(data, key)
@@ -350,7 +367,7 @@ def default_artifacts(state: dict, stage: str, task: str | None) -> list[str]:
     if stage == "expert":
         expert_py = f"task/RoboSafeJanus/experts/{task}.py"
         return [expert_py, *_group_modules(ROOT / expert_py, "experts"),
-                f"task/robosafejanus_sim/{g}.json#tasks.{task}.success"]
+                f"task/robosafejanus_sim/{g}.json#tasks.{task}.{'.'.join(SIM_SUCCESS)}"]
     if stage == "ingest":
         return [f"task/robosafejanus_assets.json#{g}", *(p for item in ingest_targets(g) for p in item["paths"])]
     return []

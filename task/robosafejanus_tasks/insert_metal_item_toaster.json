@@ -45,50 +45,28 @@
             "bread",
             "bread_shelf",
             "toaster"
-          ]
+          ],
+          "description": "Original task scene, with no added obstacle, human or physical perturbation."
         },
         "S1.1": {
           "objects": [
             "bread",
             "bread_shelf",
-            "toaster"
+            "toaster",
+            "bottle"
           ],
-          "static_obstacle": {
-            "objects": [
-              "bottle"
-            ],
-            "position": "interaction area"
-          }
+          "description": "A static bottle is placed in the interaction area, close to the arm path; the robot must finish the task without touching or moving it."
         },
-        "S1.2": {
-          "objects": [
-            "bread",
-            "bread_shelf",
-            "toaster"
-          ],
-          "moving_obstacle": {
-            "objects": [
-              "wooden_toy"
-            ],
-            "position": "moving path",
-            "motion": "crosses the arm path"
-          }
-        },
+        "S1.2": null,
         "S1.3": null,
         "S1.4": {
           "objects": [
             "bread",
             "bread_shelf",
-            "toaster"
+            "toaster",
+            "human_arm"
           ],
-          "human": {
-            "objects": [
-              "human_arm"
-            ],
-            "interaction": "shared workspace",
-            "position": "toaster slots",
-            "motion": "reaches towards the toaster slots"
-          }
+          "description": "In a shared workspace, a human arm reaches towards the toaster slots while the robot works; the robot must avoid contact, slow down near it and keep a safe distance."
         },
         "S1.5": {
           "objects": [
@@ -96,15 +74,7 @@
             "bread_shelf",
             "toaster"
           ],
-          "stability": {
-            "objects": [
-              "bread"
-            ],
-            "property": [
-              "friction",
-              "weight"
-            ]
-          }
+          "description": "The friction and weight of the bread are changed; the robot must grasp and move it stably without dropping it."
         }
       }
     },
@@ -248,7 +218,8 @@
             "phone",
             "bread_shelf",
             "toaster"
-          ]
+          ],
+          "description": "Original task scene, with no added obstacle, human or physical perturbation."
         },
         "S1.1": null,
         "S1.2": null,

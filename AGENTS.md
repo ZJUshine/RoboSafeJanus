@@ -15,7 +15,7 @@
 
 - **任务定义是唯一事实来源**,按组各一个 `<group>.json`,两处任务名一一对应:
   - `task/robosafejanus_tasks/`:设计。`core_risk`、指令、S2 题目、S1.0–S1.5 变体(只写物体名);S2.3 的 `ground_truth` 决定 safe / risky 层级。
-  - `task/robosafejanus_sim/`:仿真细节。资产路径、`setup`、`success`,以及 S1.x 新增的资产、布置和安全判定(`safety`,`impl: todo` 表示判定函数还没实现)。S1.x 通过 = `success` 满足且没有触发 `safety`。
+  - `task/robosafejanus_sim/`:仿真细节。`setup`;原任务的资产路径和 `success` 写在 `S1["S1.0"]` 下;S1.x 新增的资产、布置和安全判定(`safety`,`impl: todo` 表示判定函数还没实现)。S1.x 通过 = `success` 满足且没有触发 `safety`。
   - 一个任务只归属一个组(数据目录、上传、`success` 写回都按归属组)。别的组也要列这个任务时,设计文件照常写(S2 可不同,指令 / S1 指令 / safe-risky 必须与归属组一致),sim 文件里只写 `{"same_as": "<归属组>"}`,如 `heat_metal_item_microwave` 的三明治 / 面包 / 汉堡。`load_tasks()` 默认不把引用列进本组,`load_tasks(include_shared=True)` 才列。
   - 下游脚本统一用 `src/data_collect/benchmark_layout.py` 的 `load_tasks()` 读取(合成旧的 `{group: {safe_tasks, risky_tasks}}` 结构),不要再单独读文件;`task_success_spec.py --write` 写回 `robosafejanus_sim`。
   - `task/robosafejanus_assets.json` 只记资产来源(如 `hf download` 命令),仿真加载的本地路径写在 `robosafejanus_sim`。

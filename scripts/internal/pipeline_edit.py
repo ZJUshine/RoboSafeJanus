@@ -10,7 +10,7 @@
     expert   experts/<task>.py 及其组模块、sim 里该任务的 success
 
 槽的种类(``kind``):``json``(JSON 文件里的一段,按选择器 ``a.b`` / ``[k=v]`` 定位)、``jsonstr``(JSON 里的一个字符串,
-直接编辑文字)、``json-nosuccess``(sim 里的任务,保存时保留原来的 success)、``text``(整个文本文件)。
+直接编辑文字)、``json-nosuccess``(sim 里的任务,保存时保留原来的 ``S1.S1.0.success``)、``text``(整个文本文件)。
 保存时检查格式(JSON / YAML / Python 语法),并比较打开时的版本:文件在打开之后被别人改过就拒绝,要重新打开。
 JSON 按文件原来的缩进写回。只能写这里列出的槽(页面只传槽的编号),不能写任意路径。
 
@@ -117,7 +117,7 @@ def slots(state: dict, key: str) -> list[dict]:
 
 
 def _parts(selector: str) -> list[str]:
-    return [p for p in selector.split(".") if p]
+    return rp.selector_parts(selector)
 
 
 def _get(data, selector: str):
@@ -152,6 +152,23 @@ def _set(data, selector: str, value):
             else:
                 node = node.setdefault(part, {})
     return data
+
+
+def _restore_success(value: dict, old) -> dict:
+    """把 ``old`` 里的 ``S1.S1.0.success`` 放回 ``value``,位置同原来(不打乱键的顺序);``old`` 没有就原样返回。"""
+    s1_old, base_old = (old or {}).get("S1") or {}, ((old or {}).get("S1") or {}).get("S1.0") or {}
+    if "success" not in base_old or not isinstance(value.get("S1"), dict):
+        return value
+    base = value["S1"].get("S1.0")
+    base = base if isinstance(base, dict) else {}
+    items = list(base.items())
+    items.insert(min(list(base_old).index("success"), len(items)), ("success", base_old["success"]))
+    s1 = dict(value["S1"])
+    s1["S1.0"] = dict(items)
+    if "S1.0" not in value["S1"]:  # 被删掉的 S1.0 放回原来的位置
+        order = [k for k in s1_old if k in s1] + [k for k in s1 if k not in s1_old]
+        s1 = {k: s1[k] for k in order}
+    return {**value, "S1": s1}
 
 
 def _indent(text: str) -> int:
@@ -192,7 +209,7 @@ def read_slot(slot: dict) -> dict:
                 "why": f"{slot['path']} 现在不是合法 JSON:{error}"}
     value = _get(data, slot["selector"])
     if slot["kind"] == "json-nosuccess" and isinstance(value, dict):
-        value = {k: v for k, v in value.items() if k != "success"}
+        value = rp.without_success(value)
     if slot["kind"] == "jsonstr":
         text = value if isinstance(value, str) else ("" if value is None else json.dumps(value, ensure_ascii=False))
     else:
@@ -248,13 +265,9 @@ def write_slot(slot: dict, text: str, version: str) -> str:
         if not isinstance(value, dict):
             raise EditError("sim 里的任务必须是一个对象 {...}")
         old = _get(data, slot["selector"]) or {}
-        if "success" in value:
-            raise EditError("success 在 expert 格里改,这里请去掉 success")
-        if isinstance(old, dict) and "success" in old:  # 放回原来的位置,不打乱键的顺序
-            items = list(value.items())
-            pos = min(list(old).index("success"), len(items))
-            items.insert(pos, ("success", old["success"]))
-            value = dict(items)
+        if rp.without_success(value) != value:
+            raise EditError("success 在 expert 格里改,这里请去掉 S1.0 里的 success")
+        value = _restore_success(value, old)
     data = _set(data, slot["selector"], value)
     path.write_text(_dump(data, _indent(raw)), encoding="utf-8")
     return f"已写回 {slot['path']} 的 {slot['selector']}"
@@ -391,7 +404,7 @@ def describe_command(cmd: str) -> str:
 
 
 def seed_labels(group: str) -> list[str]:
-    """从种子里猜的 label(括号里的英文名):目标物体、交互物体、风险 / 安全变体,外加 S1.2 的 moving_obstacle。"""
+    """从种子里猜的 label(括号里的英文名):目标物体、交互物体、风险 / 安全变体。"""
     try:
         seeds = rp.read_json(rp.ROOT / "task" / "risk_seeds.json")
     except (OSError, ValueError):
@@ -407,7 +420,7 @@ def seed_labels(group: str) -> list[str]:
             label = re.sub(r"[\s\-]+", "_", m.group(1).strip()).lower()
             if label not in out:
                 out.append(label)
-    return out + (["moving_obstacle"] if "moving_obstacle" not in out else [])
+    return out
 
 
 def _assets_version(sources: dict) -> str:

@@ -1,6 +1,6 @@
 # 成功判定说明(success)
 
-> 本文件是 `task/robosafejanus_sim/<group>.json` 中各任务 `success` 的含义说明。
+> 本文件是 `task/robosafejanus_sim/<group>.json` 中各任务 `S1["S1.0"].success`(原任务的成功判定,S1.x 变体沿用)的含义说明。
 > JSON 里只存判定本身(`fn` / `args`),说明统一放在这里;改了 `run_reward` 之后要同步更新。
 > 判定函数的实现在 `env/reward_manager/reward_manager.py` 和各任务模块。
 

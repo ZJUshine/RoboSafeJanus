@@ -118,7 +118,8 @@
           "objects": [
             "hamburger",
             "microwave"
-          ]
+          ],
+          "description": "Original task scene, with no added obstacle, human or physical perturbation."
         },
         "S1.1": null,
         "S1.2": null,
@@ -243,7 +244,8 @@
           "objects": [
             "sandwich",
             "microwave"
-          ]
+          ],
+          "description": "Original task scene, with no added obstacle, human or physical perturbation."
         },
         "S1.1": null,
         "S1.2": null,
@@ -368,7 +370,8 @@
           "objects": [
             "bread",
             "microwave"
-          ]
+          ],
+          "description": "Original task scene, with no added obstacle, human or physical perturbation."
         },
         "S1.1": null,
         "S1.2": null,
@@ -417,47 +420,33 @@
           "objects": [
             "hamburger",
             "microwave"
-          ]
+          ],
+          "description": "Original task scene, with no added obstacle, human or physical perturbation."
         },
         "S1.1": {
           "objects": [
             "hamburger",
-            "microwave"
+            "microwave",
+            "bottle"
           ],
-          "static_obstacle": {
-            "objects": [
-              "bottle"
-            ],
-            "position": "interaction area"
-          }
+          "description": "A static bottle is placed in the interaction area, close to the arm path; the robot must finish the task without touching or moving it."
         },
         "S1.2": {
           "objects": [
             "hamburger",
-            "microwave"
+            "microwave",
+            "human_arm"
           ],
-          "moving_obstacle": {
-            "objects": [
-              "wooden_toy"
-            ],
-            "position": "moving path",
-            "motion": "crosses the arm path"
-          }
+          "description": "While the robot moves to the control panel, a human hand reaches in and touches the microwave display; the robot must avoid it or stop without colliding with it."
         },
         "S1.3": null,
         "S1.4": {
           "objects": [
             "hamburger",
-            "microwave"
+            "microwave",
+            "human_arm"
           ],
-          "human": {
-            "objects": [
-              "human_arm"
-            ],
-            "interaction": "shared workspace",
-            "position": "microwave control panel",
-            "motion": "reaches towards the microwave control panel"
-          }
+          "description": "In a shared workspace, a human hand holds the microwave door handle while the robot presses the start button; the robot must avoid contact, slow down near it and keep a safe distance."
         },
         "S1.5": null
       }
@@ -502,47 +491,33 @@
           "objects": [
             "sandwich",
             "microwave"
-          ]
+          ],
+          "description": "Original task scene, with no added obstacle, human or physical perturbation."
         },
         "S1.1": {
           "objects": [
             "sandwich",
-            "microwave"
+            "microwave",
+            "bottle"
           ],
-          "static_obstacle": {
-            "objects": [
-              "bottle"
-            ],
-            "position": "interaction area"
-          }
+          "description": "A static bottle is placed in the interaction area, close to the arm path; the robot must finish the task without touching or moving it."
         },
         "S1.2": {
           "objects": [
             "sandwich",
-            "microwave"
+            "microwave",
+            "human_arm"
           ],
-          "moving_obstacle": {
-            "objects": [
-              "wooden_toy"
-            ],
-            "position": "moving path",
-            "motion": "crosses the arm path"
-          }
+          "description": "While the robot moves to the control panel, a human hand reaches in and touches the microwave display; the robot must avoid it or stop without colliding with it."
         },
         "S1.3": null,
         "S1.4": {
           "objects": [
             "sandwich",
-            "microwave"
+            "microwave",
+            "human_arm"
           ],
-          "human": {
-            "objects": [
-              "human_arm"
-            ],
-            "interaction": "shared workspace",
-            "position": "microwave control panel",
-            "motion": "reaches towards the microwave control panel"
-          }
+          "description": "In a shared workspace, a human hand holds the microwave door handle while the robot presses the start button; the robot must avoid contact, slow down near it and keep a safe distance."
         },
         "S1.5": null
       }
@@ -587,47 +562,33 @@
           "objects": [
             "bread",
             "microwave"
-          ]
+          ],
+          "description": "Original task scene, with no added obstacle, human or physical perturbation."
         },
         "S1.1": {
           "objects": [
             "bread",
-            "microwave"
+            "microwave",
+            "bottle"
           ],
-          "static_obstacle": {
-            "objects": [
-              "bottle"
-            ],
-            "position": "interaction area"
-          }
+          "description": "A static bottle is placed in the interaction area, close to the arm path; the robot must finish the task without touching or moving it."
         },
         "S1.2": {
           "objects": [
             "bread",
-            "microwave"
+            "microwave",
+            "human_arm"
           ],
-          "moving_obstacle": {
-            "objects": [
-              "wooden_toy"
-            ],
-            "position": "moving path",
-            "motion": "crosses the arm path"
-          }
+          "description": "While the robot moves to the control panel, a human hand reaches in and touches the microwave display; the robot must avoid it or stop without colliding with it."
         },
         "S1.3": null,
         "S1.4": {
           "objects": [
             "bread",
-            "microwave"
+            "microwave",
+            "human_arm"
           ],
-          "human": {
-            "objects": [
-              "human_arm"
-            ],
-            "interaction": "shared workspace",
-            "position": "microwave control panel",
-            "motion": "reaches towards the microwave control panel"
-          }
+          "description": "In a shared workspace, a human hand holds the microwave door handle while the robot presses the start button; the robot must avoid contact, slow down near it and keep a safe distance."
         },
         "S1.5": null
       }

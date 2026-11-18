@@ -49,7 +49,7 @@
 | `src/data_collect/lerobot_v30_to_v21.py`                          | 从同任务的 LeRobot v3.0 导出派生 v2.1(`export_lerobot.sh` 调用)                | 一般不改               |
 | `src/data_collect/upload_common.py`                               | 上传共用:本地 → 远端 `RoboSafeJanus/<task>/` 路径映射、dry-run 计划 | 一般不改               |
 | `src/data_collect/sync_instructions.py`                           | 把已采集 hdf5 的 `instruction` 原地改成 `task/robosafejanus_tasks/<group>.json` 中的指令 | 确认一组任务的指令后   |
-| `scripts/internal/task_success_spec.py`                           | 从 `run_reward` 提取成功判定,写进 `task/robosafejanus_sim/<group>.json` 的 `success`(只写判定本身,判定含义见 `docs/task_success_specs.md`) | 改了任务的 `run_reward` 后 |
+| `scripts/internal/task_success_spec.py`                           | 从 `run_reward` 提取成功判定,写进 `task/robosafejanus_sim/<group>.json` 的 `S1.S1.0.success`(只写判定本身,判定含义见 `docs/task_success_specs.md`) | 改了任务的 `run_reward` 后 |
 | `scripts/internal/check_task_alignment.py`                        | 检查代码 / 配置 / 数据 / 远端仓库是否与任务定义(`task/robosafejanus_tasks` + `task/robosafejanus_sim`)对齐 | 改任务或上传前跑一遍   |
 
 ---
@@ -871,7 +871,7 @@ python scripts/internal/sync_status.py --watch 120 --serve 8765
   驳回 / 失效(改了资产链接)时按钮变成「↻ 重新下载」。任务记录在 `_jobs/<group>.__group__.json`。
 - **填资产链接**:seed 批准后 assets 格(按组一格)里有「🔗 填资产链接」/「🔗 改资产链接」,ingest 审核条目里也有。弹出的对话框一行一个物体:label + 链接,链接可以是 huggingface.co / hf-mirror.com 上资产目录的
   网页链接(tree / blob / resolve;分支名如 main 会查成 commit)、SimReady Central 的 `hf://...`、`Assets/Object/RoboDojo/...`
-  目录或 `hf download` 命令。按种子括号里的英文名猜出要填的物体(外加 `moving_obstacle`),空着的行不保存。填完链接自动检查
+  目录或 `hf download` 命令。按种子括号里的英文名猜出要填的物体,空着的行不保存。填完链接自动检查
   (来源只能是 RoboDojo 官方和 4 个 SimReady 库、RoboDojo 要指到 `<类型>/<名字>/<编号>`、同一个 label 在别的组用 SimReady 时
   必须是同一个模型);保存时换成带 commit 的命令整组写回 `task/robosafejanus_assets.json[<group>]`(`pipeline_edit.assets_save`,
   接口 `/api/assets/load|save`),有一行不对就整组不写。ingest 已提交 / 批准时改了链接,ingest 会失效,要重新下载 / 提交。
@@ -879,7 +879,7 @@ python scripts/internal/sync_status.py --watch 120 --serve 8765
   回填到对应文件(`scripts/internal/pipeline_edit.py`,命令行 `pipeline_edit.py slots <group> <key>` 列出能改什么):
   - seed:`task/risk_seeds.json` 里这个种子;
   - ingest:`task/robosafejanus_assets.json[<group>]`(整组的下载命令)、入库报告;
-  - design:设计文件里该任务的 instruction(纯文字)、**S1 和 S2 并排**、sim 里该任务(不含 success,保存时原来的 success
+  - design:设计文件里该任务的 instruction(纯文字)、**S1 和 S2 并排**、sim 里该任务(不含 S1.0 的 success,保存时原来的 success
     原样保留)、core_risk(整组);
   - layout:`config/<task>.yml`、`tasks/<task>.py` 和 `*_X_*` 组模块;expert:`experts/<task>.py`、组模块、sim 里的 success。
   保存前检查格式(JSON / YAML / Python 语法),格式不对不写;JSON 按文件原来的缩进写回。打开之后文件被别人(Claude /
