@@ -651,9 +651,9 @@ def step_dir_complete(step_dir: Path, remote: list[int] | None) -> tuple[bool, i
     return files > 0, size
 
 
-# checkpoint step 目录:纯数字(Pi_0 / Pi_05 的 2999)或 step_<n> / global_step_<n>(LingBot_VLA);
-# 和 scripts/download_models_from_modelscope.py 的 STEP_RE 一致。
-STEP_RE = re.compile(r"^(?:global_)?step[_-]?\d+$|^\d+$", re.IGNORECASE)
+# checkpoint step 目录:纯数字(Pi_0 / Pi_05 的 2999)、step_<n> / global_step_<n>(LingBot_VLA)
+# 或 checkpoint-<n>(GR00T_N17);和 scripts/download_models_from_modelscope.py 的 STEP_RE 一致。
+STEP_RE = re.compile(r"^(?:(?:global_)?step|checkpoint)[_-]?\d+$|^\d+$", re.IGNORECASE)
 
 
 def is_step(name: str) -> bool:
