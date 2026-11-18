@@ -5,6 +5,8 @@
 本地按原样镜像到 ``--local_dir``(默认 ``data/RoboSafeJanus-Model``),再把每个 run 软链接到
 ``XPolicyLab/policy/<POLICY>/checkpoints/<run>``,这样 ``--ckpt <run>`` 就能直接用于 eval
 (``--no_link`` 关闭)。已存在且不是软链接的 ``checkpoints/<run>`` 不会被覆盖。
+OpenWAM 的 step 是 run 根目录下的权重文件 ``checkpoint_step_<n>.safetensors``(``--step`` 传文件名),
+``checkpoints/<run>`` 整个 run 目录软链接即可。
 GR00T_N17 的 step 目录叫 ``checkpoint-<n>``,其中 json 的 ``model_name`` 是训练机 Cosmos 路径:
 ``checkpoints/<run>`` 会建成逐文件链接的真目录，这几个 json 复制后改成本机路径(镜像不改)。
 
@@ -85,7 +87,11 @@ files = api.list_repo_files(args.repo_id, "model", revision=args.revision, recur
 
 # 只有纯数字(Pi_0 / Pi_05)、step_<n> / global_step_<n>(LingBot_VLA)或 checkpoint-<n>(GR00T_N17,
 # HF Trainer 的目录名)才是 checkpoint step;assets/、wandb/ 等是 run 级附属内容。
-STEP_RE = re.compile(r"^(?:(?:global_)?step|checkpoint)[_-]?\d+$|^\d+$", re.IGNORECASE)
+# OpenWAM 的 step 是 run 根目录下的单个权重文件 checkpoint_step_<n>.safetensors。
+STEP_RE = re.compile(
+    r"^(?:(?:checkpoint[_-])?(?:global_)?step|checkpoint)[_-]?\d+(?:\.(?:safetensors|pt|pth|ckpt|bin))?$|^\d+$",
+    re.IGNORECASE,
+)
 
 # (policy, task, run) -> step -> [(path, size)];顶层 README / .gitattributes 等不是 checkpoint,忽略
 runs = defaultdict(lambda: defaultdict(list))
@@ -101,7 +107,10 @@ for f in files:
     if not (matches(policy, args.policy) and matches(task, args.task) and matches(run, args.run)):
         continue
     if len(parts) == 4:
-        run_files[(policy, task, run)].append((f.path, f.size or 0))
+        if STEP_RE.match(parts[3]):  # 单文件 step(OpenWAM),--step 传文件名
+            runs[(policy, task, run)][parts[3]].append((f.path, f.size or 0))
+        else:
+            run_files[(policy, task, run)].append((f.path, f.size or 0))
         continue
     step = parts[3]
     # wandb/ 是训练日志目录,由 download_wandb_from_modelscope.py 单独处理,

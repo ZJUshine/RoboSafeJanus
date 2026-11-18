@@ -617,11 +617,22 @@ def model_downloading(model: dict, running: set[tuple[str, str]]) -> bool:
     return any(p in (model["policy"], "*") and t in (model["key"], "*") for p, t in running)
 
 
+def file_size(path: Path) -> int:
+    """文件字节数;不存在(比如 ``*.incomplete`` 刚好下完被改名)时 0。"""
+    try:
+        return path.stat().st_size
+    except OSError:
+        return 0
+
+
 def step_dir_complete(step_dir: Path, remote: list[int] | None) -> tuple[bool, int]:
     """本地一个 checkpoint step 是否下载完整:``(完整, 本地字节数)``。
 
     还有 ModelScope 的 ``*.incomplete`` 临时文件,或者文件数 / 字节数少于远端,都算没下完
-    (只看目录在不在会把正在下载的模型当成已下载)。"""
+    (只看目录在不在会把正在下载的模型当成已下载)。step 是单个权重文件时(OpenWAM)按文件大小判断。"""
+    if step_dir.is_file():
+        size = file_size(step_dir)
+        return size > 0 and (remote is None or size >= remote[1]), size
     files, size = 0, 0
     for dirpath, _, filenames in os.walk(step_dir):
         for name in filenames:
@@ -640,8 +651,12 @@ def step_dir_complete(step_dir: Path, remote: list[int] | None) -> tuple[bool, i
 
 
 # checkpoint step 目录:纯数字(Pi_0 / Pi_05 的 2999)、step_<n> / global_step_<n>(LingBot_VLA)
-# 或 checkpoint-<n>(GR00T_N17);和 scripts/download_models_from_modelscope.py 的 STEP_RE 一致。
-STEP_RE = re.compile(r"^(?:(?:global_)?step|checkpoint)[_-]?\d+$|^\d+$", re.IGNORECASE)
+# 或 checkpoint-<n>(GR00T_N17);也可以是 run 根目录下的单个权重文件
+# checkpoint_step_<n>.safetensors(OpenWAM)。和 scripts/download_models_from_modelscope.py 的 STEP_RE 一致。
+STEP_RE = re.compile(
+    r"^(?:(?:checkpoint[_-])?(?:global_)?step|checkpoint)[_-]?\d+(?:\.(?:safetensors|pt|pth|ckpt|bin))?$|^\d+$",
+    re.IGNORECASE,
+)
 
 
 def is_step(name: str) -> bool:
@@ -706,7 +721,9 @@ def collect_models(
         )
         entry["files"] += 1
         entry["size"] += getattr(item, "size", 0) or 0
-        step = next((part for part in parts[2:-1] if is_step(part)), None)
+        # step 是目录;run 根目录下的权重文件本身也算一个 step(OpenWAM 的 checkpoint_step_<n>.safetensors)
+        candidates = parts[2:] if len(parts) == 4 else parts[2:-1]
+        step = next((part for part in candidates if is_step(part)), None)
         if step:
             entry["steps"].add(step)
         run = parts[2] if len(parts) >= 4 and not is_step(parts[2]) else None
@@ -741,7 +758,11 @@ def collect_models(
                 if not run_dir.is_dir():
                     continue
                 for step_dir in sorted(run_dir.iterdir()):
-                    if step_dir.is_dir() and is_step(step_dir.name):
+                    if step_dir.is_file() and step_dir.name.endswith(".incomplete") \
+                            and is_step(step_dir.name[:-len(".incomplete")]):  # 权重文件还在下载
+                        partial_steps.add(step_dir.name[:-len(".incomplete")])
+                        local_size += file_size(step_dir)
+                    elif is_step(step_dir.name):
                         complete, size = step_dir_complete(step_dir, entry["step_remote"].get((run, step_dir.name)))
                         (local_steps if complete else partial_steps).add(step_dir.name)
                         local_size += size
@@ -1431,7 +1452,12 @@ def model_local_bytes(model: dict, root: Path) -> int:
     total = 0
     for run in model.get("runs") or []:
         step_dir = root / model["policy"] / model["key"] / run / str(model.get("latest_step") or "")
-        if model.get("latest_step") and step_dir.is_dir():
+        if not model.get("latest_step"):
+            continue
+        for path in (step_dir, step_dir.with_name(step_dir.name + ".incomplete")):  # 单文件 step(OpenWAM)
+            if path.is_file():
+                total += file_size(path)
+        if step_dir.is_dir():
             for dirpath, _, names in os.walk(step_dir):
                 for name in names:
                     try:

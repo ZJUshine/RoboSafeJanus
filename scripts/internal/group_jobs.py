@@ -21,7 +21,8 @@
     upload   「上传」:转换完、条数一致后,``--task`` 上传 HDF5 和 LeRobot(先 dry-run 给用户看,默认 ``--no_delete``),
              再核对远端
     eval     「评测」(eval 格):expert 批准、模型下载完、评测布局够 50 个后,用已下载的 Pi_0 / Pi_05 checkpoint
-             各评 50 条(``robodojo.sh eval``,seed 0,arx_x5,joint);risky 没有自己的模型时用同组 safe 模型 zero-shot。
+             各评 50 条(``robodojo.sh eval``,seed 0,arx_x5,动作空间取 deploy.yml);risky 没有自己的模型时
+             用同组 safe 模型 zero-shot。
              没评满的接着同一个 ``ROBODOJO_RUN_ID`` 续评,评满的跳过。每条流水线用一对 GPU(policy + sim),
              填几对就并行几条。评测不审核(2026-11-15 起),评完不提交
     layouts  「生成布局」(评测布局格):layout 批准后,在 Isaac 里分批(每批 20 个 seed,一个进程)检查哪些 seed
@@ -1125,9 +1126,12 @@ def _downloading() -> set[tuple[str, str]]:
 
 
 def _is_step(name: str) -> bool:
-    """checkpoint step 目录:纯数字、step_<n> / global_step_<n>(LingBot_VLA)或 checkpoint-<n>(GR00T_N17,
-    和 download_models_from_modelscope.py / sync_status.py 的 STEP_RE 一致)。"""
-    return bool(re.match(r"^(?:(?:global_)?step|checkpoint)[_-]?\d+$|^\d+$", name, re.IGNORECASE))
+    """checkpoint step 目录:纯数字、step_<n> / global_step_<n>(LingBot_VLA)或 checkpoint-<n>(GR00T_N17),
+    或 run 根目录下的权重文件 checkpoint_step_<n>.safetensors(OpenWAM);
+    和 download_models_from_modelscope.py / sync_status.py 的 STEP_RE 一致。"""
+    return bool(re.match(
+        r"^(?:(?:checkpoint[_-])?(?:global_)?step|checkpoint)[_-]?\d+(?:\.(?:safetensors|pt|pth|ckpt|bin))?$|^\d+$",
+        name, re.IGNORECASE))
 
 
 def _step_num(name: str) -> int:
@@ -1137,9 +1141,12 @@ def _step_num(name: str) -> int:
 @rp.memoized
 def _complete_step(run_dir: Path) -> str | None:
     """run 目录里下载完整的最新 step(没有 ``*.incomplete`` 临时文件);没有时 None。"""
-    steps = sorted((d for d in run_dir.iterdir() if d.is_dir() and _is_step(d.name)), key=lambda d: _step_num(d.name))
+    steps = sorted((d for d in run_dir.iterdir() if _is_step(d.name)), key=lambda d: _step_num(d.name))
     for step in reversed(steps):
-        if not any(step.rglob("*.incomplete")) and any(step.rglob("*")):
+        if step.is_file():  # 单文件 step(OpenWAM):下载中是 <name>.incomplete,下完才改名
+            if step.stat().st_size > 0:
+                return step.name
+        elif not any(step.rglob("*.incomplete")) and any(step.rglob("*")):
             return step.name
     return None
 
@@ -1177,6 +1184,15 @@ def policy_env(policy: str) -> str:
     if cfg.get("policy_uv_env_path"):
         return "uv"
     return str(cfg.get("policy_conda_env") or policy.lower())
+
+
+def policy_action_type(policy: str) -> str:
+    """``robodojo.sh eval --action-type``:deploy.yml 的 ``action_type``(没写 / null 时 ``joint``)。
+
+    OpenWAM 是 EE 空间策略(``ee``,model.py 里非 ee 直接报错);结果目录名里的 ``action_type=``
+    也跟着它走,否则评完看板找不到结果(``eval_runs`` 只认这个目录)。"""
+    value = _deploy_cfg(policy).get("action_type")
+    return str(value).strip() if value else "joint"
 
 
 def policy_env_vars(policy: str, m: dict | None = None) -> tuple[dict, list[str]]:
@@ -1249,9 +1265,11 @@ def eval_target(task: str, variant: str = "") -> int:
 
 
 def eval_result_base(task: str, policy: str, ckpt: str, variant: str = "") -> Path:
-    """``eval_result/RoboDojo/<task>/<policy>/<config>/<seed>_ckpt_name=<ckpt>,action_type=joint[,variant=S1.x]``。"""
+    """``eval_result/RoboDojo/<task>/<policy>/<config>/<seed>_ckpt_name=<ckpt>,action_type=<ee|joint>[,variant=S1.x]``。
+    ``action_type`` 取 deploy.yml(``policy_action_type``),和 ``main.py`` 用 ``additional_info`` 拼的目录一致。"""
     suffix = f",variant={variant}" if variant else ""
-    return EVAL_RESULT / task / policy / EVAL_CFG / f"{EVAL_SEED}_ckpt_name={ckpt},action_type=joint{suffix}"
+    return (EVAL_RESULT / task / policy / EVAL_CFG
+            / f"{EVAL_SEED}_ckpt_name={ckpt},action_type={policy_action_type(policy)}{suffix}")
 
 
 def eval_runs(task: str, policy: str, ckpt: str, variant: str = "") -> list[tuple[str, int]]:
@@ -1392,7 +1410,9 @@ def eval_plan(group: str, task: str, policy: str = "", machine: str = "", varian
     target = eval_target(task, variant)
     what = (f"{variant} 变体评 {target} 条({target} 个 {variant} 布局,layout_id 和 S1.0 对应;"
             "每步查安全检查,记成功率 + 违规率)" if variant else f"评 {EVAL_NUM} 条")
-    queue, lines = [], [f"{task}:{where}{who}{what}(seed {EVAL_SEED},{EVAL_CFG},joint)", ""]
+    kinds = sorted({policy_action_type(it["policy"]) for it in eval_models(group, task)
+                    if not policy or it["policy"] == policy}) or ["joint"]
+    queue, lines = [], [f"{task}:{where}{who}{what}(seed {EVAL_SEED},{EVAL_CFG},{'/'.join(kinds)})", ""]
     models = [it for it in eval_models(group, task) if not policy or it["policy"] == policy]
     absent: set[str] | None = None
     if remote:  # 资产和每个模型要的路径合成一次 SSH 查
@@ -1842,7 +1862,7 @@ def _eval_cmd(item: dict, task: str, pair: tuple[int, int], target: int, variant
     """一个模型的 ``robodojo.sh eval`` 命令(本机 / 远端一样)。"""
     cmd = ["bash", "scripts/robodojo.sh", "eval", "--policy-dir", f"XPolicyLab/policy/{item['policy']}",
            "--task", task, "--ckpt", item["ckpt"], "--policy-env", policy_env(item["policy"]),
-           "--action-type", "joint",
+           "--action-type", policy_action_type(item["policy"]),
            "--env-cfg", EVAL_CFG, "--eval-num", str(target), "--seed", str(EVAL_SEED),
            "--policy-gpu", str(pair[0]), "--env-gpu", str(pair[1])]
     return cmd + (["--variant", variant] if variant else [])
