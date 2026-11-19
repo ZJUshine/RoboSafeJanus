@@ -20,6 +20,9 @@
     export   「转换」(exchange 格):采够后导出 LeRobot v3.0 + v2.1(``export_lerobot.sh --format both``)
     upload   「上传」:转换完、条数一致后,``--task`` 上传 HDF5 和 LeRobot(先 dry-run 给用户看,默认 ``--no_delete``),
              再核对远端
+    upload_eval 「上传评测数据」(S1 变体的评测格):把这个模型在这个变体上的评测结果(``_result.json`` + 全部视频
+             + ``data/`` 里的轨迹 HDF5,评测时存了才有)传到 ModelScope dataset
+             ``zjushine/RoboSafeJanus-Evaluation``(``<task>/<variant>/<policy>/<run_id>/``);可续传,传完核对远端
     eval     「评测」(eval 格):expert 批准、模型下载完、评测布局够 50 个后,用已下载的 Pi_0 / Pi_05 checkpoint
              各评 50 条(``robodojo.sh eval``,seed 0,arx_x5,动作空间取 deploy.yml);risky 没有自己的模型时
              用同组 safe 模型 zero-shot。
@@ -48,6 +51,7 @@
     python scripts/internal/group_jobs.py start collect <group> <task> --gpus 0,1 [--machine autodl-A18] [--per_gpu 2]
     python scripts/internal/group_jobs.py start exchange <group> <task>
     python scripts/internal/group_jobs.py start upload <group> <task> [--delete]
+    python scripts/internal/group_jobs.py start upload_eval <group> <task> --policy Pi_0 --variant S1.1
     python scripts/internal/group_jobs.py start eval <group> <task> --gpus 2,3,5,7 [--machine autodl-A18]
     python scripts/internal/group_jobs.py start layouts <group> <task> --gpus 2
     python scripts/internal/group_jobs.py status
@@ -87,9 +91,9 @@ SEED_STRIDE = int(os.environ.get("ROBODOJO_SEED_STRIDE", "1000"))
 FREE_GPU_MIB = 2000  # 显存占用低于这个值算空闲卡
 TEMPLATE_RE = re.compile(r"--layout_template\s+([^\s,;()。，；（）]+)")
 KIND_LABEL = {"ingest": "下载资产", "collect": "采集", "export": "转换 LeRobot", "upload": "上传 ModelScope",
-              "eval": "评测", "layouts": "生成布局", "claude": "Claude"}
+              "eval": "评测", "upload_eval": "上传评测数据", "layouts": "生成布局", "claude": "Claude"}
 DATA_BUTTONS = ("collect", "exchange", "upload")  # 不审核,expert 批准后直接做
-BUTTONS = ("ingest", *DATA_BUTTONS, "eval", "layouts")
+BUTTONS = ("ingest", *DATA_BUTTONS, "eval", "upload_eval", "layouts")
 # 评测(docs/model_evaluation.md 的固定协议)
 EVAL_POLICIES = ("Pi_0", "Pi_05")  # 只决定排序(这两个在前);要评哪些模型看 eval_policies():ModelScope 上有的都评
 SNAPSHOT = ROOT / "data" / "SYNC_STATUS.json"  # sync_status 写的快照,models = ModelScope 模型仓库里的模型
@@ -102,6 +106,8 @@ EVAL_SEED = 0
 EVAL_CFG = "arx_x5"
 MODEL_DIR = ROOT / "data" / "RoboSafeJanus-Model"  # download_models_from_modelscope.py 的 --local_dir
 EVAL_RESULT = ROOT / "eval_result" / "RoboDojo"
+EVAL_REPO = os.environ.get("MS_EVAL_REPO_ID", "zjushine/RoboSafeJanus-Evaluation")  # 评测结果 + 视频
+EVAL_UPLOAD = HERE / "upload_eval_results.py"
 EVAL_LAYOUT = ROOT / "Assets" / "Eval_Layout" / "RoboDojo" / EVAL_CFG / str(EVAL_SEED)
 EVAL_LOGS = ROOT / "eval_logs"
 LAYOUT_CACHE = ROOT / "data" / ".cache" / "eval_layouts"  # check 写的稳定 seed 列表(每批一个文件)
@@ -131,7 +137,10 @@ def job_id(group: str, task: str, policy: str = "", variant: str = "") -> str:
 
 
 def job_key(job: dict) -> str:
-    """记录自己的键:只有 eval 带 policy / variant(别的 kind 的总是空)。"""
+    """记录自己的键:eval 带 policy / variant;upload_eval 在同样的键后面加 ``.upload``
+    (要能和同一模型同一变体的评测同时存在)。"""
+    if job.get("kind") == "upload_eval":
+        return job_id(job["group"], job["task"], job.get("policy") or "", job.get("variant") or "") + ".upload"
     if job.get("kind") != "eval":
         return job_id(job["group"], job["task"])
     return job_id(job["group"], job["task"], job.get("policy") or "", job.get("variant") or "")
@@ -149,6 +158,13 @@ def norm_variant(variant: str) -> str:
 
 _RUN_POLICY = ""  # run 进程里:按模型评测时是模型名,update_job / _step 按它找自己的记录(别的进程总是空)
 _RUN_VARIANT = ""  # run 进程里:S1 变体评测时是变体名
+_RUN_KIND = ""  # run 进程里:任务类型(update_job 用它区分 eval 和 upload_eval 的记录)
+
+
+def run_job_id(group: str, task: str) -> str:
+    """run 进程自己的记录键(和 job_key 一致:upload_eval 加 ``.upload``)。"""
+    jid = job_id(group, task, _RUN_POLICY, _RUN_VARIANT)
+    return jid + ".upload" if _RUN_KIND == "upload_eval" else jid
 
 
 # ---------------------------------------------------------------------------
@@ -177,7 +193,7 @@ def write_job(job: dict, jid: str | None = None) -> None:
 
 
 def update_job(group: str, task: str, **fields) -> None:
-    job = read_job(job_id(group, task, _RUN_POLICY, _RUN_VARIANT)) or {"group": group, "task": task}
+    job = read_job(run_job_id(group, task)) or {"group": group, "task": task}
     job.update(fields)
     write_job(job)
 
@@ -344,6 +360,33 @@ def upload_progress(log: str | None) -> dict | None:
     return {"text": prefix + " · ".join(bits), "done": int(min(sent, size)), "total": int(size)}
 
 
+_RE_UPLOAD_EVAL_DONE = re.compile(r"^\[upload_eval\] done (\d+)/(\d+) runs", re.M)
+_RE_UPLOAD_EVAL_BATCH = re.compile(r"^\[upload_eval\] upload (\d+)/(\d+) · (\d+)/(\d+) files", re.M)
+
+
+def eval_upload_progress(log: str | None) -> dict | None:
+    """评测数据上传的进度:当前第几个 run、这个 run 提交了多少个文件(日志里 ``[upload_eval] ...``)。"""
+    if not log:
+        return None
+    try:
+        text = Path(log).read_text(encoding="utf-8", errors="replace")[-20000:]
+    except OSError:
+        return None
+    runs = _RE_UPLOAD_EVAL_DONE.findall(text)
+    done, total = (int(x) for x in runs[-1]) if runs else (0, 0)
+    if done >= total and total:
+        return {"text": f"{done}/{total} 个 run", "done": done, "total": total}
+    batches = _RE_UPLOAD_EVAL_BATCH.findall(text)
+    if batches:
+        index, count, committed, files = (int(x) for x in batches[-1])
+        if index > done:
+            return {"text": f"run {index}/{count} · {committed}/{files} 个文件", "done": committed, "total": files}
+    if total:
+        return {"text": f"{done}/{total} 个 run", "done": done, "total": total}
+    lines = [ln for ln in text.splitlines() if ln.startswith("[upload_eval]")]
+    return {"text": lines[-1][len("[upload_eval] "):][:120], "done": 0, "total": 0} if lines else None
+
+
 _EXPORT_CACHE: dict[str, dict] = {}
 _RE_EXPORT_PHASE = re.compile(r"^\[export_lerobot\] (v30|v21) ")
 _RE_EXPORT_BAR = re.compile(r"(?:^Converting |^\[v30_to_v21\] videos).*?:\s+\d+%\|[^|]*\|\s*(\d+)/(\d+)")
@@ -404,8 +447,7 @@ def eval_progress(group: str, task: str, policy: str = "", variant: str = "") ->
     if not models:
         return None
     target = eval_target(task, variant)
-    counts = [(m["policy"], min(target, max((r[1] for r in eval_runs(task, m["policy"], m["ckpt"], variant)),
-                                            default=0)))
+    counts = [(m["policy"], eval_done(eval_runs(task, m["policy"], m["ckpt"], variant), target))
               for m in models]
     return {"text": " · ".join(f"{p} {n}/{target}" for p, n in counts),
             "done": sum(n for _, n in counts), "total": target * len(counts)}
@@ -431,6 +473,8 @@ def job_progress(job: dict) -> dict | None:
             return collect_progress(task)
         if kind == "upload":
             return upload_progress(job.get("log"))
+        if kind == "upload_eval":
+            return eval_upload_progress(job.get("log"))
         if kind == "export":
             return export_progress(job.get("log"))
         if kind == "layouts":
@@ -1025,6 +1069,47 @@ def export_plan(group: str, task: str) -> dict:
             "text": "\n".join(lines).rstrip()}
 
 
+def eval_upload_plan(group: str, task: str, policy: str = "", variant: str = "", dry_run: bool = True) -> dict:
+    """S1 变体格子的「⬆ 上传」:把这个模型在这个变体上的评测结果(``_result.json`` + 全部视频)
+    传到 ModelScope dataset ``EVAL_REPO``(``<task>/<variant>/<policy>/<run_id>/``,不含轨迹 HDF5)。"""
+    variant = norm_variant(variant)
+    if not variant:
+        raise PlanError("上传评测数据要指定 S1 变体(S1.1 …)")
+    if not policy:
+        raise PlanError("上传评测数据要指定模型(格子所在的那一行)")
+    _state(group, task, "eval")
+    eval_job = read_job(job_id(group, task, policy, variant)) or {}
+    if eval_job.get("kind") == "eval" and job_state(eval_job) == "running":
+        raise PlanError(f"{task} 的 {policy} {variant} 还在评测:等评完再上传")
+    upload_job = read_job(eval_upload_key(group, task, policy, variant)) or {}
+    if job_state(upload_job) == "running":
+        raise PlanError(f"{task} 的 {policy} {variant} 评测数据正在上传(开始于 {upload_job.get('started_at')})")
+    runs = eval_upload_runs(task, policy, variant)
+    if not runs:
+        raise PlanError(f"{task} {policy} 还没有 {variant} 的评测结果(先在格子里点「▶ 评测」)")
+    lines = [f"{task} {policy} {variant}:上传 {len(runs)} 个 run 的评测结果 + 全部视频 + 轨迹 HDF5(有才传)",
+             f"→ {EVAL_REPO}(<task>/{variant}/{policy}/<run_id>/)", ""]
+    if dry_run:
+        proc = subprocess.run([sys.executable, "-u", str(EVAL_UPLOAD), "--task", task, "--policy", policy,
+                               "--variant", variant, "--repo_id", EVAL_REPO, "--dry_run"],
+                              cwd=str(ROOT), capture_output=True, text=True, timeout=1800,
+                              env={**os.environ, "PYTHONWARNINGS": "ignore"})  # 别把 requests 版本警告混进计划
+        out = (proc.stdout + proc.stderr).strip()
+        if proc.returncode != 0:
+            tail = "\n".join(out.splitlines()[-30:])
+            raise PlanError(f"dry-run 失败(exit {proc.returncode}):\n{tail}")
+        lines += out.splitlines() or ["(没有输出)"]
+        found = re.search(r"pending=(\d+)", out)
+        pending = int(found.group(1)) if found else 0
+        if not pending:
+            lines += ["", "远端已经和本地一致,不用再传。"]
+    else:
+        pending = 1
+    lines += ["", "确认后后台上传;中断或再点一次会续传(已传过的文件跳过)。"]
+    return {"group": group, "task": task, "kind": "upload_eval", "policy": policy, "variant": variant,
+            "nothing": not pending, "runs": len(runs), "text": "\n".join(lines)}
+
+
 def upload_plan(group: str, task: str, dry_run: bool = True) -> dict:
     """「上传」:转换完后 dry-run 给用户看,确认后上传 HDF5 + LeRobot。"""
     state = _state(group, task, "upload")
@@ -1274,16 +1359,48 @@ def eval_result_base(task: str, policy: str, ckpt: str, variant: str = "") -> Pa
             / f"{EVAL_SEED}_ckpt_name={ckpt},action_type={policy_action_type(policy)}{suffix}")
 
 
-def eval_runs(task: str, policy: str, ckpt: str, variant: str = "") -> list[tuple[str, int]]:
-    """已有的评测 ``[(run_id, eval_time)]``,按时间排。"""
+def eval_runs(task: str, policy: str, ckpt: str, variant: str = "") -> list[dict]:
+    """已有的评测 ``[{run_id, eval_time, exhausted}]``,按时间排。
+
+    ``exhausted``:评测队列跑完但没到目标条数(剩下的布局 PhysX 崩掉 / 不稳定,再续也补不上),
+    ``src/eval_client/main.py`` 在 ``_result.json`` 里写这个字段。"""
     base = eval_result_base(task, policy, ckpt, variant)
     out = []
     for path in sorted(base.glob("*/_result.json")) if base.is_dir() else []:
         try:
-            out.append((path.parent.name, int(json.loads(path.read_text(encoding="utf-8")).get("eval_time") or 0)))
+            data = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             continue
+        out.append({
+            "run_id": path.parent.name,
+            "eval_time": int(data.get("eval_time") or 0),
+            "exhausted": bool(data.get("exhausted")),
+        })
     return out
+
+
+def eval_done(runs: list[dict], target: int) -> int:
+    """已有评测算作评了几条:队列耗尽(``exhausted``)的那次按目标算,因为剩下的布局崩掉 / 不稳定,
+    续评也补不上;真正评了几条仍看 ``eval_time``(看板上的 n)。"""
+    return max((target if r["exhausted"] else min(target, r["eval_time"]) for r in runs), default=0)
+
+
+def eval_upload_runs(task: str, policy: str = "", variant: str = "") -> list[tuple[str, str, Path]]:
+    """``variant`` 变体的评测结果 ``[(policy, run_id, run_dir), ...]``(有 ``_result.json`` 的 run);
+    ``policy`` 为空时所有模型,否则只看这个模型。"""
+    out = []
+    for policy_dir in sorted((EVAL_RESULT / task).glob("*")):
+        if not policy_dir.is_dir() or (policy and policy_dir.name != policy):
+            continue
+        for base in sorted(policy_dir.glob(f"*/*,variant={variant}")):  # <config>/<ckpt 目录>,variant=S1.x
+            for result in sorted(base.glob("*/_result.json")):
+                out.append((policy_dir.name, result.parent.name, result.parent))
+    return out
+
+
+def eval_upload_key(group: str, task: str, policy: str, variant: str) -> str:
+    """``upload_eval`` 任务记录的键(和 job_key 一致)。"""
+    return job_id(group, task, policy, variant) + ".upload"
 
 
 def eval_manifest(task: str, policy: str, ckpt: str, run_id: str, variant: str = "") -> Path:
@@ -1292,13 +1409,16 @@ def eval_manifest(task: str, policy: str, ckpt: str, run_id: str, variant: str =
 
 
 def eval_resume_run(task: str, policy: str, ckpt: str, target: int, variant: str = "") -> tuple[str, int] | None:
-    """能续评的那次 ``(run_id, eval_time)``:没评满且续评清单还在。
+    """能续评的那次 ``(run_id, eval_time)``:有结果目录、没评满、也没被标成"队列耗尽"。
 
-    评到自己 ``--eval-num`` 的运行(比如 5 条的 pilot)结束时清单被删了;拿它的 run_id 再跑,
-    main.py 找不到清单会在同一个目录从第 0 条从头评、把已有结果盖掉,所以这种只能新评。"""
+    续评清单 ``_resume_<run_id>.json`` 不一定还在(正常结束时 main.py 会删掉);不在时
+    main.py 会从同一个 run 的 ``_result.json`` 重建进度,接着评剩下的布局,不会从头盖掉已有结果。
+    队列耗尽(exhausted)的运行算结束,不再续。"""
     runs = [r for r in eval_runs(task, policy, ckpt, variant)
-            if 0 < r[1] < target and eval_manifest(task, policy, ckpt, r[0], variant).is_file()]
-    return max(runs, key=lambda r: r[1]) if runs else None
+            if 0 < r["eval_time"] < target and not r["exhausted"]
+            and (eval_result_base(task, policy, ckpt, variant) / r["run_id"] / "_result.json").is_file()]
+    best = max(runs, key=lambda r: r["eval_time"]) if runs else None
+    return (best["run_id"], best["eval_time"]) if best else None
 
 
 def eval_blocked(state: dict, group: str, task: str, downloading: set | None = None, policy: str = "",
@@ -1489,9 +1609,14 @@ def eval_plan(group: str, task: str, policy: str = "", machine: str = "", varian
             lines.append(f"  ⏭ {name}:{item['why']},这次不评")
             continue
         runs = eval_runs(task, item["policy"], item["ckpt"], variant)
-        best = max(runs, key=lambda r: r[1]) if runs else None
-        if best and best[1] >= target:
-            lines.append(f"  ✅ {name}:已评满 {best[1]} 条({best[0]}),跳过")
+        best = max(runs, key=lambda r: r["eval_time"]) if runs else None
+        if best and (best["eval_time"] >= target or best["exhausted"]):
+            if best["exhausted"] and best["eval_time"] < target:
+                why = (f"评了 {best['eval_time']}/{target} 条(其余 {target - best['eval_time']} 个布局 PhysX 崩掉 / "
+                       f"不稳定,已放弃,续评补不上)")
+            else:
+                why = f"已评满 {best['eval_time']} 条"
+            lines.append(f"  ✅ {name}:{why}({best['run_id']}),跳过")
             continue
         partial = eval_resume_run(task, item["policy"], item["ckpt"], target, variant)
         resume = partial[0] if partial else None
@@ -1503,8 +1628,6 @@ def eval_plan(group: str, task: str, policy: str = "", machine: str = "", varian
                 continue
         if resume:
             how = f"续评 {resume}(已有 {partial[1]}/{target})"
-        elif best and best[1] > 0:
-            how = f"新评({best[0]} 的 {best[1]} 条已经按自己的条数评完、没有续评清单,接不上)"
         else:
             how = "新评"
         lines.append(f"  ▶ {name}:{how}")
@@ -1738,6 +1861,8 @@ def plan(button: str, group: str, task: str, dry_run: bool = True, policy: str =
         return ingest_plan(group, task)
     if button == "eval":
         return eval_plan(group, task, policy, machine, variant)
+    if button == "upload_eval":
+        return eval_upload_plan(group, task, policy, variant, dry_run=dry_run)
     if button == "layouts":
         return layouts_plan(group, task)
     if button == "collect":
@@ -1757,9 +1882,9 @@ def start(button: str, group: str, task: str, gpus: str = "", delete: bool = Fal
     """重新算一遍计划,通过后在新会话里后台运行 ``run``;返回任务记录。``policy`` 只用于 eval(只评这个模型);
     ``machine`` 只用于 collect / eval(``docs/servers.json`` 的键,空 = 默认机器);``per_gpu`` 只用于 collect;
     ``traj`` 只用于 eval(评测对话框里勾了「保存轨迹」:每条另存 data/episode_*.hdf5)。"""
-    policy = policy if button == "eval" else ""
+    policy = policy if button in ("eval", "upload_eval") else ""
     traj = bool(traj) and button == "eval"
-    variant = norm_variant(variant) if button == "eval" else ""
+    variant = norm_variant(variant) if button in ("eval", "upload_eval") else ""
     _busy(group, task, "eval" if button == "eval" else "", policy, variant)
     if button not in MACHINE_KINDS:
         machine, per_gpu = "", None
@@ -1815,10 +1940,11 @@ def start(button: str, group: str, task: str, gpus: str = "", delete: bool = Fal
     return job
 
 
-def stop(group: str, task: str, policy: str = "", variant: str = "") -> str:
-    """停掉 ``<group>.<task>``(``policy`` / ``variant`` 给出时是这个模型 / 变体的评测)那条记录的任务。"""
+def stop(group: str, task: str, policy: str = "", variant: str = "", kind: str = "") -> str:
+    """停掉 ``<group>.<task>``(``policy`` / ``variant`` 给出时是这个模型 / 变体的评测)那条记录的任务;
+    ``kind="upload_eval"`` 时停这个模型这个变体的评测数据上传。"""
     variant = norm_variant(variant)
-    jid = job_id(group, task, policy, variant)
+    jid = job_id(group, task, policy, variant) + (".upload" if kind == "upload_eval" else "")
     job = read_job(jid)
     if not job or job_state(job) != "running":
         raise PlanError(f"{task} {policy + ' ' if policy else ''}{variant + ' ' if variant else ''}没有在运行的任务")
@@ -1918,6 +2044,19 @@ def run_upload(group: str, task: str, delete: bool) -> int:
                 "--modelscope", HDF5_REPO])
 
 
+def run_eval_upload(group: str, task: str, policy: str, variant: str) -> int:
+    """S1 变体格子的「⬆ 上传」:把该模型该变体的评测结果 + 视频 + 轨迹传到 ModelScope(可续传)。"""
+    runs = eval_upload_runs(task, policy, variant)
+    if not runs:
+        raise PlanError(f"{task} {policy} 还没有 {variant} 的评测结果")
+    _step(group, task, f"上传 {variant} 评测结果({len(runs)} 个 run)")
+    code = _sh([sys.executable, "-u", str(EVAL_UPLOAD), "--task", task, "--policy", policy,
+                "--variant", variant, "--repo_id", EVAL_REPO])
+    if code == 0:
+        _step(group, task, "评测数据已上传并核对")
+    return code
+
+
 def _eval_cmd(item: dict, task: str, pair: tuple[int, int], target: int, variant: str,
               traj: bool = False) -> list[str]:
     """一个模型的 ``robodojo.sh eval`` 命令(本机 / 远端一样);``traj`` 时加 ``--save-traj``(每条存轨迹 HDF5)。"""
@@ -1967,16 +2106,17 @@ def run_eval(group: str, task: str, gpus: str, policy: str = "", machine: str = 
             fp.close()
             procs.remove(item)
             runs = eval_runs(task, m["policy"], m["ckpt"], variant)
-            n = max((r[1] for r in runs), default=0)
-            results.append((m, proc.returncode, n))
+            n = max((r["eval_time"] for r in runs), default=0)
+            results.append((m, proc.returncode, n, eval_done(runs, target)))
             print(f"[group_jobs] {now()} {m['policy']} 结束 exit {proc.returncode},评了 {n}/{target} 条", flush=True)
         time.sleep(5)
-    short = [f"{m['policy']} {n}/{target}" for m, _, n in results if n < target]
-    done = "、".join(f"{m['policy']} {n} 条" for m, _, n in results)
+    short = [f"{m['policy']} {n}/{target}" for m, _, n, done in results if done < target]
+    finished = "、".join(f"{m['policy']} {n} 条" + ("(布局崩掉,已放弃)" if done > n else "")
+                         for m, _, n, done in results)
     if short:
         _step(group, task, f"没评满:{'、'.join(short)}(再点一次续评)")
         return 1
-    _step(group, task, f"评完:{done}")
+    _step(group, task, f"评完:{finished}")
     return 0
 
 
@@ -2262,15 +2402,18 @@ def run_eval_remote(group: str, task: str, gpus: str, policy: str, m: dict, vari
     if missing_assets:  # 缺的资产 + 它们引用到的原件;传完把写死的本机绝对路径改成远端仓库路径
         _step(group, task, f"同步 {len(missing_assets)} 个缺少的资产到 {m['key']}")
         sync_assets(m, missing_assets)
-    for item in queue:  # 要续评的结果 + 续评清单先推过去(ROBODOJO_RUN_ID 接着同一个目录评;main.py 靠清单续)
+    for item in queue:  # 要续评的结果(+ 还在的续评清单)先推过去(ROBODOJO_RUN_ID 接着同一个目录评)
         if item["run_id"]:
             base = eval_result_base(task, item["policy"], item["ckpt"], variant)
             rel = rp.rel(base / item["run_id"])
             manifest = eval_manifest(task, item["policy"], item["ckpt"], item["run_id"], variant)
             sv.run(m, f"mkdir -p {shlex.quote(rel)}", timeout=30)
             # --update:远端比本地新的文件不盖(远端可能评得更多)
-            if (_rsync(m, "--update", f"{base / item['run_id']}/", f"{dest}/{rel}/") != 0
-                    or _rsync(m, "--update", str(manifest), f"{dest}/{rp.rel(manifest)}") != 0):
+            pushed = _rsync(m, "--update", f"{base / item['run_id']}/", f"{dest}/{rel}/")
+            # 清单正常结束时会被 main.py 删掉;不在时远端 main.py 从 _result.json 重建进度
+            if manifest.is_file():
+                pushed = pushed or _rsync(m, "--update", str(manifest), f"{dest}/{rp.rel(manifest)}")
+            if pushed != 0:
                 raise PlanError(f"推送续评结果 {rel} 到 {m['key']} 失败")
     ids = [int(x) for x in gpus.split(",") if x.strip()]
     pairs = [(ids[i], ids[i + 1] if i + 1 < len(ids) else ids[i]) for i in range(0, len(ids), 2)] or [(0, 0)]
@@ -2313,22 +2456,25 @@ def run_eval_remote(group: str, task: str, gpus: str, policy: str, m: dict, vari
     if pulled != 0:
         _step(group, task, f"拉回评测结果失败(远端结果还在 {result_rel});再点一次会重新拉")
         return 1
-    counts = {item["policy"]: max((n for _, n in eval_runs(task, item["policy"], item["ckpt"], variant)), default=0)
-              for item in queue}
-    short = [f"{p} {n}/{target}" for p, n in counts.items() if n < target]
+    runs = {item["policy"]: eval_runs(task, item["policy"], item["ckpt"], variant) for item in queue}
+    counts = {p: max((r["eval_time"] for r in rs), default=0) for p, rs in runs.items()}
+    done = {p: eval_done(rs, target) for p, rs in runs.items()}
+    short = [f"{p} {n}/{target}" for p, n in counts.items() if done[p] < target]
     if short or code != 0:
         _step(group, task, f"没评满:{'、'.join(short) or '(远端 exit ' + str(code) + ')'};再点一次续评")
         return 1
-    _step(group, task, "评完:" + "、".join(f"{p} {n} 条" for p, n in counts.items())
+    _step(group, task, "评完:" + "、".join(f"{p} {n} 条" + ("(布局崩掉,已放弃)" if done[p] > n else "")
+                                         for p, n in counts.items())
           + f"({m['key']})")
     return 0
 
 
 def run(kind: str, group: str, task: str, gpus: str = "", delete: bool = False, policy: str = "",
         machine: str = "", per_gpu: int | None = None, variant: str = "", traj: bool = False) -> int:
-    global _RUN_POLICY, _RUN_VARIANT
-    _RUN_POLICY = policy if kind == "eval" else ""
-    _RUN_VARIANT = norm_variant(variant) if kind == "eval" else ""
+    global _RUN_POLICY, _RUN_VARIANT, _RUN_KIND
+    _RUN_KIND = kind
+    _RUN_POLICY = policy if kind in ("eval", "upload_eval") else ""
+    _RUN_VARIANT = norm_variant(variant) if kind in ("eval", "upload_eval") else ""
     update_job(group, task, pid=os.getpid())
     code = 1
     try:
@@ -2342,6 +2488,8 @@ def run(kind: str, group: str, task: str, gpus: str = "", delete: bool = False, 
             code = run_export(group, task)
         elif kind == "eval":
             code = run_eval(group, task, gpus, policy, machine, _RUN_VARIANT, traj)
+        elif kind == "upload_eval":
+            code = run_eval_upload(group, task, policy, _RUN_VARIANT)
         elif kind == "layouts":
             code = run_layouts(group, task, gpus)
         else:
@@ -2350,11 +2498,12 @@ def run(kind: str, group: str, task: str, gpus: str = "", delete: bool = False, 
         print(f"[group_jobs] {error}", flush=True)
         update_job(group, task, step=str(error).splitlines()[0][:200])
     finally:
-        job = read_job(job_id(group, task, _RUN_POLICY, _RUN_VARIANT)) or {}
+        job = read_job(run_job_id(group, task)) or {}
+        keep_step = kind in ("ingest", "eval", "upload_eval", "layouts")
         if not job.get("stopped"):
             update_job(group, task, returncode=code, finished_at=now(),
-                       step=(job.get("step") if kind in ("ingest", "eval", "layouts") else "完成") if code == 0
-                       else (job.get("step") or "") + "(失败)")
+                       step=((job.get("step") if keep_step else "完成") if code == 0
+                             else (job.get("step") or "") + "(失败)"))
         print(f"\n[group_jobs] {now()} exit {code}", flush=True)
     return code
 
@@ -2367,8 +2516,10 @@ def main() -> int:
         s.add_argument("button", choices=BUTTONS)
         s.add_argument("group")
         s.add_argument("task")
-        s.add_argument("--policy", default="", help="eval 时只评这个模型(Pi_0 / Pi_05);默认都评")
-        s.add_argument("--variant", default="", help="eval 时评这个 S1 变体(S1.1 …);默认 S1.0(原任务)")
+        s.add_argument("--policy", default="", help="eval 时只评这个模型(Pi_0 / Pi_05);默认都评;"
+                                                    "upload_eval 时传这个模型")
+        s.add_argument("--variant", default="", help="eval 时评这个 S1 变体(S1.1 …);默认 S1.0(原任务);"
+                                                     "upload_eval 时传这个变体")
         s.add_argument("--machine", default="", help="collect / eval 在哪台机器上跑(docs/servers.json 的键;默认 default_machine)")
         if name == "start":
             s.add_argument("--gpus", default="")
@@ -2376,7 +2527,7 @@ def main() -> int:
             s.add_argument("--per_gpu", type=int, default=None, help="collect:每卡几个 worker")
             s.add_argument("--traj", action="store_true", help="eval:每条另存轨迹 HDF5(默认不存)")
     s = sub.add_parser("run", help="内部用:后台会话里执行")
-    s.add_argument("kind", choices=("ingest", "collect", "export", "upload", "eval", "layouts"))
+    s.add_argument("kind", choices=("ingest", "collect", "export", "upload", "eval", "upload_eval", "layouts"))
     s.add_argument("group")
     s.add_argument("task")
     s.add_argument("--gpus", default="")

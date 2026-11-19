@@ -294,9 +294,11 @@ def infer_repo_id(local_dir: Path) -> str | None:
     if repo:
         return repo
     cache = local_dir.parent / ".cache" / "modelscope"
-    # LeRobot 上传缓存也在同一目录,文件名以 _lerobot 结尾,不能当作 HDF5 仓库
+    # LeRobot 上传缓存也在同一目录,文件名以 _lerobot 结尾;评测数据上传的断点缓存是 upload_eval_*.json
+    # (每组评测一个,见 upload_eval_results.py)。都不是 HDF5 数据仓库
     matches = (
-        sorted(batch for batch in cache.glob("upload_*.json") if not batch.stem.endswith("_lerobot"))
+        sorted(batch for batch in cache.glob("upload_*.json")
+               if not batch.stem.endswith("_lerobot") and not batch.stem.startswith("upload_eval_"))
         if cache.is_dir()
         else []
     )
@@ -2750,6 +2752,7 @@ def html_page(snapshot: dict, refresh: int, out_dir: Path = DEFAULT_OUT) -> str:
       stopBtn.dataset.task = job.task;
       if (jid.split('.').length > 2) stopBtn.dataset.policy = job.policy || '';  // 按模型的评测记录
       if (job.variant) stopBtn.dataset.variant = job.variant;  // S1 变体的评测记录
+      if (job.kind === 'upload_eval') stopBtn.dataset.upload = '1';  // 评测数据上传(键多 .upload)
       stopBtn.textContent = '⏹ 停止';
       head.append(stopBtn);
       card.append(head);
@@ -2761,12 +2764,13 @@ def html_page(snapshot: dict, refresh: int, out_dir: Path = DEFAULT_OUT) -> str:
 
   function paintGroupCells() {
     const cellKind = {ingest: 'ingest', collect: 'collect', export: 'exchange', upload: 'upload', eval: 'eval',
-      layouts: 'layouts'};
+      upload_eval: 'upload_eval', layouts: 'layouts'};
     // 按模型的评测记录键是 <group>.<task>.<policy>;"评所有模型"(命令行)和 2026-11-16 前的评测记在 <group>.<task>;
     // S1 变体的评测再加 @<variant>(<group>.<task>.<policy>@S1.1),只认自己的记录
     const jobOf = (el) => {
       const base = el.dataset.group + '.' + el.dataset.task;
       const policy = el.dataset.policy;
+      if (el.dataset.kind === 'upload_eval') return groupJobs[base + '.' + (policy || '') + '@' + (el.dataset.variant || '') + '.upload'];
       if (el.dataset.kind === 'eval' && el.dataset.variant) return groupJobs[base + '.' + (policy || '') + '@' + el.dataset.variant];
       if (el.dataset.kind !== 'eval' || !policy) return groupJobs[base];
       const own = groupJobs[base + '.' + policy];
@@ -2780,7 +2784,8 @@ def html_page(snapshot: dict, refresh: int, out_dir: Path = DEFAULT_OUT) -> str:
       let job = jobOf(cell);
       if (job && cell.dataset.kind && kindOf(job) !== cell.dataset.kind) job = null;
       if (job && cell.dataset.policy && job.policy && job.policy !== cell.dataset.policy) job = null;
-      if (job && (job.variant || '') !== (cell.dataset.variant || '') && cell.dataset.kind === 'eval') job = null;
+      if (job && (job.variant || '') !== (cell.dataset.variant || '')
+        && (cell.dataset.kind === 'eval' || cell.dataset.kind === 'upload_eval')) job = null;
       const prog = job && job.progress && job.progress.text;
       cell.textContent = !job ? '' : job.state === 'running'
         ? (job.waiting ? job.label + ' · ' + (job.step || '排队中') : job.label + '中 · ' + (prog || job.step || ''))
@@ -2952,7 +2957,7 @@ def html_page(snapshot: dict, refresh: int, out_dir: Path = DEFAULT_OUT) -> str:
 
   // 任务按钮(采集 / 转换 / 上传):点了弹出计划对话框,确认后在服务端后台运行 group_jobs.py
   const actionTitle = {ingest: '下载资产', collect: '采集', exchange: '转换 LeRobot', upload: '上传 ModelScope',
-    eval: '评测', layouts: '生成评测布局'};
+    eval: '评测', upload_eval: '上传评测数据', layouts: '生成评测布局'};
   // 机器选择框里每台机器的状态:在不在线、空闲 GPU、(评测)哪些模型的评测环境装好了;逐台异步查,不挡选择
   async function machineStatus(key, kind, stat, radio, label) {
     stat.textContent = '⏳ 检查在线和评测环境…';
@@ -2998,7 +3003,8 @@ def html_page(snapshot: dict, refresh: int, out_dir: Path = DEFAULT_OUT) -> str:
     const variant = button.dataset.variant || '';
     const title = (policy ? policy + ' ' : '') + (variant ? variant + ' ' : '') + (actionTitle[kind] || kind) + ' · '
       + (task === '__group__' ? group : task);
-    const pending = kind === 'upload' ? '正在生成计划…\\n要对 ModelScope 做 dry-run,可能需要 1–3 分钟。'
+    const pending = (kind === 'upload' || kind === 'upload_eval')
+      ? '正在生成计划…\\n要查 ModelScope 远端,可能需要几十秒到几分钟。'
       : (kind === 'ingest' ? '正在生成计划…\\n要跑一次 simready_assets.py --dry_run,可能要几十秒。' : '正在生成计划…');
     const {dialog, ok, cancel} = planDialog(title, pending, {pending: true});
     const text = $('plan-text');
@@ -3137,7 +3143,7 @@ def html_page(snapshot: dict, refresh: int, out_dir: Path = DEFAULT_OUT) -> str:
         fields.append(label);
       }
       ok.textContent = {ingest: '开始下载', collect: '开始采集', export: '开始转换', upload: '确认上传',
-        eval: '开始评测', layouts: '开始生成'}[plan.kind]
+        upload_eval: '确认上传', eval: '开始评测', layouts: '开始生成'}[plan.kind]
         || '确认开始';
       ok.style.display = '';
       ok.disabled = false;
@@ -3180,13 +3186,15 @@ def html_page(snapshot: dict, refresh: int, out_dir: Path = DEFAULT_OUT) -> str:
     if (button.dataset.kind === 'stop') {
       const policy = button.dataset.policy || '';
       const variant = button.dataset.variant || '';
+      const upload = button.dataset.upload === '1';
       const sub = policy + (variant ? '@' + variant : '');
-      const job = groupJobs[group + '.' + task + (sub ? '.' + sub : '')] || {};
+      const job = groupJobs[group + '.' + task + (sub ? '.' + sub : '') + (upload ? '.upload' : '')] || {};
       const ok = await confirmSimple('停止 ' + task, '停止 ' + task + ' 的' + (job.label || '任务') + '?\\n'
         + '采集的分片会保留,之后再点「采集」会续采;上传中断后再点会续传。');
       if (!ok) return;
       try {
         const params = new URLSearchParams({group: group, task: task, policy: policy, variant: variant});
+        if (upload) params.set('upload', '1');
         const data = await api('api/group/stop?' + params.toString(), {method: 'POST'});
         hint.textContent = data.message || '已停止';
       } catch (error) {
@@ -3373,9 +3381,9 @@ class StatusRequestHandler(SimpleHTTPRequestHandler):
         return jobs
 
     def _group(self, action: str):
-        """任务按钮:``ingest``(按组,task 为 ``__group__``)/ ``collect`` / ``exchange`` / ``upload``
-        不带 confirm 时返回计划,
-        带 ``confirm=1`` 时后台启动;``stop`` 停止。"""
+        """任务按钮:``ingest``(按组,task 为 ``__group__``)/ ``collect`` / ``exchange`` / ``upload`` /
+        ``eval`` / ``upload_eval``(S1 变体格子里的「⬆ 上传」)不带 confirm 时返回计划,
+        带 ``confirm=1`` 时后台启动;``stop`` 停止(``upload=1`` 停评测数据上传)。"""
         import group_jobs
 
         query = parse_qs(urlparse(self.path).query)
@@ -3413,7 +3421,8 @@ class StatusRequestHandler(SimpleHTTPRequestHandler):
             return self._json({"error": "S1 变体不合法"}, status=400)
         try:
             if action == "stop":
-                return self._json({"message": group_jobs.stop(group, task, policy, variant)})
+                kind = "upload_eval" if (query.get("upload") or [""])[0] == "1" else ""
+                return self._json({"message": group_jobs.stop(group, task, policy, variant, kind)})
             if action not in group_jobs.BUTTONS:
                 return self._json({"error": f"未知操作 {action}"}, status=404)
             if (query.get("confirm") or [""])[0] != "1":

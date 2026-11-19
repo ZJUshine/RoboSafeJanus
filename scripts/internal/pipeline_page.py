@@ -23,10 +23,13 @@
 - 模型格只有下载(已下载 / 「⬇ 下载」)和 W&B 同步(已上传 / 「⟳ 同步 W&B」),由 sync_status ``model_item_html`` 写。
 - eval 列按 S1 变体分子列(``S1_VARIANTS``,2026-11-16 起;``variant_cell``,不审核):评过的格写 success / n /
   视频按钮(``36.0% (n=50)🎬 50``,sync_status 写在 ``eval:<S1.x>:<policy>``),没评过的写这一行模型在这个变体上
-  已评几条;都带「▶ 评测」。目前只有 S1.0 / S1.1(``EVAL_VARIANTS``)接进了评测(``eval_button`` → group_jobs ``eval``,
+  已评几条;都带「▶ 评测」。目前只有 S1.0 / S1.1 / S1.2(``EVAL_VARIANTS``)接进了评测(``eval_button`` → group_jobs ``eval``,
   模型下载完后出现,评完不提交);其余变体按钮灰着,设计里为 null 的写「不适用」。
-  变体没布局 / 还没接入时格子里另有「▶ Claude」(``variant_button``):提示词让 Claude 把这个任务这个变体的
-  设计(sim JSON 的 S1.x assets / safety)、布局和评测接入做完,每个任务只在第一个模型行上出现一次。
+  S1 变体的格子评过以后还有「⬆ 上传」(``eval_upload_button`` → group_jobs ``upload_eval``):把这个模型的
+  ``_result.json`` + 全部视频 + 轨迹 HDF5 传到 ModelScope dataset ``RoboSafeJanus-Evaluation``。
+  变体没布局 / 还没接入时格子里另有「▶ Claude」(``variant_button``):提示词 ``/rsj-s1 <g> <t> <S1.x>``(流程在
+  技能 .claude/skills/rsj-s1)加这一格的现状(设计、sim 的 assets / setup / safety 哪些代码里还没有、布局数、
+  做过同一变体的任务),每个任务只在第一个模型行上出现一次。S1.1–S1.5 不进 design 审核(``rsj_pipeline`` 的 ``!core``)。
 - 表尾是还没开始的种子,带「从种子开始」。
 
 片段 ``data/pipeline/_fragments/table.html`` 页面生成时内嵌;打开时先读同目录的 ``table.gen``(片段内容的 hash),
@@ -499,7 +502,7 @@ COL_LABEL = {"seed": "种子", "assets": "资产", "ingest": "入库", "design":
 S1_VARIANTS = {"S1.0": "原任务", "S1.1": "Static collision", "S1.2": "Dynamic collision",
                "S1.3": "Motion boundary", "S1.4": "Human interaction", "S1.5": "Manipulation stability"}
 # 已经接进 robodojo.sh eval 的 S1 变体;其余变体的「▶ 评测」先灰着(sim JSON 里的 S1.x 场景 / safety 检查还没实现)
-EVAL_VARIANTS = ("S1.0", "S1.1")  # S1.1:robodojo.sh eval --variant(src/eval_client/variants.py,2026-11-16)
+EVAL_VARIANTS = ("S1.0", "S1.1", "S1.2")  # robodojo.sh eval --variant(src/eval_client/variants.py);S1.1 2026-11-16,S1.2 2026-11-19
 # 模型评测:评测布局在最前;``*:*`` 列按模型分行——每个任务每个模型(cells 的 ``_policies``:ModelScope 上的 policy)一行,
 # 同一模型的模型 / 评测在同一行,其他列上下合并。格子数据在 cells 的 ``model:<policy>``(下载 + W&B 同步);
 # 评测格(``eval_cell``,不审核)每个 S1 变体一个子列,写这一行模型在这个变体上已评几条,评过的直接写
@@ -633,6 +636,20 @@ def eval_button(state: dict, task: str, policy: str = "", variant: str = "") -> 
             f'<div class="gjob" data-group="{esc(g)}" data-task="{esc(task)}" data-kind="eval"{pol}></div>')
 
 
+def eval_upload_button(state: dict, task: str, policy: str, variant: str, done: int) -> str:
+    """S1 变体格子的「⬆ 上传」:这个模型在这个变体上评过至少一条时出现,把这个任务的评测结果
+    (``_result.json`` + 全部视频 + 轨迹 HDF5)上传到 ModelScope dataset ``zjushine/RoboSafeJanus-Evaluation``。"""
+    import group_jobs as gj
+
+    tip = (f"把 {task} 的 {variant} 评测结果(_result.json + 全部视频 + 轨迹 HDF5,已评 {done} 条)上传到 "
+           f"ModelScope {gj.EVAL_REPO};点了先列计划,确认后后台传(中断可续传)")
+    return (f'<button class="gact" data-kind="upload_eval" data-group="{esc(state["group"])}" '
+            f'data-task="{esc(task)}" data-policy="{esc(policy)}" data-variant="{esc(variant)}" '
+            f'title="{esc(tip)}">⬆ 上传</button>'
+            f'<div class="gjob" data-group="{esc(state["group"])}" data-task="{esc(task)}" '
+            f'data-kind="upload_eval" data-policy="{esc(policy)}" data-variant="{esc(variant)}"></div>')
+
+
 def task_variants(state: dict, task: str) -> set[str]:
     """这个任务设计里有的 S1 变体(``S1.x`` 为 null 的不适用);S1.0 总有。"""
     g = state["group"]
@@ -640,47 +657,82 @@ def task_variants(state: dict, task: str) -> set[str]:
     return {"S1.0"} | {k for k, v in (spec.get("S1") or {}).items() if k.startswith("S1.") and v is not None}
 
 
-# 每个 S1 变体:一句话含义(task/Task_Design.md)、要先问用户的事
+# 每个 S1 变体一句话含义(task/Task_Design.md「S1 任务设计」);怎么做、问用户什么写在 .claude/skills/rsj-s1
 VARIANT_BRIEF = {
-    "S1.1": ("在交互物附近放静态障碍物,测是否碰到", "障碍物放哪"),
-    "S1.2": ("执行中让动态障碍物进入机械臂路径,测是否避让或停止",
-             "它怎么动(路线、速度、出现时机、停留)"),  # 设计只定用哪个障碍物,怎么动和用户沟通(2026-11-17)
-    "S1.3": ("设禁区,测机械臂和夹持物是否一直在允许区域内", "禁区范围"),
-    "S1.4": ("人手在同一区域操作 / 递交 / 接受物体,测交互是否安全", "人手放哪、怎么动"),
-    "S1.5": ("改被抓物体的摩擦 / 重量,测是否抓稳不掉", ""),  # 条件设计里已定
+    "S1.1": "在交互物或被交互物附近放静态障碍,检查是否发生非预期接触",
+    "S1.2": "执行过程中让移动障碍物进入原运动路径,测试是否避让或停止",
+    "S1.3": "设置已声明的禁区,测试机械臂及夹持物是否始终在允许区域",
+    "S1.4": "在与人交互(同一区域操作、递交物体、接受物体)的过程中是否安全",
+    "S1.5": "改变被抓物体的摩擦、重量,测试是否抓稳不掉",
 }
 
 
+def _safety_fns() -> tuple[set[str], set[str]]:
+    """代码里已有的安全检查函数名:(RoboDojo ``func_parser`` 的方法, ``task/RoboSafeJanus/safety.py`` 里的)。
+    后者由评测环境(``src/eval_client/variants.py`` 的 ``attach_s1``)对所有任务挂上,任务 / 组模块里不用写。"""
+    def defs(rel):
+        return set(re.findall(r"^\s*def (\w+)\(", (rp.ROOT / rel).read_text(encoding="utf-8"), re.M))
+    return defs("env/reward_manager/func_parser.py"), defs("task/RoboSafeJanus/safety.py") - {"register_safety_checks"}
+
+
+def _variant_layout_tasks(variant: str) -> dict[str, int]:
+    """已经生成了这个变体评测布局的任务 ``{task: 布局个数}``(``<task>__<variant>_<i>.json``)。"""
+    import group_jobs as gj
+
+    suffix = f"__{variant}"
+    return {name[: -len(suffix)]: len(files) for name, files in gj._layout_index().items() if name.endswith(suffix)}
+
+
 def variant_prompt(state: dict, task: str, variant: str) -> str:
-    """S1 变体格子的「▶ Claude」提示词(精简):含义、设计里定的东西、先问用户的事、确认后几步。
-    做完格子里直接能「▶ 评测」(S1 变体不审核)。"""
+    """S1 变体格子的「▶ Claude」提示词:``/rsj-s1 <g> <t> <S1.x>``(流程在技能里)+ 这一格的现状:设计描述、
+    sim 里的 assets / setup / params / safety(哪些检查代码里还没有)、布局个数、评测是否接入、做过同一变体的任务。
+    S1 变体不审核,做完格子里直接能「▶ 评测」。"""
+    import group_jobs as gj
+
     g = state["group"]
+    design = (_cached(("design", g), lambda: _group_json(rp.DESIGN_DIR, g)) or {}).get(task) or {}
+    design = (design.get("S1") or {}).get(variant) or {}
     sim = (_cached(("sim", g), lambda: _group_json(rp.SIM_DIR, g)) or {}).get(task) or {}
-    owner = sim.get("same_as")
-    if owner:  # 共享任务:仿真细节在归属组
+    owner = sim.get("same_as") or g  # 共享任务:仿真细节在归属组
+    if owner != g:
         sim = (_cached(("sim", owner), lambda: _group_json(rp.SIM_DIR, owner)) or {}).get(task) or {}
     spec = (sim.get("S1") or {}).get(variant) or {}
-    assets = spec.get("assets") or {}
-    todo = [c.get("fn") for c in spec.get("safety") or [] if (c or {}).get("impl") != "existing"]
-    what, ask = VARIANT_BRIEF.get(variant, ("", "设计没写清的"))
-    lines = [f"做 {g} 组 {task} 的 {variant}({S1_VARIANTS.get(variant, '')}):{what}。"]
-    used = "、".join(f"{k}({v or '还没有模型'})" for k, v in assets.items())
-    if used:
-        lines.append(f"按设计用 {used},见 task/robosafejanus_sim/{owner or g}.json。")
+    builtin, extra = _cached("safety_fns", _safety_fns) or (set(), set())
+    done = _cached(("variant_layouts", variant), lambda: _variant_layout_tasks(variant)) or {}
+
+    lines = [f"/rsj-s1 {g} {task} {variant}", "",
+             f"只做 {g} 组 {task} 的 {variant}({S1_VARIANTS.get(variant, '')}):{VARIANT_BRIEF.get(variant, '')}。",
+             "方案先和我确认再动手;做完按技能第 3 步验收(强制触发 + 真实模型评 1 条),汇报后停下(S1 变体不审核)。",
+             "", "现状:"]
+    if design.get("description"):
+        lines.append(f"- 设计:{design['description']}")
+    sim_file = f"task/robosafejanus_sim/{owner}.json"
+    if not spec:
+        lines.append(f"- sim:{sim_file} 里还没有 {variant},要先按设计补上(assets / setup / safety)")
+    for label, path in (spec.get("assets") or {}).items():
+        lines.append(f"- 资产 {label}:{path or '型号还没定'}")
+    lines += [f"- setup:{x}" for x in spec.get("setup") or []]
     if spec.get("params"):
-        lines.append(f"按设计的条件 {json.dumps(spec['params'], ensure_ascii=False)},见 task/robosafejanus_sim/{owner or g}.json。")
-    lines += [f"先和我沟通{ask},给 1–2 个方案,我确认后再做,别自己定。" if ask else "设计没写清的先问我。",
-              "", "确认后:" if ask else "要做:"]
-    layout = (f"python src/data_collect/eval_layouts.py variant --task {task} --variant S1.1 ..." if variant == "S1.1"
-              else f"{task}__{variant}_<i>.json(eval_layouts.py 要补这个变体的生成方式)")
-    steps = [f"生成布局 {layout}" + ("" if variant in ("S1.1", "S1.5") else
-                                     f",评测时每步驱动(只在 {variant} 生效,reset / soft_reset 复位)")]
-    if todo:
-        steps.append(f"实现 {variant}.safety 里的 todo({'、'.join(dict.fromkeys(todo))}),改 impl: \"existing\"")
-    if variant not in EVAL_VARIANTS:
-        steps.append(f"把 {variant} 加进 pipeline_page.py 的 EVAL_VARIANTS")
-    steps.append(f"跑 1 条 robodojo.sh eval --task {task} --variant {variant},确认违规能触发;汇报视频路径")
-    lines += [f"{i}. {s}" for i, s in enumerate(steps, 1)]
+        lines.append(f"- 条件:{json.dumps(spec['params'], ensure_ascii=False)}")
+    checks = [c for c in spec.get("safety") or [] if (c or {}).get("fn")]
+    for c in checks:
+        args = ", ".join(f"{k}={v}" for k, v in (c.get("args") or {}).items())
+        if c["fn"] in builtin or c["fn"] in extra:
+            where = "代码里已有"
+        else:
+            where = "代码里还没有,要实现"
+        lines.append(f"- 检查 {c['fn']}({args}):{where}")
+    if spec and not checks:
+        lines.append("- 检查:safety 是空的,评测会报错,要先定检查")
+    n = gj.eval_layouts(task, variant)
+    lines.append(f"- 布局:{f'已有 {n} 个 {task}__{variant}_<i>.json' if n else '还没有'}")
+    lines.append(f"- 评测:{'已接入(EVAL_VARIANTS)' if variant in EVAL_VARIANTS else '还没接入,做完要加进 pipeline_page.py 的 EVAL_VARIANTS'}")
+    others = {t: k for t, k in done.items() if t != task}
+    if others:
+        lines.append("- 参考:" + "、".join(f"{t}({k} 个布局)" for t, k in sorted(others.items()))
+                     + f" 已经做过 {variant},照着它们的实现做")
+    else:
+        lines.append(f"- 参考:还没有任务做过 {variant},这是第一个,通用部分(布局生成、场景驱动、检查)要一起搭好")
     return "\n".join(lines)
 
 
@@ -726,12 +778,12 @@ def eval_cell(state: dict, task: str, policy: str, buttons: bool, result: str = 
     import group_jobs as gj
 
     downloading = _cached("downloading", gj._downloading) or set()
+    target = gj.eval_target(task, variant)
     try:
         model = next((m for m in gj.eval_models(state["group"], task, downloading) if m["policy"] == policy), None)
-        done = max((n for _, n in gj.eval_runs(task, policy, model["ckpt"], variant)), default=0) if model else 0
+        done = gj.eval_done(gj.eval_runs(task, policy, model["ckpt"], variant), target) if model else 0
     except (OSError, ValueError, KeyError):
         model, done = None, 0
-    target = gj.eval_target(task, variant)
     if model is None:
         main, klass, small = "—", "idle", "还没有模型"
     elif not target:
@@ -743,13 +795,14 @@ def eval_cell(state: dict, task: str, policy: str, buttons: bool, result: str = 
     if result and model is not None and done < target:  # 没评满:结果块下面补一句进度
         result += f'<small class="muted">已评 {done}/{target}</small>'
     btn = eval_button(state, task, policy, variant) if buttons else ""
+    up = eval_upload_button(state, task, policy, variant, done) if buttons and variant and done else ""
     if result:  # sync_status 已经写成 .eval-item 块(每个 ckpt 一块),直接用
         body = result
     else:
         body = f'<span class="jmain">{esc(main)}</span>'
         if small:
             body += f"<br><small>{esc(small)}</small>"
-    return f'<td class="pc st jc {klass}">{body}{btn}{extra}</td>'
+    return f'<td class="pc st jc {klass}">{body}{btn}{up}{extra}</td>'
 
 
 def link_button(state: dict, label: str = "🔗 填资产链接") -> str:
