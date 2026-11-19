@@ -107,12 +107,15 @@ echo "[MAIN] start server, policy_server_port=${policy_server_port}"
 
 SERVER_PID=$!
 
+# 1800s: large checkpoints (e.g. OpenWAM's 24.8G single-file safetensors) can
+# take >10 min of CPU-side model construction on remote boxes before the
+# server binds its port; 600s timed out there.
 bash "${UTILS_DIR}/wait_for_policy_server.sh" \
   "${policy_server_ip}" \
   "${policy_server_port}" \
   "${SERVER_PID}" \
   "Policy server" \
-  600
+  1800
 
 echo "[MAIN] start client, server=${policy_server_ip}:${policy_server_port}"
 
