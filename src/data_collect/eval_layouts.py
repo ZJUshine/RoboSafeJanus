@@ -45,6 +45,15 @@ S1 执行测试变体(``src/eval_client/variants.py``)的布局用 ``variant``:�
 
     python src/data_collect/eval_layouts.py variant --task heat_sandwich_microwave --variant S1.1 \\
         --add bottle --asset Rigid/bottle/00000 --between sandwich,microwave --footprint microwave:0.508,0.367
+
+S1.2 的移动障碍物用 ``--motion cross``(``--obj_height`` 可选:等比缩放到这个高度),沿 ``--lane_dir`` 从桌外开进来,车道夹在
+``--between`` 两物体之间(垂直车道方向的空隙正中),开到 ``--turn_at``(某物体局部坐标的点)前 ``--turn_gap`` 再倒回桌外;
+速度、出发延迟按编号抽好,连同路线写进障碍物布局记录的 ``motion``(``task/RoboSafeJanus/s1_motion.py`` 驱动)::
+
+    python src/data_collect/eval_layouts.py variant --task heat_sandwich_microwave --variant S1.2 \\
+        --add car --asset Rigid/car/00014 --motion cross --lane_dir=-1,0 \\
+        --between sandwich,microwave --footprint microwave:0.508,0.367 --turn_at microwave:-0.2511,-0.16 \\
+        --speed 0.15,0.25 --delay 0.5,1.5 --trigger grasp:sandwich
 """
 
 import argparse
@@ -104,6 +113,26 @@ def _parse():
         help="use this body footprint (m) for an object instead of its asset bbox, e.g. microwave:0.508,0.367 "
         "when the open door makes the bbox much larger than the body",
     )
+    variant.add_argument(
+        "--motion",
+        choices=("static", "cross"),
+        default="static",
+        help="static: stand between the two labels (S1.1); cross: kinematic obstacle drives across their line (S1.2)",
+    )
+    variant.add_argument("--obj_height", type=float, help="scale the obstacle uniformly to this height (m)")
+    variant.add_argument("--yaw_offset", type=float, default=0.0, help="cross: extra yaw (deg) on the lane heading")
+    variant.add_argument("--lane_dir", default="-1,0", help="cross: travel direction in world xy")
+    variant.add_argument(
+        "--turn_at",
+        metavar="LABEL:X,Y",
+        help="cross: reverse when the front is --turn_gap before this point (in LABEL's local frame) and drive back "
+        "off the table; without it the obstacle drives off the far table edge",
+    )
+    variant.add_argument("--turn_gap", type=float, default=0.03)
+    variant.add_argument("--speed", default="0.15,0.25", help="cross: speed range (m/s), drawn per layout id")
+    variant.add_argument("--delay", default="0.5,1.5", help="cross: start delay range (s) after the trigger")
+    variant.add_argument("--trigger", default="time", help="cross: 'time' (episode start) or 'grasp:<label>'")
+    variant.add_argument("--seed", type=int, default=0, help="cross: rng seed; draws use (seed, layout id)")
     variant.add_argument("--env_cfg_type", default="arx_x5")
     variant.add_argument("--eval_seed", type=int, default=0)
     variant.add_argument("--overwrite", action="store_true", help="replace existing <task>__<variant>_<i>.json")
@@ -401,6 +430,10 @@ def run_variant(args):
 
     obstacle = meta(obj_type, cat, idx)
     ob_verts = np.asarray(obstacle["geometry"]["aligned_bbox"]["vertices"])
+    scale = 1.0
+    if args.obj_height:
+        scale = args.obj_height / float(ob_verts[:, 2].max() - ob_verts[:, 2].min())
+        ob_verts = ob_verts * scale
     radius = float(np.abs(ob_verts[:, :2]).max())
     physics = obstacle.get("physics") or {}
     config_name = load_yaml(os.path.join("env_cfg", args.env_cfg_type + ".yml"))["config_name"]
@@ -417,25 +450,38 @@ def run_variant(args):
         layout = load_json(path)
         (ta, ra), (tb, rb) = _find_record(layout, label_a), _find_record(layout, label_b)
         a, b = np.asarray(ra["default_pos"][:2]), np.asarray(rb["default_pos"][:2])
-        d = (b - a) / np.linalg.norm(b - a)
-        a_far = (footprint(ta, ra)[:, :2] @ d).max()  # a 朝向 b 的最远处(沿连线,以 a 为原点)
-        b_near = ((footprint(tb, rb)[:, :2] + b - a) @ d).min()  # b 朝向 a 的最近处
-        slack = (b_near - a_far) - 2 * radius - 2 * args.clearance
-        if slack < 0:
-            skipped[i] = round(float(slack), 3)
-            continue
-        center = a + d * (a_far + b_near) / 2
         table = layout["Table"]
         top = float(table["default_pos"][2]) + float(table["scale"][2]) / 2
-        layout.setdefault(obj_type, {}).setdefault(cat, []).append({
+        motion = None
+        if args.motion == "static":
+            d = (b - a) / np.linalg.norm(b - a)
+            a_far = (footprint(ta, ra)[:, :2] @ d).max()  # a 朝向 b 的最远处(沿连线,以 a 为原点)
+            b_near = ((footprint(tb, rb)[:, :2] + b - a) @ d).min()  # b 朝向 a 的最近处
+            slack = (b_near - a_far) - 2 * radius - 2 * args.clearance
+            if slack < 0:
+                skipped[i] = round(float(slack), 3)
+                continue
+            center = a + d * (a_far + b_near) / 2
+            pos, ori = [float(center[0]), float(center[1]), top - float(ob_verts[:, 2].min()) + 0.002], [1.0, 0, 0, 0]
+        else:
+            motion = _cross_motion(args, i, layout, a + footprint(ta, ra)[:, :2], b + footprint(tb, rb)[:, :2],
+                                   ob_verts, top)
+            if isinstance(motion, str):
+                skipped[i] = motion
+                continue
+            pos, ori = motion["waypoints"][0], motion["quat"]
+        record = {
             "category": cat, "category_idx": idx, "group": None, "relative_plane": "Table",
-            "need_check_stable": True, "label": args.add,
-            "default_pos": [float(center[0]), float(center[1]), top - float(ob_verts[:, 2].min()) + 0.002],
-            "default_ori": [1.0, 0.0, 0.0, 0.0], "scale": [1.0, 1.0, 1.0],
+            # 移动障碍物从桌外起步、kinematic 悬着,不做稳定性检查
+            "need_check_stable": motion is None, "label": args.add,
+            "default_pos": [float(v) for v in pos], "default_ori": [float(v) for v in ori], "scale": [scale] * 3,
             "physics": {"mass": float(physics.get("mass") or 0.15), "static_friction": 0.6, "dynamic_friction": 1.5,
                         "type": obj_type.lower()},
             "visual": {},
-        })
+        }
+        if motion is not None:
+            record["motion"] = motion  # task/RoboSafeJanus/s1_motion.py 按这里的路线驱动
+        layout.setdefault(obj_type, {}).setdefault(cat, []).append(record)
         written[i] = layout
     if not written:
         sys.exit(f"[eval_layouts] no {args.task} layout has room for {args.add} between {args.between}")
@@ -446,7 +492,64 @@ def run_variant(args):
             json.dump(layout, fp, indent=2)
     print(f"[eval_layouts] wrote {len(written)} {name} layouts to {out_dir} (ids kept from {args.task})")
     if skipped:
-        print(f"[eval_layouts] skipped {len(skipped)} ids without room (slack m): {skipped}")
+        print(f"[eval_layouts] skipped {len(skipped)} ids without room (slack m / reason): {skipped}")
+
+
+def _cross_motion(args, i, layout, fa, fb, ob_verts, top):
+    """``variant --motion cross``:障碍物车道和 ``--lane_dir`` 平行,夹在两物体之间(垂直车道方向的空隙正中),
+    从桌外(行进方向的反侧)出发,开到 ``--turn_at`` 前 ``--turn_gap`` 再原路倒回桌外;
+    没有 ``--turn_at`` 就一直开出对侧桌边。
+    ``fa`` / ``fb``:两物体 footprint 顶点的世界 xy。返回障碍物记录的 ``motion``,放不下返回跳过原因。"""
+    import numpy as np
+    import transforms3d as t3d
+
+    lane = np.asarray([float(v) for v in args.lane_dir.split(",")])
+    lane /= np.linalg.norm(lane)
+    n = np.asarray([-lane[1], lane[0]])
+    if (fb.mean(0) - fa.mean(0)) @ n < 0:
+        n = -n
+    yaw = np.arctan2(lane[1], lane[0]) + np.deg2rad(args.yaw_offset)
+    quat = t3d.euler.euler2quat(0.0, 0.0, yaw)
+    verts = ob_verts @ t3d.quaternions.quat2mat(quat).T
+    vl, vn = verts[:, :2] @ lane, verts[:, :2] @ n
+    a_max, b_min = float((fa @ n).max()), float((fb @ n).min())
+    slack = (b_min - a_max) - float(vn.max() - vn.min()) - 2 * args.clearance
+    if slack < 0:
+        return round(slack, 3)
+    c = (a_max + b_min) / 2 - float(vn.max() + vn.min()) / 2  # 障碍物原点在 n 方向的坐标
+    table = layout["Table"]
+    tx, ty = float(table["scale"][0]) / 2, float(table["scale"][1]) / 2
+    corners = np.asarray([[sx * tx, sy * ty] for sx in (-1, 1) for sy in (-1, 1)])
+    corners = corners + np.asarray(table["default_pos"][:2])
+    u_start = float((corners @ lane).min()) - 0.02 - float(vl.max())  # 车头离桌边 2 cm(整车在桌外)
+    if args.turn_at:
+        label, _, xy = args.turn_at.partition(":")
+        _, rec = _find_record(layout, label)
+        local = np.asarray([float(v) for v in xy.split(",")] + [0.0])
+        point = t3d.quaternions.quat2mat(rec["default_ori"]) @ local + np.asarray(rec["default_pos"])
+        u_end = float(point[:2] @ lane) - args.turn_gap - float(vl.max())
+        # 掉头时车头要已越过两物体中心的连线(否则没横穿路径)
+        ca, cb = fa.mean(0), fb.mean(0)
+        t = ((a_max + b_min) / 2 - ca @ n) / ((cb - ca) @ n)
+        if u_end + float(vl.max()) < float((ca + t * (cb - ca)) @ lane):
+            return "turns before crossing"
+        u_list = [u_start, u_end, u_start]
+    else:
+        u_list = [u_start, float((corners @ lane).max()) + 0.02 - float(vl.min())]
+    z = top - float(ob_verts[:, 2].min()) + 0.002
+    rng = np.random.default_rng([args.seed, i])
+    lo_v, hi_v = (float(v) for v in args.speed.split(","))
+    lo_d, hi_d = (float(v) for v in args.delay.split(","))
+    trigger = {"type": "time"}
+    if args.trigger.startswith("grasp:"):
+        trigger = {"type": "grasp", "label": args.trigger.split(":", 1)[1], "open_below": 0.9, "lift": 0.01}
+    return {
+        "waypoints": [[*(u * lane + c * n).tolist(), z] for u in u_list],
+        "quat": [float(v) for v in quat],
+        "speed": round(float(rng.uniform(lo_v, hi_v)), 3),
+        "delay": round(float(rng.uniform(lo_d, hi_d)), 3),
+        "trigger": trigger,
+    }
 
 
 if __name__ == "__main__":

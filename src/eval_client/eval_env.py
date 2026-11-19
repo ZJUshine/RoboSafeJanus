@@ -18,6 +18,8 @@ from utils.cluttered_generator import UnStableError
 from utils.pipeline_utils import get_robot_action_dim_info
 from utils.save_file import VideoStreamWriter, format_video_saved_message, save_json
 
+from .variants import attach_s1
+
 
 def _patch_websockets_proxy_compat():
     # Isaac Sim may load an older bundled websockets package that does not
@@ -221,6 +223,9 @@ def create_eval_env(config, app, resume_state=None, **kwargs):
         def _post_setup_scene(self, sim):
             super()._post_setup_scene(sim)
             self.obs_manager.initialize(self)
+            # S1 变体:安全检查函数和场景驱动挂在评测端,不写进任务 / 组模块(改了会让 layout 审核失效)
+            if getattr(self, "variant", ""):  # _post_setup_scene 在第一次 reset 时才调,这时 variant 已设好
+                attach_s1(self)
 
         def reset(self, seed=None, options=None):
             seed = list(seed)
@@ -692,6 +697,8 @@ def create_eval_env(config, app, resume_state=None, **kwargs):
             meta_control_list = self.robot_manager.control_manager.pop(env_idx_list)
             for _ in range(decimation):
                 super().step(meta_control_list=meta_control_list)
+                if getattr(self, "s1_motion", None) is not None:
+                    self.s1_motion.update()  # S1.2 移动障碍物(task/RoboSafeJanus/s1_motion.py),每个物理步
                 self.sim_step(render=False)
 
         def _align_layout_success(self):

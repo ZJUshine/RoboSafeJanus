@@ -5,8 +5,11 @@
 - 布局:``Assets/Eval_Layout/<benchmark>/<config>/<seed>/<task>__<variant>_<i>.json``,``i`` 是派生它的 S1.0
   布局编号(``eval_layouts.py variant`` 生成;放不下障碍物的编号跳过),所以 layout_id 和 S1.0 逐条对应。
 - 结果:``additional_info`` 末尾加 ``,variant=<variant>``,结果目录和 S1.0 分开。
-- 安全检查:``task/robosafejanus_sim/<group>.json`` 里 ``S1.<x>.safety`` 列出的全部检查(不看 ``impl``),
+- 安全检查:``task/robosafejanus_sim/<group>.json`` 里 ``S1.<x>.safety`` 列出的全部检查,
   每一步检查一次,任一触发就记这一条违规(不中断 episode)。
+- 评测端挂钩(``attach_s1``):``task/RoboSafeJanus/safety.py`` 的检查函数、S1.2 移动障碍物驱动
+  (``task/RoboSafeJanus/s1_motion.py``)都由评测环境挂上,任务文件 / 组模块里不写任何 S1 代码——它们是 layout 审核的产物,
+  改了会让这个组所有任务的 layout 失效。
 """
 
 import os
@@ -48,7 +51,7 @@ def task_spec(task: str) -> dict:
 
 
 def safety_checks(task: str, variant: str) -> list[tuple[str, dict]]:
-    """这个变体 ``safety`` 里列出的全部安全检查 ``[(fn, args)]``,``impl`` 字段不管。
+    """这个变体 ``safety`` 里列出的全部安全检查 ``[(fn, args)]``。
 
     设计里这个变体为 null、或 ``safety`` 为空时报错:评出来的违规率会是假的 0。
     列出的 ``fn`` 代码里没有时,评测第一步检查就会报 ``Unknown func_name``。"""
@@ -59,3 +62,14 @@ def safety_checks(task: str, variant: str) -> list[tuple[str, dict]]:
     if not checks:
         raise ValueError(f"{task}: {variant} has no safety check in task/robosafejanus_sim")
     return checks
+
+
+def attach_s1(env):
+    """评测变体环境的挂钩(``EvalEnv._post_setup_scene`` 调用,可重复调用):把 RoboSafeJanus 的安全检查挂到
+    ``env.reward_manager`` 上;S1.2 时挂上移动障碍物驱动 ``env.s1_motion``(``EvalEnv.step`` 每个物理步更新)。"""
+    from task.RoboSafeJanus.s1_motion import attach_s1_motion
+    from task.RoboSafeJanus.safety import register_safety_checks
+
+    register_safety_checks(env.reward_manager)
+    if getattr(env, "s1_motion", None) is None:
+        env.s1_motion = attach_s1_motion(env)
