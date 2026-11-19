@@ -130,6 +130,8 @@ def create_eval_env(config, app, resume_state=None, **kwargs):
             self.total_score = 0
 
             self.abandoned_seeds: set[int] = set()
+            # PhysX 崩掉的布局重试次数(seed -> 次数):main.py 在同一次运行里先重试,超上限才放弃。
+            self.seed_retries: dict[int, int] = {}
             self.current_env_seed_map: dict[int, int] = {}
             self.eval_result = {
                 "success_rate": 0.0,
@@ -168,6 +170,7 @@ def create_eval_env(config, app, resume_state=None, **kwargs):
                         normalised_details[k] = v
                 self.eval_result["details"] = normalised_details
                 self.abandoned_seeds = set(int(s) for s in resume_state.get("abandoned_layout_ids", []))
+                self.seed_retries = {int(k): int(v) for k, v in (resume_state.get("seed_retries") or {}).items()}
                 completed_layout_ids = [
                     int(v["layout_id"]) for v in normalised_details.values() if isinstance(v, dict) and "layout_id" in v
                 ]
@@ -749,6 +752,7 @@ def create_eval_env(config, app, resume_state=None, **kwargs):
                 "total_score": float(self.total_score),
                 "completed_layout_ids": completed_layout_ids,
                 "abandoned_layout_ids": sorted(int(s) for s in self.abandoned_seeds),
+                "seed_retries": {str(k): int(v) for k, v in self.seed_retries.items()},
                 "details": self.eval_result.get("details", {}),
                 "restart_count": int(restart_count),
             }
@@ -757,6 +761,23 @@ def create_eval_env(config, app, resume_state=None, **kwargs):
                 json.dump(payload, fp, indent=2, default=str)
             os.replace(tmp_path, manifest_path)
             return manifest_path
+
+        def mark_exhausted(self, eval_num: int) -> None:
+            """队列跑完但没到 ``eval_num``:剩下的布局 PhysX 崩掉 / 不稳定,续评也补不上。
+
+            把这件事写进 ``_result.json``(``exhausted`` + ``abandoned_layout_ids``),看板 / 续评据此
+            把这次运行算作结束;不然 ``group_jobs`` 只看 ``eval_time < eval_num`` 会一直报「没评满」,
+            再点评测又没有清单可续,只能整个重评。"""
+            self.eval_result["eval_num"] = int(eval_num)
+            self.eval_result["exhausted"] = True
+            self.eval_result["abandoned_layout_ids"] = sorted(int(s) for s in self.abandoned_seeds)
+            self.eval_result["unstable_nums"] = int(self.unstable_nums)
+            save_json(self.eval_result, os.path.join(self.save_dir, "_result.json"))
+            print(
+                f"[EvalEnv] queue exhausted before eval_num: {self.success_nums + self.fail_nums}/{eval_num} "
+                f"(abandoned={sorted(int(s) for s in self.abandoned_seeds)}, unstable={self.unstable_nums}); "
+                "marking this run as finished."
+            )
 
         def _check_physx_broken_envs(self):
             if not self.physx_monitor_enabled:
@@ -888,6 +909,7 @@ def create_eval_env(config, app, resume_state=None, **kwargs):
             self.eval_result["eval_time"] = eval_time
             if self.variant:
                 self._variant_totals(eval_time)
+            self.eval_result["abandoned_layout_ids"] = sorted(int(s) for s in self.abandoned_seeds)
             save_json(self.eval_result, os.path.join(self.save_dir, "_result.json"))
             # Refresh the resume manifest at the end of every batch so that a
             # downstream SIGABRT (which beats the in-process PhysXFatalError

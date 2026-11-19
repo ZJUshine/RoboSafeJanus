@@ -89,6 +89,14 @@ class SeedManager:
         self._current_batch_seeds = batch
         return batch
 
+    def requeue(self, seed: int) -> None:
+        """把一个因 PhysX 崩溃被放弃的 seed 排到队尾,再给它一次机会。
+
+        只在评测循环里用(``src/eval_client/main.py``):崩掉的那条重试一两次通常能跑出来;
+        重试次数有上限,连续崩掉的最后还是算放弃。"""
+        self.seed_list.append(int(seed))
+        self.ed_idx = len(self.seed_list)
+
     def get_seed_scene_info(self, seed: int) -> Dict[str, Any]:
         seed_info = self.seed_info.get(seed)
         if seed_info is None:

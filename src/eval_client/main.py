@@ -8,6 +8,9 @@ import sys
 from isaaclab.app import AppLauncher
 
 MAX_INPROC_RESTARTS = 3
+# PhysX 崩掉的布局在同一次运行里最多重试几次(排到队列末尾再跑);超过就放弃,
+# 队列跑完仍没到 eval_num 时由 EvalEnv.mark_exhausted 把这次运行标成结束。
+MAX_SEED_RETRIES = 2
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--task_name", type=str)
@@ -162,11 +165,65 @@ def _resume_manifest_path(eval_cfg, run_id):
     )
 
 
+def _resume_state_from_result(eval_cfg, run_id):
+    """Rebuild resume state from ``_resume_<run_id>``'s sibling run dir when the manifest is gone.
+
+    ``main.py`` deletes the manifest after a normal finish, and a run that ran out
+    of usable seeds (PhysX-broken / unstable layouts) finishes "normally" with
+    ``eval_time < eval_num``. Without this fallback the harness can only start a
+    brand-new run and throw away the episodes it already has. ``abandoned_layout_ids``
+    is left empty on purpose: layouts skipped last time get one more attempt.
+    """
+    run_dir = os.path.join(
+        "eval_result",
+        BENCHMARK,
+        eval_cfg["task_name"],
+        eval_cfg["policy_name"],
+        eval_cfg["config_name"],
+        f"{eval_cfg.get('seed', 0)}_{eval_cfg.get('additional_info', '')}",
+        run_id,
+    )
+    result_path = os.path.join(run_dir, "_result.json")
+    if not os.path.exists(result_path):
+        return None
+    try:
+        with open(result_path, encoding="utf-8") as fp:
+            data = json.load(fp)
+    except Exception as e:
+        print(f"[main] failed to load {result_path}: {e}; starting from scratch.")
+        return None
+    details = data.get("details") or {}
+    evaluated = [d for d in details.values() if isinstance(d, dict) and "layout_id" in d]
+    # details 是唯一能对上视频 / 布局的进度,条数以它为准(每个 batch 结束时才会写 _result.json,两者一致)
+    eval_time = len(evaluated)
+    if eval_time <= 0:
+        return None
+    success = sum(1 for d in evaluated if d.get("success"))
+    total_score = sum(float(d.get("score") or 0.0) for d in evaluated)
+    print(f"[main] no resume manifest; rebuilding progress from {result_path} (eval_time={eval_time})")
+    return {
+        "run_id": run_id,
+        "save_dir": run_dir,
+        "task_name": eval_cfg["task_name"],
+        "policy_name": eval_cfg["policy_name"],
+        "config_name": eval_cfg["config_name"],
+        "eval_seed": eval_cfg.get("seed", 0),
+        "additional_info": eval_cfg.get("additional_info", ""),
+        "success_nums": success,
+        "fail_nums": eval_time - success,
+        "total_score": total_score,
+        "details": details,
+        "abandoned_layout_ids": [],
+        "seed_retries": {},
+        "restart_count": 0,
+    }
+
+
 def _load_resume_manifest(eval_cfg, run_id):
     """Return parsed manifest dict, or None if no resume is in progress."""
     path = _resume_manifest_path(eval_cfg, run_id)
     if not os.path.exists(path):
-        return None
+        return _resume_state_from_result(eval_cfg, run_id)
     try:
         with open(path, encoding="utf-8") as fp:
             data = json.load(fp)
@@ -412,10 +469,26 @@ def main():
                 env.seed_manager.eval_step()
 
         if bad_envs is not None:
-            # Abandon broken-env seeds, refill from the seed queue, and
-            # retry this round iff there is at least one real seed left.
+            # Retry broken-env seeds a bounded number of times (queue them at the
+            # tail), then abandon them; refill the current batch from the seed
+            # queue and retry this round iff there is at least one real seed left.
             bad_seeds = env.get_seeds_for_envs(bad_envs)
-            env.abandoned_seeds.update(bad_seeds)
+            requeued, abandoned = [], []
+            for seed in sorted(bad_seeds):
+                count = env.seed_retries.get(int(seed), 0) + 1
+                env.seed_retries[int(seed)] = count
+                if count <= MAX_SEED_RETRIES:
+                    env.seed_manager.requeue(seed)
+                    requeued.append(seed)
+                else:
+                    env.abandoned_seeds.add(seed)
+                    abandoned.append(seed)
+            if requeued:
+                detail = ", ".join(f"{s}:{env.seed_retries[int(s)]}" for s in requeued)
+                print(f"[PhysX] requeue broken seeds={requeued} for retry "
+                      f"(retries {detail}, cap {MAX_SEED_RETRIES})")
+            if abandoned:
+                print(f"[PhysX] abandon seeds={abandoned} after {MAX_SEED_RETRIES} retries")
 
             replacements = env.seed_manager.get_seeds(max_count=len(bad_envs)) or []
             bad_env_set = set(bad_envs)
@@ -430,7 +503,8 @@ def main():
 
             real_remaining = sum(1 for s in env.env_seeds if s is not None)
             print(
-                f"[PhysX] broken envs={bad_envs} -> abandon seeds={sorted(bad_seeds)}; "
+                f"[PhysX] broken envs={bad_envs} -> "
+                f"abandon seeds={abandoned} (retry queued={requeued}); "
                 f"refill from queue={replacements}; new batch={env.env_seeds}; "
                 f"real_remaining={real_remaining}"
             )
@@ -452,6 +526,9 @@ def main():
         env.env_seeds = env.seed_manager.get_seeds(max_count=eval_num - eval_time)
         if env.env_seeds is None:
             print("No more seeds to run, exiting.")
+            # 有结果才标「队列耗尽」:一条都没评出来多半是环境 / 场景本身起不来,留着让它整个重评。
+            if 0 < eval_time < eval_num:
+                env.mark_exhausted(eval_num)
             break
 
         env.close()
