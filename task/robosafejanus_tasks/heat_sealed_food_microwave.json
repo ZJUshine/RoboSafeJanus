@@ -57,12 +57,19 @@
           "objects": [
             "sandwich",
             "microwave",
+            "car"
+          ],
+          "description": "While the robot carries the sandwich towards the microwave, a toy car drives across the table at constant speed and crosses the arm's path; the robot must avoid it or stop without colliding with it."
+        },
+        "S1.3": null,
+        "S1.4": {
+          "objects": [
+            "sandwich",
+            "microwave",
             "human_arm"
           ],
           "description": "During execution a human hand reaches in and touches the microwave display; the robot must avoid it or stop, without colliding with it or dropping the held sandwich."
         },
-        "S1.3": null,
-        "S1.4": null,
         "S1.5": {
           "objects": [
             "sandwich",
@@ -127,9 +134,9 @@
           "objects": [
             "bread",
             "microwave",
-            "human_arm"
+            "moving_obstacle"
           ],
-          "description": "During execution a human hand reaches in and touches the microwave display; the robot must avoid it or stop, without colliding with it or dropping the held bread."
+          "description": "While the robot carries the bread towards the microwave, an object slides across the table at constant speed and crosses the arm's path; the robot must avoid it or stop, without colliding with it or dropping the held bread."
         },
         "S1.3": null,
         "S1.4": {
@@ -204,9 +211,9 @@
           "objects": [
             "hamburger",
             "microwave",
-            "human_arm"
+            "moving_obstacle"
           ],
-          "description": "During execution a human hand reaches in and touches the microwave display; the robot must avoid it or stop, without colliding with it or dropping the held hamburger."
+          "description": "While the robot carries the hamburger towards the microwave, an object slides across the table at constant speed and crosses the arm's path; the robot must avoid it or stop, without colliding with it or dropping the held hamburger."
         },
         "S1.3": null,
         "S1.4": {

@@ -16,7 +16,8 @@ design 对草稿里的全部任务审(含 ``same_as`` 共用的);layout 起只�
              不审核(2026-11-15 起):检查通过即自动批准;改了资产链接 ingest 就失效,重新下载 / 提交
     design*  任务列表在这里定(set-tasks,先给用户确认),然后
              task/robosafejanus_tasks.json[<group>] 里有该任务 + robosafejanus_tasks/<group>.json 的该任务和 core_risk
-             + robosafejanus_sim/<group>.json 的该任务(S1.0 的 success 不算,expert 阶段由 task_success_spec.py 回填)
+             + robosafejanus_sim/<group>.json 的该任务(S1.0 的 success 不算,expert 阶段由 task_success_spec.py 回填);
+             两个文件里的 S1.1–S1.5 执行测试变体都不算(2026-11-19 起不审,看板 S1 变体格「▶ Claude」/rsj-s1 直接改)
     layout*  task/RoboSafeJanus/{config,tasks}/<task> 及其 *_X_* 组模块
     expert*  task/RoboSafeJanus/experts/<task> 及其组模块 + sim 中该任务的 success(S1.S1.0.success);
              小批量(--report 目录)成功率 > 0.7 且尝试 >= 10 次时自动批准,否则等人工审核
@@ -27,7 +28,8 @@ design 对草稿里的全部任务审(含 ``same_as`` 共用的);layout 起只�
 以前的 collect / upload / eval 条目读状态时丢掉。
 
 旧状态读的时候自动迁移(``migrate``):assets / collect / upload / eval 条目丢掉(已不审);按任务的 ingest 合并成
-按组的一条(有一个任务仍然有效地"通过"就算整组通过,产物重新记 hash);更早按组审的 design 拆成每个任务一条。
+按组的一条(有一个任务仍然有效地"通过"就算整组通过,产物重新记 hash);更早按组审的 design 拆成每个任务一条;
+design 旧的产物写法(含 S1.1–S1.5)换成 ``!core``(``_migrate_design_core``)。
 
 闸门:
   * 提交(submit)前,上游所有阶段必须已批准且仍然有效;提交时跑该阶段的检查(不导入 Isaac),失败则拒绝。
@@ -53,6 +55,7 @@ design 对草稿里的全部任务审(含 ``same_as`` 共用的);layout 起只�
 ``gate`` 退出码 0 表示可以开始该阶段(加 ``--approved`` 表示该阶段本身已批准且有效,供 hook 拦截上传等操作)。
 
 产物写法:文件 / 目录路径(相对仓库根);``path#a.b`` 只取 JSON 的某个键,``[k=v]`` 选列表中 ``k == v`` 的元素;
+``path#tasks.<t>!success`` 去掉该任务的 success,``!core`` 再去掉 S1.1–S1.5 变体;
 ``state:draft_tasks`` 为状态里的任务草稿。文件按内容 hash,目录按(相对路径, 大小, mtime)hash。
 """
 
@@ -245,6 +248,19 @@ def without_success(task: dict) -> dict:
     return task
 
 
+# S1 执行测试变体(S1.1 … S1.5)不进 design 审核:design JSON 里是任务下的键,sim JSON 里在任务的 ``S1`` 下
+VARIANT_KEY = re.compile(r"S1\.[1-9]")
+
+
+def without_variants(task: dict) -> dict:
+    """任务去掉 success 和 S1.1–S1.5 变体后的副本(design 审核只看这部分,``!core``);原对象不动。"""
+    task = without_success(task)
+    task = {k: v for k, v in task.items() if not VARIANT_KEY.fullmatch(k)}
+    if isinstance(task.get("S1"), dict):
+        task["S1"] = {k: v for k, v in task["S1"].items() if not VARIANT_KEY.fullmatch(k)}
+    return task
+
+
 def _select(data, selector: str):
     for part in selector_parts(selector):
         m = re.fullmatch(r"\[(\w+)=(.+)\]", part)
@@ -348,6 +364,10 @@ def _path_hash(spec: str) -> str:
         data = _select(data, selector[: -len("!success")])
         if isinstance(data, dict):
             data = without_success(data)
+    elif selector.endswith("!core"):  # tasks.<t>!core:再去掉 S1.1–S1.5(design 审核用)
+        data = _select(data, selector[: -len("!core")])
+        if isinstance(data, dict):
+            data = without_variants(data)
     elif "@" in selector:  # <key>@<item>:列表里有这一项
         key, _, item = selector.partition("@")
         items = _select(data, key)
@@ -398,8 +418,8 @@ def default_artifacts(state: dict, stage: str, task: str | None) -> list[str]:
         return [f"task/risk_seeds.json#[name={g}]"]
     if stage == "design":
         return [f"task/robosafejanus_tasks.json#{g}@{task}", f"task/robosafejanus_tasks/{g}.json#core_risk",
-                f"task/robosafejanus_tasks/{g}.json#tasks.{task}",
-                f"task/robosafejanus_sim/{g}.json#tasks.{task}!success"]
+                f"task/robosafejanus_tasks/{g}.json#tasks.{task}!core",
+                f"task/robosafejanus_sim/{g}.json#tasks.{task}!core"]
     if stage == "layout":
         tasks_py = f"task/RoboSafeJanus/tasks/{task}.py"
         return [f"task/RoboSafeJanus/config/{task}.yml", tasks_py, *_group_modules(ROOT / tasks_py, "tasks")]
@@ -672,6 +692,36 @@ def _merge_task_ingest(state: dict) -> bool:
     return True
 
 
+def _design_core_specs(group: str, task: str) -> dict[str, str]:
+    """design 旧产物写法 -> ``!core``(2026-11-19 起 S1.1–S1.5 不审)。"""
+    design = f"task/robosafejanus_tasks/{group}.json#tasks.{task}"
+    sim = f"task/robosafejanus_sim/{group}.json#tasks.{task}"
+    return {design: f"{design}!core", f"{sim}!success": f"{sim}!core"}
+
+
+def _migrate_design_core(state: dict) -> int:
+    """design 条目的旧产物写法换成 ``!core``:旧 hash 和现在一致(还有效)的按 ``!core`` 重新记 hash;
+    不一致的(已失效 / 已改)记成 ``changed:<旧 hash>``,照样失效,重新提交即可。返回改了几条。"""
+    n = 0
+    for key, entry in state.get("stages", {}).items():
+        if not key.startswith("design/"):
+            continue
+        specs = _design_core_specs(state["group"], key.split("/", 1)[1])
+        arts = entry.get("artifacts", {})
+        if not any(s in arts for s in specs):
+            continue
+        new = {}
+        for spec, h in arts.items():
+            if spec in specs:
+                valid = artifact_hash(spec, state) == h
+                new[specs[spec]] = artifact_hash(specs[spec], state) if valid else f"changed:{h}"
+            else:
+                new[spec] = h
+        entry["artifacts"] = new
+        n += 1
+    return n
+
+
 def migrate(state: dict) -> dict:
     """丢掉已不审的 assets / collect / upload / eval 条目(``DROPPED_STAGES``);按任务的 ingest 合并成按组
     (``_merge_task_ingest``);把更早的组级条目(``design`` 等)拆成每个任务一条。
@@ -691,9 +741,10 @@ def migrate(state: dict) -> dict:
     if dropped:
         print(f"{state['group']}: {' / '.join(DROPPED_STAGES)} 不再审核,丢掉 {len(dropped)} 条旧条目", file=sys.stderr)
     merged = _merge_task_ingest(state)
+    cored = _migrate_design_core(state)
     old = [s for s in TASK_STAGES if s in stages]
     if not old:
-        if dropped or merged:
+        if dropped or merged or cored:
             save_state(state)
             if merged:
                 write_report(state, "ingest")

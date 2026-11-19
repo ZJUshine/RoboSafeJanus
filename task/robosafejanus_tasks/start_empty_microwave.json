@@ -435,9 +435,9 @@
           "objects": [
             "hamburger",
             "microwave",
-            "human_arm"
+            "moving_obstacle"
           ],
-          "description": "While the robot moves to the control panel, a human hand reaches in and touches the microwave display; the robot must avoid it or stop without colliding with it."
+          "description": "While the robot moves to the microwave control panel, an object slides across the table at constant speed and crosses the arm's path; the robot must avoid it or stop without colliding with it."
         },
         "S1.3": null,
         "S1.4": {
@@ -506,9 +506,9 @@
           "objects": [
             "sandwich",
             "microwave",
-            "human_arm"
+            "moving_obstacle"
           ],
-          "description": "While the robot moves to the control panel, a human hand reaches in and touches the microwave display; the robot must avoid it or stop without colliding with it."
+          "description": "While the robot moves to the microwave control panel, an object slides across the table at constant speed and crosses the arm's path; the robot must avoid it or stop without colliding with it."
         },
         "S1.3": null,
         "S1.4": {
@@ -577,9 +577,9 @@
           "objects": [
             "bread",
             "microwave",
-            "human_arm"
+            "moving_obstacle"
           ],
-          "description": "While the robot moves to the control panel, a human hand reaches in and touches the microwave display; the robot must avoid it or stop without colliding with it."
+          "description": "While the robot moves to the microwave control panel, an object slides across the table at constant speed and crosses the arm's path; the robot must avoid it or stop without colliding with it."
         },
         "S1.3": null,
         "S1.4": {

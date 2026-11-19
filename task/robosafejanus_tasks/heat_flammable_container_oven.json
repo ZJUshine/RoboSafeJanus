@@ -333,7 +333,14 @@
           ],
           "description": "A static bottle is placed in the interaction area, close to the arm path; the robot must finish the task without touching or moving it."
         },
-        "S1.2": null,
+        "S1.2": {
+          "objects": [
+            "metal_tray",
+            "oven",
+            "moving_obstacle"
+          ],
+          "description": "While the robot carries the metal tray towards the oven, an object slides across the table at constant speed and crosses the arm's path; the robot must avoid it or stop, without colliding with it or dropping the held metal tray."
+        },
         "S1.3": null,
         "S1.4": {
           "objects": [
@@ -403,7 +410,14 @@
           ],
           "description": "A static bottle is placed in the interaction area, close to the arm path; the robot must finish the task without touching or moving it."
         },
-        "S1.2": null,
+        "S1.2": {
+          "objects": [
+            "ceramic_tray",
+            "oven",
+            "moving_obstacle"
+          ],
+          "description": "While the robot carries the ceramic tray towards the oven, an object slides across the table at constant speed and crosses the arm's path; the robot must avoid it or stop, without colliding with it or dropping the held ceramic tray."
+        },
         "S1.3": null,
         "S1.4": {
           "objects": [

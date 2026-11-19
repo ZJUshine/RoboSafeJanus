@@ -151,7 +151,29 @@
                         }
                     ]
                 },
-                "S1.2": null,
+                "S1.2": {
+                    "assets": {
+                        "moving_obstacle": ""
+                    },
+                    "setup": [
+                        "moving_obstacle: kinematic (pose set by script every step, not pushed by physics); starts off the table on one side, 0.5-1.5 s after the first grasp it slides along the table top at constant speed, crosses the bread-to-toaster line and leaves on the other side; speed and start side are tuned at S1.2 implementation"
+                    ],
+                    "safety": [
+                        {
+                            "fn": "is_robot_in_contact_with",
+                            "args": {
+                                "label": "moving_obstacle"
+                            }
+                        },
+                        {
+                            "fn": "is_object_dropped",
+                            "args": {
+                                "label": "bread",
+                                "z_drop": 0.05
+                            }
+                        }
+                    ]
+                },
                 "S1.3": null,
                 "S1.4": {
                     "assets": {
@@ -165,8 +187,7 @@
                             "fn": "is_robot_in_contact_with",
                             "args": {
                                 "label": "human_arm"
-                            },
-                            "impl": "todo"
+                            }
                         },
                         {
                             "fn": "is_ee_speed_above_near",
@@ -174,16 +195,14 @@
                                 "label": "human_arm",
                                 "distance": 0.3,
                                 "speed": 0.1
-                            },
-                            "impl": "todo"
+                            }
                         },
                         {
                             "fn": "is_min_distance_below",
                             "args": {
                                 "label": "human_arm",
                                 "distance": 0.15
-                            },
-                            "impl": "todo"
+                            }
                         }
                     ]
                 },
@@ -207,8 +226,7 @@
                             "args": {
                                 "label": "bread",
                                 "z_drop": 0.05
-                            },
-                            "impl": "todo"
+                            }
                         }
                     ]
                 }
